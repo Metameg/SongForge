@@ -19,25 +19,31 @@ app = Flask(__name__)
 JOBS = {}
 JOB_MAPPING = {}
 
+TOTAL_COST = 0.0
+COST_LOCK = threading.Lock()
+
 MAX_CONCURRENT_JOBS = 5
 job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
 
 
 def process_job(job_id, text, webhook_url):
     with job_semaphore:  # ⬅️ blocks if 5 jobs already running
-        #     JOBS[job_id] = "creating_music"
-        #     sw = SongWriter()
-        #     lyrics = sw.create_lyrics(text)
-        #     conversion_ids = sw.create_music(lyrics, webhook_url)
-        #     for conv_id in conversion_ids:
-        #         JOB_MAPPING[conv_id] = job_id
+        JOBS[job_id] = "creating_music"
+        sw = SongWriter()
+        lyrics = sw.create_lyrics(text)
+        conversion_ids = sw.create_music(lyrics, webhook_url)
+        for conv_id in conversion_ids:
+            JOB_MAPPING[conv_id] = job_id
 
-        JOBS[job_id] = "creating_music"  # status update
-        time.sleep(random.choice(range(5, 10)))  # simulate work
-        JOBS[job_id] = "complete"
+        # global TOTAL_COST
+        # JOBS[job_id] = "creating_music"  # status update
+        # time.sleep(random.choice(range(5, 10)))  # simulate work
+        # TOTAL_COST += 1.00
+        # JOBS[job_id] = "complete"
 
 
 def fetch_music_results(job_id, data):
+    global TOTAL_COST
     headers = {"Authorization": SongWriter().musicgpt_key}
 
     # retrieve first part
@@ -49,6 +55,12 @@ def fetch_music_results(job_id, data):
     url2 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_2']}&task_id={data['task_id']}"
     response2 = requests.get(url2, headers=headers)
     result2 = response2.json()
+
+    # ---- accumulate cost safely ----
+    cost = float(result1.get("conversion_cost", 0))
+
+    with COST_LOCK:
+        TOTAL_COST += cost
 
     # aggregate results
     JOBS[job_id] = {"status": "complete", "music_results": [result1, result2]}
@@ -76,6 +88,7 @@ def start():
         threading.Thread(
             target=process_job, args=(job_id, text, webhook_url), daemon=True
         ).start()
+        break
 
     return jsonify({"job_ids": job_ids})
 
@@ -83,6 +96,11 @@ def start():
 @app.route("/status", methods=["GET"])
 def status():
     return jsonify(JOBS)
+
+
+@app.route("/cost", methods=["GET"])
+def cost():
+    return jsonify({"total_cost": round(TOTAL_COST, 4)})
 
 
 @app.route("/webhook", methods=["POST"])

@@ -22,11 +22,29 @@
         }
         .done { color: green; font-size: 20px; margin-left: 10px; display: none; }
         .status-text { margin-left: 10px; font-weight: bold; }
+
+
+        #cost-display {
+          position: fixed;
+          top: 15px;
+          right: 20px;
+          font-weight: bold;
+          background: #111;
+          color: #0f0;
+          padding: 8px 12px;
+          border-radius: 6px;
+        }
+
     </style>
 </head>
 <body>
 
 <h2>Parallel Music Jobs</h2>
+
+<div id="cost-display">
+  Total cost: $0.00
+</div>
+
 <button id="start">Start</button>
 
 <div id="jobs"></div>
@@ -102,8 +120,16 @@ async function checkStatus() {
             };
           completedCount+=1
         }
+    }
 
+    // fetch running cost
+    const costRes = await fetch("/cost");
+    const costData = await costRes.json();
+    document.getElementById("cost-display").innerText =
+        `Total cost: $${costData.total_cost.toFixed(2)}`;
 
+    if (completedCount === Object.keys(jobs).length && completedCount > 0) {
+        downloadAllBtn.disabled = false;
     }
 
    // Enable "Download All" only if all jobs are complete
