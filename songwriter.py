@@ -1,7 +1,6 @@
 import requests
 from dotenv import load_dotenv
 import os
-from pprint import pprint
 from openai import OpenAI
 
 
@@ -39,13 +38,14 @@ class SongWriter:
 
         return response.output_text
 
-    def create_music(self, lyrics):
+    def create_music(self, lyrics, webhook_url):
         payload = {
             "prompt": "Create a soulful song that is very catchy and empahsises an incredible voice that compliments a bluesy riff",
             "music_style": "blues rap 1960s",
             "lyrics": lyrics,
             "make_instrumental": False,
             "vocal_only": False,
+            "webhook_url": webhook_url,
         }
         headers = {
             "Authorization": self.musicgpt_key,
@@ -53,18 +53,22 @@ class SongWriter:
         }
 
         response = requests.post(self.music_url, json=payload, headers=headers)
-
-        print(response.text)
         data = response.json()
 
-        headers = {"Authorization": self.musicgpt_key}
-        url1 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_1']}&task_id={data['task_id']}"
-        response1 = requests.get(url1, headers=headers)
+        # extract the conversion IDs that will be in the webhook later
+        conversion_ids = [data["conversion_id_1"], data["conversion_id_2"]]
+        return conversion_ids
 
-        url2 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_2']}&task_id={data['task_id']}"
-        response2 = requests.get(url2, headers=headers)
-
-        return [response1.text, response2.text]
+        # data = response.json()
+        #
+        # headers = {"Authorization": self.musicgpt_key}
+        # url1 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_1']}&task_id={data['task_id']}"
+        # response1 = requests.get(url1, headers=headers)
+        #
+        # url2 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_2']}&task_id={data['task_id']}"
+        # response2 = requests.get(url2, headers=headers)
+        #
+        # return [response1.text, response2.text]
 
 
 if __name__ == "__main__":
@@ -121,5 +125,5 @@ if __name__ == "__main__":
             New-Jersey, Pennsylvania, Delaware, Maryland, Virginia, North-Carolina, South-Carolina and Georgia.
             The Stile of this confederacy shall be "The United States of America"."""
 
-    lyrics = sw.create_lyrics(text)
-    sw.create_music(lyrics)
+    # lyrics = sw.create_lyrics(text)
+    # sw.create_music(lyrics)

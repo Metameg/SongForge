@@ -1,88 +1,121 @@
-
+<!DOCTYPE h
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Webhook Demo</title>
+    <title>Parallel Music Jobs</title>
     <style>
-        body {
-            font-family: sans-serif;
-            text-align: center;
-            margin-top: 80px;
-        }
+        body { font-family: sans-serif; margin: 40px; }
+        button { padding: 10px 16px; font-size: 16px; }
 
-        button {
-            padding: 12px 20px;
-            font-size: 16px;
-            cursor: pointer;
-        }
-
-        #loader {
-            width: 200px;
+        .job { margin: 15px 0; }
+        .label { margin-bottom: 5px; }
+        .bar-container {
+            width: 300px;
             height: 10px;
             background: #eee;
-            margin: 20px auto;
-            display: none;
         }
-
-        #bar {
-            width: 0%;
+        .bar {
             height: 100%;
+            width: 0%;
             background: #3498db;
             transition: width 0.3s;
         }
-
-        #check {
-            font-size: 48px;
-            color: green;
-            display: none;
-        }
+        .done { color: green; font-size: 20px; margin-left: 10px; display: none; }
+        .status-text { margin-left: 10px; font-weight: bold; }
     </style>
 </head>
 <body>
 
-<h1>Webhook Test</h1>
+<h2>Parallel Music Jobs</h2>
+<button id="start">Start</button>
 
-<button id="startBtn">Start</button>
+<div id="jobs"></div>
 
-<div id="loader">
-    <div id="bar"></div>
-</div>
-
-<div id="check">✔</div>
+<button id="download-all">Download All</button>
 
 <script>
-    const startBtn = document.getElementById("startBtn");
-    const loader = document.getElementById("loader");
-    const bar = document.getElementById("bar");
-    const check = document.getElementById("check");
+const jobsDiv = document.getElementById("jobs");
+let poller;
+const downloadAllBtn = document.getElementById("download-all");
+downloadAllBtn.disabled = true;
 
-    let pollInterval;
+document.getElementById("start").onclick = async () => {
+    jobsDiv.innerHTML = "";
 
-    startBtn.onclick = async () => {
-        startBtn.disabled = true;
-        loader.style.display = "block";
-        bar.style.width = "30%";
+    const res = await fetch("/start", { method: "POST" });
+    const data = await res.json();
 
-        await fetch("/start", { method: "POST" });
+    data.job_ids.forEach((jobId, idx) => {
+        const el = document.createElement("div");
+        el.className = "job";
+        el.innerHTML = `
+            <div class="label">Job ${idx+1} of ${data.job_ids.length}</div>
+            <div class="bar-container">
+                <div class="bar" id="bar-${jobId}"></div>
+            </div>
+            <span class="status-text" id="status-${jobId}">pending</span>
+            <span class="done" id="done-${jobId}">✔ Success</span>
 
-        pollInterval = setInterval(checkStatus, 1000);
-    };
+            <button class="download-btn" id="download-${jobId}" style="display:none;">Download</button>
+        `;
+        jobsDiv.appendChild(el); });
 
-    async function checkStatus() {
-        const res = await fetch("/status");
-        const data = await res.json();
+    // start polling
+    poller = setInterval(checkStatus, 1000);
+};
 
-        if (data.status === "processing") {
-            bar.style.width = "70%";
+async function checkStatus() {
+    const res = await fetch("/status");
+    const jobs = await res.json();
+
+    let completedCount = 0;
+
+    for (const [jobId, info] of Object.entries(jobs)) {
+        const bar = document.getElementById(`bar-${jobId}`);
+        const statusText = document.getElementById(`status-${jobId}`);
+        const done = document.getElementById(`done-${jobId}`);
+
+        let status = "pending";
+        if (typeof info === "string") {
+            // for old simple statuses
+            status = info;
+        } else if (info.status) {
+            status = info.status;
         }
 
-        if (data.status === "complete") {
-            clearInterval(pollInterval);
-            loader.style.display = "none";
-            check.style.display = "block";
+        // Update status text
+        statusText.innerText = status;
+
+        // Update progress bar
+        if (status === "pending") {
+            bar.style.width = "0%";
+        } else if (status === "creating_music") {
+            bar.style.width = "50%";
+        } 
+        else if (status === "complete") {
+            bar.style.width = "100%";
+            done.style.display = "inline";
+            const downloadBtn = document.getElementById(`download-${jobId}`);
+            downloadBtn.style.display = "inline";
+            downloadBtn.onclick = () => {
+                window.location.href = `/download/${jobId}`;
+            };
+          completedCount+=1
         }
+
+
     }
+
+   // Enable "Download All" only if all jobs are complete
+    if (completedCount === Object.keys(jobs).length && completedCount > 0) {
+        downloadAllBtn.disabled = false;
+        clearInterval(poller)
+    } else {
+        downloadAllBtn.disabled = true;
+    }
+}
 </script>
 
 </body>
 </html>
+    

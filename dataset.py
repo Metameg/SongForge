@@ -1,7 +1,5 @@
 import pandas as pd
-from pprint import pprint
 import requests
-from songwriter import SongWriter
 
 
 class BibleDataset:
