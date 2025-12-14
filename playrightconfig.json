@@ -1,0 +1,14 @@
+
+{
+    "include": ["."],
+    "exclude": ["**/node_modules", "**/__pycache__"],
+    "venvPath": "./venv", // Adjust if your venv is named something else
+    "venv": "venv",
+    "executionEnvironments": [
+        {
+            "root": ".",
+            "pythonVersion": "3.11", // Adjust to your Python version
+            "extraPaths": []
+        }
+    ]
+}

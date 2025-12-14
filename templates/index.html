@@ -1,0 +1,88 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Webhook Demo</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            text-align: center;
+            margin-top: 80px;
+        }
+
+        button {
+            padding: 12px 20px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+        #loader {
+            width: 200px;
+            height: 10px;
+            background: #eee;
+            margin: 20px auto;
+            display: none;
+        }
+
+        #bar {
+            width: 0%;
+            height: 100%;
+            background: #3498db;
+            transition: width 0.3s;
+        }
+
+        #check {
+            font-size: 48px;
+            color: green;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Webhook Test</h1>
+
+<button id="startBtn">Start</button>
+
+<div id="loader">
+    <div id="bar"></div>
+</div>
+
+<div id="check">✔</div>
+
+<script>
+    const startBtn = document.getElementById("startBtn");
+    const loader = document.getElementById("loader");
+    const bar = document.getElementById("bar");
+    const check = document.getElementById("check");
+
+    let pollInterval;
+
+    startBtn.onclick = async () => {
+        startBtn.disabled = true;
+        loader.style.display = "block";
+        bar.style.width = "30%";
+
+        await fetch("/start", { method: "POST" });
+
+        pollInterval = setInterval(checkStatus, 1000);
+    };
+
+    async function checkStatus() {
+        const res = await fetch("/status");
+        const data = await res.json();
+
+        if (data.status === "processing") {
+            bar.style.width = "70%";
+        }
+
+        if (data.status === "complete") {
+            clearInterval(pollInterval);
+            loader.style.display = "none";
+            check.style.display = "block";
+        }
+    }
+</script>
+
+</body>
+</html>
