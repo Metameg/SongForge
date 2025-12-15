@@ -55,6 +55,7 @@
 const jobsDiv = document.getElementById("jobs");
 let poller;
 const downloadAllBtn = document.getElementById("download-all");
+const notifiedFailures = new Set();
 downloadAllBtn.disabled = true;
 
 document.getElementById("start").onclick = async () => {
@@ -73,7 +74,7 @@ document.getElementById("start").onclick = async () => {
             </div>
             <span class="status-text" id="status-${jobId}">pending</span>
             <span class="done" id="done-${jobId}">✔ Success</span>
-
+            <div class="job-error" id="error-${jobId}" style="display:none;"></div>
             <button class="download-btn" id="download-${jobId}" style="display:none;">Download</button>
         `;
         jobsDiv.appendChild(el); });
@@ -119,6 +120,22 @@ async function checkStatus() {
                 window.location.href = `/download/${jobId}`;
             };
           completedCount+=1
+        }
+        else if (status === "failed") {
+            bar.style.width = "100%";
+            bar.style.backgroundColor = "#e53935"; // red
+            statusText.innerText = "failed ❌";
+
+            if (errorEl && errorMsg) {
+                errorEl.innerText = errorMsg;
+                errorEl.style.display = "block";
+            }
+
+            // Notify only once
+            if (!notifiedFailures.has(jobId)) {
+                notifiedFailures.add(jobId);
+                console.error(`Job ${jobId} failed:`, errorMsg);
+            }
         }
     }
 

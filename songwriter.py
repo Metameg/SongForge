@@ -37,6 +37,9 @@ class SongWriter:
             ],
         )
 
+        if not response.output_text:
+            raise RuntimeError("OpenAI returned empty lyrics")
+
         return response.output_text
 
     def create_music(self, lyrics, webhook_url):
@@ -52,25 +55,20 @@ class SongWriter:
             "Authorization": self.musicgpt_key,
             "Content-Type": "application/json",
         }
+        try:
+            response = requests.post(self.music_url, json=payload, headers=headers)
+        except requests.RequestException as e:
+            return "", 0.0, f"Music API request failed: {e}"
 
-        response = requests.post(self.music_url, json=payload, headers=headers)
+        # Non-200 response
+        if response.status_code != 200:
+            return "", 0.0, f"Music API HTTP {response.status_code}: {response.text}"
+
         data = response.json()
-        pprint(data)
 
         # extract the conversion IDs that will be in the webhook later
         conversion_ids = [data["conversion_id_1"], data["conversion_id_2"]]
-        return conversion_ids, data["credit_estimate"]
-
-        # data = response.json()
-        #
-        # headers = {"Authorization": self.musicgpt_key}
-        # url1 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_1']}&task_id={data['task_id']}"
-        # response1 = requests.get(url1, headers=headers)
-        #
-        # url2 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_2']}&task_id={data['task_id']}"
-        # response2 = requests.get(url2, headers=headers)
-        #
-        # return [response1.text, response2.text]
+        return conversion_ids, data["credit_estimate"], None
 
 
 if __name__ == "__main__":

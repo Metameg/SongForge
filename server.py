@@ -10,9 +10,10 @@ from songwriter import SongWriter
 from dataset import BibleDataset
 from io import BytesIO
 from zipfile import ZipFile
+from pathlib import Path
 
-GENESIS_FOLDER = "Genesis"
-os.makedirs(GENESIS_FOLDER, exist_ok=True)
+BOOK_DIR = "Genesis"
+os.makedirs(BOOK_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
@@ -23,26 +24,36 @@ TOTAL_COST = 0.0
 COST_LOCK = threading.Lock()
 CONVERSIONS_PER_CALL = 2
 MAX_CONCURRENT_JOBS = 5
-STARTING_CHAPTER = 9
+STARTING_CHAPTER = 10
 job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
 
 
 def process_job(job_id, text, webhook_url):
     global TOTAL_COST
-    with job_semaphore:  # ⬅️ blocks if 5 jobs already running
-        JOBS[job_id] = {
-            "status": "creating_music",
-            "urls": [],
-            "album_cover": None,
-        }
+    job_semaphore.acquire()
+    # with job_semaphore:  # ⬅️ blocks if 5 jobs already running
+    JOBS[job_id] = {
+        "status": "creating_music",
+        "urls": [],
+        "album_cover": None,
+    }
+    try:
         sw = SongWriter()
         lyrics = sw.create_lyrics(text)
-        conversion_ids, cost = sw.create_music(lyrics, webhook_url)
+        conversion_ids, cost, error = sw.create_music(lyrics, webhook_url)
+
+        if error:
+            fail_job(job_id, error)
+            return
+
         for conv_id in conversion_ids:
             JOB_MAPPING[conv_id] = job_id
 
         with COST_LOCK:
             TOTAL_COST += cost * CONVERSIONS_PER_CALL
+
+    except Exception as e:
+        fail_job(job_id, f"Unhandled exception: {e}")
 
 
 def build_job_data(job_id, conversion_path, album_cover_path):
@@ -61,6 +72,46 @@ def build_job_data(job_id, conversion_path, album_cover_path):
         )
         if len(JOBS[job_id]["urls"]) == CONVERSIONS_PER_CALL:
             JOBS[job_id]["status"] = "complete"
+            save_job(job_id)
+            job_semaphore.release()
+
+
+def fail_job(job_id, reason):
+    job = JOBS.get(job_id)
+    if not job:
+        return
+
+    if job["status"] in ("complete", "failed"):
+        return  # prevent double release
+
+    job["status"] = "failed"
+    job["error"] = reason
+
+    print(f"[JOB FAILED] {job_id}: {reason}")
+
+    # 🔓 VERY IMPORTANT
+    job_semaphore.release()
+
+
+def save_job(job_id):
+    job = JOBS[job_id]
+    chapter_dir = Path(BOOK_DIR) / f"chapter{job_id - 1}"
+    chapter_dir.mkdir(parents=True, exist_ok=True)
+
+    # save tracks
+    for idx, url in enumerate(job.get("urls", []), start=1):
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+
+        track_path = chapter_dir / f"track{idx}.mp3"
+        track_path.write_bytes(r.content)
+
+    # save album cover
+    album_cover_url = job.get("album_cover")
+    if album_cover_url:
+        r = requests.get(album_cover_url, timeout=30)
+        r.raise_for_status()
+        (chapter_dir / "album_cover.jpg").write_bytes(r.content)
 
 
 @app.route("/", methods=["GET"])
@@ -118,55 +169,38 @@ def webhook():
 
 
 @app.route("/download/<int:job_id>")
-def download_job(job_id):
-    job = JOBS.get(job_id)
-    if not job or job.get("status") != "complete":
-        return {"error": "Job not complete or not found"}, 404
+def download(job_id):
+    chapter_dir = Path(BOOK_DIR) / f"chapter{job_id - 1}"
 
-    # urls should have two items per job
-    urls = job.get("urls", [])
-    album_cover_url = job.get("album_cover")
-    if not urls:
-        return {"error": "Music results not ready"}, 400
+    if not chapter_dir.exists():
+        return {"error": "Files not found"}, 404
 
-    print("JOB", job)
-    # create a zip in memory
     zip_buffer = BytesIO()
     with ZipFile(zip_buffer, "w") as zip_file:
-        for idx, url in enumerate(urls, start=1):
-            r = requests.get(url)
-            filename = f"chapter{job_id - 1}_track{idx}.mp3"
-            zip_file.writestr(filename, r.content)
-
-        zip_file.writestr("album_cover.jpg", requests.get(album_cover_url).content)
+        for file in chapter_dir.iterdir():
+            zip_file.write(file, arcname=file.name)
 
     zip_buffer.seek(0)
     return send_file(
         zip_buffer,
         mimetype="application/zip",
-        download_name=f"Genesis_job{job_id}.zip",
+        download_name=f"Genesis_chapter{job_id - 1}.zip",
         as_attachment=True,
     )
 
 
 @app.route("/download_all")
 def download_all():
-    # collect all completed jobs
-    completed_jobs = {
-        job_id: job for job_id, job in JOBS.items() if job.get("status") == "complete"
-    }
-    if not completed_jobs:
-        return {"error": "No completed jobs"}, 404
+    genesis_dir = Path("Genesis")
+
+    if not genesis_dir.exists():
+        return {"error": "No Genesis folder"}, 404
 
     zip_buffer = BytesIO()
     with ZipFile(zip_buffer, "w") as zip_file:
-        for job_id, job in completed_jobs.items():
-            urls = job.get("urls", [])
-            for idx, url in enumerate(urls, start=1):
-                r = requests.get(url)
-                # store in folder per job inside zip
-                filename = f"Genesis/chapter{job_id - 1}/track{idx}.mp3"
-                zip_file.writestr(filename, r.content)
+        for file in genesis_dir.rglob("*"):
+            if file.is_file():
+                zip_file.write(file, arcname=file.relative_to(genesis_dir))
 
     zip_buffer.seek(0)
     return send_file(
