@@ -1,5 +1,5 @@
 import pandas as pd
-import requests
+from pprint import pprint
 
 
 class BibleDataset:
@@ -13,9 +13,7 @@ class BibleDataset:
             t = str(row["t"])
 
             if b not in self.books:
-                self.books[b] = {"full_text": ""}
-
-            self.books[b]["full_text"] += t + " "
+                self.books[b] = {}
 
             if c not in self.books[b]:
                 self.books[b][c] = ""
@@ -25,15 +23,4 @@ class BibleDataset:
 
 if __name__ == "__main__":
     data = BibleDataset()
-    # sw = SongWriter()
-    # lyrics = sw.create_lyrics(data.books[1][1])
-
-    # Send to webhook
-    requests.post(
-        "https://schedules-transactions-began-merely.trycloudflare.com",
-        json={"status": "complete", "lyrics": "test lyrics"},
-        timeout=5,
-    )
-
-    # responses = sw.create_music(lyrics)
-    # print(responses[0] + "\n\n" + responses[1])
+    pprint(data.books[1].keys())

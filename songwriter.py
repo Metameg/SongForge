@@ -1,4 +1,5 @@
 import requests
+from pprint import pprint
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
@@ -54,10 +55,11 @@ class SongWriter:
 
         response = requests.post(self.music_url, json=payload, headers=headers)
         data = response.json()
+        pprint(data)
 
         # extract the conversion IDs that will be in the webhook later
         conversion_ids = [data["conversion_id_1"], data["conversion_id_2"]]
-        return conversion_ids
+        return conversion_ids, data["credit_estimate"]
 
         # data = response.json()
         #

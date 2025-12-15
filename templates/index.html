@@ -79,7 +79,7 @@ document.getElementById("start").onclick = async () => {
         jobsDiv.appendChild(el); });
 
     // start polling
-    poller = setInterval(checkStatus, 1000);
+    poller = setInterval(checkStatus, 5000);
 };
 
 async function checkStatus() {
