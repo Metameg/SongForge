@@ -23,6 +23,7 @@ TOTAL_COST = 0.0
 COST_LOCK = threading.Lock()
 CONVERSIONS_PER_CALL = 2
 MAX_CONCURRENT_JOBS = 5
+STARTING_CHAPTER = 9
 job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
 
 
@@ -43,27 +44,8 @@ def process_job(job_id, text, webhook_url):
         with COST_LOCK:
             TOTAL_COST += cost * CONVERSIONS_PER_CALL
 
-        # global TOTAL_COST
-        # JOBS[job_id] = "creating_music"  # status update
-        # time.sleep(random.choice(range(5, 10)))  # simulate work
-        # TOTAL_COST += 1.00
-        # JOBS[job_id] = "complete"
-
 
 def build_job_data(job_id, conversion_path, album_cover_path):
-    # headers = {"Authorization": SongWriter().musicgpt_key}
-    # print("made it to fetch")
-
-    # retrieve first part
-    # url = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id']}&task_id={data['task_id']}"
-    # response = requests.get(url, headers=headers)
-    # result = response.json()
-
-    # retrieve second part
-    # url2 = f"https://api.musicgpt.com/api/public/v1/byId?conversionType=MUSIC_AI&conversion_id={data['conversion_id_2']}&task_id={data['task_id']}"
-    # response2 = requests.get(url2, headers=headers)
-    # result2 = response2.json()
-
     # aggregate results
     if job_id not in JOBS:
         JOBS[job_id] = {
@@ -80,9 +62,6 @@ def build_job_data(job_id, conversion_path, album_cover_path):
         if len(JOBS[job_id]["urls"]) == CONVERSIONS_PER_CALL:
             JOBS[job_id]["status"] = "complete"
 
-            print("RESULTS MUSIX:")
-            pprint(JOBS[job_id])
-
 
 @app.route("/", methods=["GET"])
 def index():
@@ -95,19 +74,10 @@ def start():
     webhook_url = request.host_url.rstrip("/") + "/webhook"
 
     data = BibleDataset()
-    job_id = 0
+    job_id = STARTING_CHAPTER
     job_ids = []
     for chapter, text in data.books[1].items():
-        if (
-            chapter == 2
-            or chapter == 1
-            or chapter == 3
-            or chapter == 4
-            or chapter == 5
-            or chapter == 6
-            or chapter == 7
-            or chapter == 8
-        ):
+        if chapter in range(1, STARTING_CHAPTER):
             continue
         job_id += 1
 
@@ -118,7 +88,6 @@ def start():
         threading.Thread(
             target=process_job, args=(job_id, text, webhook_url), daemon=True
         ).start()
-        break
 
     return jsonify({"job_ids": job_ids})
 
@@ -137,9 +106,6 @@ def cost():
 def webhook():
     data = request.json
 
-    print("WEBHOOK_DATA:")
-    pprint(data)
-
     # Step 1: mark job as complete in JOBS dict (or "processing_music")
     if "conversion_path" in data:
         conversion_id = data.get("conversion_id")
@@ -147,12 +113,6 @@ def webhook():
         conversion_id_path = data.get("conversion_path")
         job_id = JOB_MAPPING.get(conversion_id)
         build_job_data(job_id, conversion_id_path, album_cover_path)
-        # Step 2: fetch MusicGPT results
-        # threading.Thread(
-        #     target=build_job_data,
-        #     args=(job_id, conversion_id_path, album_cover_path),
-        #     daemon=True,
-        # ).start()
 
     return {"ok": True}
 
@@ -175,7 +135,7 @@ def download_job(job_id):
     with ZipFile(zip_buffer, "w") as zip_file:
         for idx, url in enumerate(urls, start=1):
             r = requests.get(url)
-            filename = f"chapter{job_id}_track{idx}.mp3"
+            filename = f"chapter{job_id - 1}_track{idx}.mp3"
             zip_file.writestr(filename, r.content)
 
         zip_file.writestr("album_cover.jpg", requests.get(album_cover_url).content)
@@ -202,13 +162,10 @@ def download_all():
     with ZipFile(zip_buffer, "w") as zip_file:
         for job_id, job in completed_jobs.items():
             urls = job.get("urls", [])
-            for idx, data in enumerate(urls, start=1):
-                conversion_url = data.get("audio_url")  # replace with correct field
-                if not conversion_url:
-                    continue
-                r = requests.get(conversion_url)
+            for idx, url in enumerate(urls, start=1):
+                r = requests.get(url)
                 # store in folder per job inside zip
-                filename = f"Genesis/job{job_id}/track{idx}.mp3"
+                filename = f"Genesis/chapter{job_id - 1}/track{idx}.mp3"
                 zip_file.writestr(filename, r.content)
 
     zip_buffer.seek(0)
