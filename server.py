@@ -30,13 +30,10 @@ job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
 
 def process_job(job_id, text, webhook_url):
     global TOTAL_COST
-    job_semaphore.acquire()
-    # with job_semaphore:  # ⬅️ blocks if 5 jobs already running
-    JOBS[job_id] = {
-        "status": "creating_music",
-        "urls": [],
-        "album_cover": None,
-    }
+    job_semaphore.acquire()  # with job_semaphore:  # ⬅️ blocks if 5 jobs already running
+
+    JOBS[job_id]["status"] = "creating_music"
+
     try:
         sw = SongWriter()
         lyrics = sw.create_lyrics(text)
@@ -56,24 +53,24 @@ def process_job(job_id, text, webhook_url):
         fail_job(job_id, f"Unhandled exception: {e}")
 
 
-def build_job_data(job_id, conversion_path, album_cover_path):
-    # aggregate results
-    if job_id not in JOBS:
-        JOBS[job_id] = {
-            "status": "creating_music",
-            "urls": [conversion_path],
-            "album_cover": album_cover_path,
-        }
-    else:
-        JOBS[job_id]["urls"].append(conversion_path)
-
-        JOBS[job_id]["album_cover"] = (
-            album_cover_path  # mark complete only when you actually have both results
-        )
-        if len(JOBS[job_id]["urls"]) == CONVERSIONS_PER_CALL:
-            JOBS[job_id]["status"] = "complete"
-            save_job(job_id)
-            job_semaphore.release()
+# def build_job_data(job_id, conversion_path, album_cover_path):
+#     # aggregate results
+#     if job_id not in JOBS:
+#         JOBS[job_id] = {
+#             "status": "creating_music",
+#             "urls": [conversion_path],
+#             "album_cover": album_cover_path,
+#         }
+#     else:
+#         JOBS[job_id]["urls"].append(conversion_path)
+#
+#         JOBS[job_id]["album_cover"] = (
+#             album_cover_path  # mark complete only when you actually have both results
+#         )
+#         if len(JOBS[job_id]["urls"]) == CONVERSIONS_PER_CALL:
+#             JOBS[job_id]["status"] = "complete"
+#             save_job(job_id)
+#             job_semaphore.release()
 
 
 def fail_job(job_id, reason):
@@ -114,6 +111,7 @@ def save_job(job_id):
         (chapter_dir / "album_cover.jpg").write_bytes(r.content)
 
 
+# ---- ENDPOINTS ------
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
@@ -132,7 +130,12 @@ def start():
             continue
         job_id += 1
 
-        JOBS[job_id] = {"status": "pending", "urls": [], "album_cover": None}
+        JOBS[job_id] = {
+            "status": "pending",
+            "urls": [],
+            "album_cover": None,
+            "error": None,
+        }
 
         job_ids.append(job_id)
 
@@ -161,9 +164,18 @@ def webhook():
     if "conversion_path" in data:
         conversion_id = data.get("conversion_id")
         album_cover_path = data.get("album_cover_path")
-        conversion_id_path = data.get("conversion_path")
+        conversion_path = data.get("conversion_path")
         job_id = JOB_MAPPING.get(conversion_id)
-        build_job_data(job_id, conversion_id_path, album_cover_path)
+        job = JOBS[job_id]
+
+        job["urls"].append(conversion_path)
+
+        if len(job["urls"]) == CONVERSIONS_PER_CALL:
+            job["album_cover"] = album_cover_path
+            job["status"] = "complete"
+            save_job(job_id)
+            job_semaphore.release()
+        # build_job_data(job_id, conversion_id_path, album_cover_path)
 
     return {"ok": True}
 
