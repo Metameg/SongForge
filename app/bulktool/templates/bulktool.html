@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+  <head>
+      <title>Bulk Tool</title>
+      <link
+          rel="stylesheet"
+          href="{{ url_for('bulktool.static', filename='css/bulktool.css') }}"
+      >
+  </head>
+
+  <body>
+<!-- Prompt Composer -->
+  <section class="prompt-section">
+
+    <h2>Create in Bulk</h2>
+
+    <div id="cost-display">
+      Total cost: $0.00
+    </div>
+
+    <label class="prompt-label">Prompt</label>
+
+    <textarea
+        id="lyrics-prompt"
+        class="prompt-textarea"
+        placeholder="Describe the mood, theme, or story for your lyrics..."
+    ></textarea>
+
+    <div class="genre-row">
+        <span class="genre-label">Genre</span>
+        <div class="genre-select">
+            <button class="genre-option active">Hip Hop</button>
+            <button class="genre-option">Rock</button>
+            <button class="genre-option">Country</button>
+            <button class="genre-option">Pop</button>
+            <button class="genre-option">EDM</button>
+            <button class="genre-option">Metal</button>
+            <button class="genre-option">Jazz</button>
+        </div>
+    </div>
+
+
+  </section>
+
+
+  <button id="start" class="primary-btn">Start</button>
+
+  <!-- Scrollable Jobs List -->
+  <div id="jobs-container">
+      <div id="jobs"></div>
+  </div>
+
+  <button id="download-all" class="primary-btn">Download All</button>
+
+
+
+
+  <script src="{{ url_for('bulktool.static', filename='js/bulktool.js') }}"></script>
+
+  <body>
+
+</html>

@@ -92,9 +92,6 @@ def save_job(job_id):
 
 
 # ---- ENDPOINTS ------
-@app.route("/", methods=["GET"])
-def index():
-    return render_template("index.html")
 
 
 @app.route("/bulktool", methods=["GET"])

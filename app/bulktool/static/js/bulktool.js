@@ -1,3 +1,19 @@
+
+document.addEventListener("DOMContentLoaded", () => {
+    const genreBtns = document.querySelectorAll(".genre-option");
+
+    // Handle genre button selection
+    genreBtns.forEach(btn => {
+        btn.addEventListener("click", () => {
+            // Remove 'active' from all buttons
+            genreBtns.forEach(b => b.classList.remove("active"));
+            // Add 'active' to the clicked button
+            btn.classList.add("active");
+        });
+    });
+});
+
+
 const jobsDiv = document.getElementById("jobs");
 let poller;
 const downloadAllBtn = document.getElementById("download-all");
@@ -5,24 +21,16 @@ const notifiedFailures = new Set();
 downloadAllBtn.disabled = true;
 
 document.addEventListener("DOMContentLoaded", () => {
-    const openBtn = document.querySelector(".request-btn");
-    const modal = document.getElementById("requestModal");
+    const genreBtns = document.querySelectorAll(".genre-option");
 
-    const lyricsBtn = document.querySelector(".lyrics-btn");
-    const wrapper = document.querySelector(".request-box-wrapper");
-
-    openBtn.addEventListener("click", () => {
-      modal.classList.add("active");
-    });
-
-    modal.addEventListener("click", e => {
-      if (e.target === modal) {
-        modal.classList.remove("active");
-      }
-    });
-
-    lyricsBtn.addEventListener("click", () => {
-      wrapper.classList.toggle("show-lyrics");
+    // Handle genre button selection
+    genreBtns.forEach(btn => {
+        btn.addEventListener("click", () => {
+            // Remove 'active' from all buttons
+            genreBtns.forEach(b => b.classList.remove("active"));
+            // Add 'active' to the clicked button
+            btn.classList.add("active");
+        });
     });
 });
 

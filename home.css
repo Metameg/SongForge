@@ -1,4 +1,5 @@
 
+
 /* ---------- Prompt Composer ---------- */
 h1, h2, h3 {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
@@ -233,76 +234,4 @@ h1, h2, h3 {
 
 
 
-
-/* ---------- Bulk Tool --------------- */
-/* ---------- Genre Selector ---------- */
-
-.genre-row {
-    margin-top: 15px;
-}
-
-.genre-label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: bold;
-}
-
-.genre-select {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.genre-option {
-    padding: 6px 14px;
-    border-radius: 999px;
-    border: 1px solid #ccc;
-    background: #f7f7f7;
-    cursor: pointer;
-    font-size: 14px;
-}
-
-.genre-option:hover {
-    background: #eee;
-  }
-
-.genre-option.active {
-    background: #3498db;
-    color: white;
-    border-color: #3498db;
-}
-
-
-/* ---------- Primary Button ---------- */
-
-.primary-btn {
-    margin-top: 18px;
-    background: #3498db;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 10px;
-}
-
-.primary-btn:hover {
-    background: #2f80c3;
-}
-
-/* ---------- Scrollable Jobs List ---------- */
-
-#jobs-container {
-    max-height: 300px;
-    overflow-y: auto;
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    padding: 10px;
-    margin-bottom: 20px;
-}
-
-/* existing job styles still apply */
-.job {
-    margin: 15px 0;
-    padding-bottom: 10px;
-    border-bottom: 1px solid #eee;
-}
 

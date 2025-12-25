@@ -5,11 +5,10 @@
     <title>Parallel Music Jobs</title>
     <link
         rel="stylesheet"
-        href="{{ url_for('static', filename='styles/index.css') }}"
+        href="{{ url_for('home.static', filename='css/home.css') }}"
     >
 </head>
 <body>
-
 
 
 
@@ -19,7 +18,6 @@
       <h1>AI Live Radio</h1>
       <p>Interactive AI Radio always playing 24/7.</p>
     </div>
-
 
   <div class="audio-card">
     <div class="audio-thumb">
@@ -64,53 +62,7 @@
   </div>
 </section>
 
-
-<!-- Prompt Composer -->
-
-<section class="prompt-section">
-
-  <h2>Bulk Tool</h2>
-
-  <div id="cost-display">
-    Total cost: $0.00
-  </div>
-
-  <label class="prompt-label">Prompt</label>
-
-  <textarea
-      id="lyrics-prompt"
-      class="prompt-textarea"
-      placeholder="Describe the mood, theme, or story for your lyrics..."
-  ></textarea>
-
-  <div class="genre-row">
-      <span class="genre-label">Genre</span>
-
-      <div class="genre-select">
-          <button class="genre-option active">Hip Hop</button>
-          <button class="genre-option">Rock</button>
-          <button class="genre-option">Country</button>
-          <button class="genre-option">Pop</button>
-          <button class="genre-option">EDM</button>
-          <button class="genre-option">Metal</button>
-          <button class="genre-option">Jazz</button>
-      </div>
-  </div>
-
-</section>
-
-
-
-<button id="start" class="primary-btn">Start</button>
-
-<!-- Scrollable Jobs List -->
-<div id="jobs-container">
-    <div id="jobs"></div>
-</div>
-
-<button id="download-all">Download All</button>
-
-<script src="{{ url_for('static', filename='scripts/index.js') }}"></script>
+<script src="{{ url_for('home.static', filename='js/home.js') }}"></script>
 
 </body>
 </html>
