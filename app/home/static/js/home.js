@@ -2,7 +2,6 @@ const jobsDiv = document.getElementById("jobs");
 let poller;
 const downloadAllBtn = document.getElementById("download-all");
 const notifiedFailures = new Set();
-downloadAllBtn.disabled = true;
 
 document.addEventListener("DOMContentLoaded", () => {
     const openBtn = document.querySelector(".request-btn");

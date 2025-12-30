@@ -1,3 +1,4 @@
 .env
 Genesis
 genesis_mp4s
+/app/__pycache__/*

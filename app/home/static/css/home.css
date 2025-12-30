@@ -1,15 +1,24 @@
+@font-face {
+  font-family: 'Poppins';
+  src: url('/static/fonts/Poppins-Black.ttf');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
 
+body {
+  margin: 0;
+}
 
 /* ---------- Prompt Composer ---------- */
 h1, h2, h3 {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: 'Poppins', sans-serif;
+  color: #fff;
 }
-
-
 /* ---------- Live Radio ---------- */
 .live-radio {
   padding: 40px 60px;
-  background: #f9f9f9;
+  background: #0d1a22;
 }
 
 .radio-header {
@@ -28,7 +37,7 @@ h1, h2, h3 {
 
 .radio-header p {
   margin-top: 6px;
-  color: #666;
+  color: #50c4ff;
   font-size: 15px;
 }
 
@@ -44,7 +53,7 @@ h1, h2, h3 {
 .audio-thumb {
   position: relative;
   height: 260px;
-  background: linear-gradient(135deg, #5f0a87, #a4508b);
+  background: linear-gradient(135deg, #092132 0%,#67447c 50%,#4e60a2 80%);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -71,6 +80,7 @@ h1, h2, h3 {
 .audio-meta {
   padding: 16px 18px;
   text-align: center;
+  background: #000e16
 }
 
 .audio-meta h3 {
@@ -121,7 +131,7 @@ h1, h2, h3 {
   border-radius: 999px;
   border: none;
   cursor: pointer;
-  background: #111;
+  background: #007ebf;
   color: #fff;
 }
 
