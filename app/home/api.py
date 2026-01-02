@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, send_file
+from flask import Flask, request, jsonify, current_app
 import requests
 import os
 from pprint import pprint
@@ -6,204 +6,94 @@ import time
 import threading
 from threading import Semaphore
 import random
-from songwriter import SongWriter
+from .services import MusicAPIClient
 from dataset import BibleDataset
 from io import BytesIO
 from zipfile import ZipFile
 from pathlib import Path
-
-BOOK_DIR = "Genesis"
-os.makedirs(BOOK_DIR, exist_ok=True)
+from . import home_bp
+import redis
 
 app = Flask(__name__)
-
-# simple in-memory state (fine for dev)
-JOBS = {}
-JOB_MAPPING = {}
-TOTAL_COST = 0.0
-COST_LOCK = threading.Lock()
-CONVERSIONS_PER_CALL = 2
-MAX_CONCURRENT_JOBS = 5
-STARTING_CHAPTER = 10
-job_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
+r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
 
 
-def process_job(job_id, text, webhook_url):
-    global TOTAL_COST
-    job_semaphore.acquire()  # with job_semaphore:  # ⬅️ blocks if 5 jobs already running
+@home_bp.route("/api/audio-list", methods=["GET"])
+def audio_list():
+    audio_dir = os.path.join(current_app.static_folder, "audios")
+    files = [
+        f for f in os.listdir(audio_dir) if f.lower().endswith((".mp3", ".ogg", ".wav"))
+    ]
 
-    JOBS[job_id]["status"] = "creating_music"
+    # Shuffle the playlist
+    random.shuffle(files)
+    return jsonify(files)
 
+
+@home_bp.route("/api/create-song", methods=["POST"])
+def create_song():
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"status": "failed", "message": "Invalid JSON payload"}), 400
+
+    lyrics = data.get("lyrics", "").strip()
+    prompt = data.get("prompt", "").strip()
+
+    if not prompt:
+        return jsonify({"status": "failed", "message": "Prompt is required"}), 400
+
+    client = MusicAPIClient(
+        open_ai_key=current_app.config["OPEN_AI_KEY"],
+        musicgpt_key=current_app.config["MUSICGPT_KEY"],
+        webhook_url=f"{current_app.config['PUBLIC_BASE_URL']}/webhook",
+    )
     try:
-        sw = SongWriter()
-        lyrics = sw.create_lyrics(text)
-        conversion_ids, cost, error = sw.create_music(lyrics, webhook_url)
+        if not lyrics:
+            lyrics = client.create_lyrics(prompt)
+
+        conversion_ids, cost, error = client.create_music(prompt, lyrics)
 
         if error:
-            fail_job(job_id, error)
-            return
+            return jsonify({"status": "failed", "message": error}), 500
 
-        for conv_id in conversion_ids:
-            JOB_MAPPING[conv_id] = job_id
-
-        with COST_LOCK:
-            TOTAL_COST += cost * CONVERSIONS_PER_CALL
+        return jsonify(
+            {
+                "status": "success",
+                "conversion_ids": conversion_ids,
+                "cost": cost,
+                "lyrics": lyrics,
+            }
+        )
 
     except Exception as e:
-        fail_job(job_id, f"Unhandled exception: {e}")
+        current_app.logger.exception(e)
+        return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
 
 
-def fail_job(job_id, reason):
-    job = JOBS.get(job_id)
-    if not job:
-        return
-
-    if job["status"] in ("complete", "failed"):
-        return  # prevent double release
-
-    job["status"] = "failed"
-    job["error"] = reason
-
-    print(f"[JOB FAILED] {job_id}: {reason}")
-
-    # 🔓 VERY IMPORTANT
-    job_semaphore.release()
-
-
-def save_job(job_id):
-    job = JOBS[job_id]
-    chapter_dir = Path(BOOK_DIR) / f"chapter{job_id - 1}"
-    chapter_dir.mkdir(parents=True, exist_ok=True)
-
-    # save tracks
-    for idx, url in enumerate(job.get("urls", []), start=1):
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-
-        track_path = chapter_dir / f"track{idx}.mp3"
-        track_path.write_bytes(r.content)
-
-    # save album cover
-    album_cover_url = job.get("album_cover")
-    if album_cover_url:
-        r = requests.get(album_cover_url, timeout=30)
-        r.raise_for_status()
-        (chapter_dir / "album_cover.jpg").write_bytes(r.content)
-
-
-# ---- ENDPOINTS ------
-
-
-@app.route("/bulktool", methods=["GET"])
-def bulk_tool():
-    return render_template("bulktool.html")
-
-
-@app.route("/start", methods=["POST"])
-def start():
-    JOBS.clear()
-    webhook_url = request.host_url.rstrip("/") + "/webhook"
-
-    data = BibleDataset()
-    job_id = STARTING_CHAPTER
-    job_ids = []
-    for chapter, text in data.books[1].items():
-        if chapter in range(1, STARTING_CHAPTER):
-            continue
-        job_id += 1
-
-        JOBS[job_id] = {
-            "status": "pending",
-            "urls": [],
-            "album_cover": None,
-            "error": None,
-        }
-
-        job_ids.append(job_id)
-
-        threading.Thread(
-            target=process_job, args=(job_id, text, webhook_url), daemon=True
-        ).start()
-
-    return jsonify({"job_ids": job_ids})
-
-
-@app.route("/status", methods=["GET"])
-def status():
-    return jsonify(JOBS)
-
-
-@app.route("/cost", methods=["GET"])
-def cost():
-    return jsonify({"total_cost": round(TOTAL_COST, 4)})
-
-
-@app.route("/webhook", methods=["POST"])
+@home_bp.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
 
-    # Step 1: mark job as complete in JOBS dict (or "processing_music")
-    if "conversion_path" in data:
-        conversion_id = data.get("conversion_id")
-        album_cover_path = data.get("album_cover_path")
-        conversion_path = data.get("conversion_path")
-        job_id = JOB_MAPPING.get(conversion_id)
-        job = JOBS[job_id]
+    # r = current_app.extensions["redis"]
+    print(data)
 
-        job["urls"].append(conversion_path)
+    # Only proceed if conversion_path exists
+    conversion_path = data.get("conversion_path")
+    if not conversion_path:
+        return {"ok": False, "error": "No conversion_path in webhook"}, 400
 
-        if len(job["urls"]) == CONVERSIONS_PER_CALL:
-            job["album_cover"] = album_cover_path
-            job["status"] = "complete"
-            save_job(job_id)
-            job_semaphore.release()
-        # build_job_data(job_id, conversion_id_path, album_cover_path)
+    # Lookup job_id via conversion_id or another unique identifier
+    conversion_id = data.get("conversion_id")
+    job_id = f"job:{conversion_id}"  # or some mapping
+    job_key = f"job:{job_id}"
+    print()
+    print(job_id)
+    print(job_key)
+    print()
+    # Atomic check: only set if not already set
+    # if not r.hexists(job_key, "conversion_path"):
+    #     r.hset(job_key, "conversion_path", conversion_path)
+    #     r.hset(job_key, "status", "complete")  # mark job as complete
 
     return {"ok": True}
-
-
-@app.route("/download/<int:job_id>")
-def download(job_id):
-    chapter_dir = Path(BOOK_DIR) / f"chapter{job_id - 1}"
-
-    if not chapter_dir.exists():
-        return {"error": "Files not found"}, 404
-
-    zip_buffer = BytesIO()
-    with ZipFile(zip_buffer, "w") as zip_file:
-        for file in chapter_dir.iterdir():
-            zip_file.write(file, arcname=file.name)
-
-    zip_buffer.seek(0)
-    return send_file(
-        zip_buffer,
-        mimetype="application/zip",
-        download_name=f"Genesis_chapter{job_id - 1}.zip",
-        as_attachment=True,
-    )
-
-
-@app.route("/download_all")
-def download_all():
-    genesis_dir = Path("Genesis")
-
-    if not genesis_dir.exists():
-        return {"error": "No Genesis folder"}, 404
-
-    zip_buffer = BytesIO()
-    with ZipFile(zip_buffer, "w") as zip_file:
-        for file in genesis_dir.rglob("*"):
-            if file.is_file():
-                zip_file.write(file, arcname=file.relative_to(genesis_dir))
-
-    zip_buffer.seek(0)
-    return send_file(
-        zip_buffer,
-        mimetype="application/zip",
-        download_name="Genesis_All_Jobs.zip",
-        as_attachment=True,
-    )
-
-
-if __name__ == "__main__":
-    app.run(debug=True)

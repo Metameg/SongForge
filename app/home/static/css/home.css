@@ -6,8 +6,17 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: 'AnonymousPro';
+  src: url('/static/fonts/AnonymousPro-Regular.ttf');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 body {
   margin: 0;
+  background: #000e16;
 }
 
 /* ---------- Prompt Composer ---------- */
@@ -15,9 +24,13 @@ h1, h2, h3 {
   font-family: 'Poppins', sans-serif;
   color: #fff;
 }
+
+p {
+  font-family: 'AnonymousPro', sans-serif;
+}
 /* ---------- Live Radio ---------- */
 .live-radio {
-  padding: 40px 60px;
+  padding: 140px 60px;
   background: #0d1a22;
 }
 
@@ -30,6 +43,7 @@ h1, h2, h3 {
 }
 
 .radio-header h1 {
+  text-align: center;
   font-size: 36px;
   font-weight: 700;
   margin: 0;
@@ -124,6 +138,7 @@ h1, h2, h3 {
 
 /* ---------- Request Button ---------- */
 .request-btn {
+  font-family: 'AnonymousPro', sans-serif;
   margin-top: 24px;
   padding: 12px 22px;
   font-size: 15px;
@@ -183,6 +198,7 @@ h1, h2, h3 {
 
 /* ---------- Generate Button ---------- */
 .generate-btn {
+  font-family: 'AnonymousPro', sans-serif;
   padding: 10px 18px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.2);
@@ -203,8 +219,32 @@ h1, h2, h3 {
   max-width: calc(100% - 40px);
 }
 
+.submit-btn {
+  font-family: 'AnonymousPro', sans-serif;
+  margin-top: 24px;
+  padding: 12px 22px;
+  font-size: 15px;
+  font-weight: 500;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  background: #007ebf;
+  color: #fff;
+}
+
+.submit-btn:hover {
+  opacity: 0.9;
+}
+
+
+.error {
+  color: #e74c3c;
+  font-size: 0.9rem;
+}
+
 /* ---------- Lyrics Button ---------- */
 .lyrics-btn {
+  font-family: 'AnonymousPro', sans-serif;
   padding: 10px 18px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.2);

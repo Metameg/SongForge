@@ -7,6 +7,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const openBtn = document.querySelector(".request-btn");
     const modal = document.getElementById("requestModal");
 
+    const playBtn = document.getElementById("playBtn");
     const lyricsBtn = document.querySelector(".lyrics-btn");
     const wrapper = document.querySelector(".request-box-wrapper");
 
@@ -23,6 +24,12 @@ document.addEventListener("DOMContentLoaded", () => {
     lyricsBtn.addEventListener("click", () => {
       wrapper.classList.toggle("show-lyrics");
     });
+
+    playBtn.addEventListener("click", () => {
+      
+    });
 });
+
+
 
 

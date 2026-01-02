@@ -21,17 +21,17 @@
 
   <div class="audio-card">
     <div class="audio-thumb">
-      <button class="play-btn" onclick="document.getElementById('radio-audio').play()">
+      <button id="playBtn" class="play-btn" >
         ▶
       </button>
     </div>
 
     <div class="audio-meta">
       <h3>Live Stream</h3>
-      <span>Now Playing</span>
+      <span id="nowPlaying">Now Playing</span>
     </div>
 
-    <audio id="radio-audio" src="your-audio-stream-or-file.mp3"></audio>
+    <audio id="radioAudio"></audio>
   </div>
 
 
@@ -43,27 +43,34 @@
       <!-- Main prompt row -->
       <div class="request-box">
         <input
+          id="prompt"
           type="text"
           placeholder="R&B cover of a 2000s pop song"
           class="request-input"
         />
 
-        <button class="lyrics-btn" type="button">Lyrics</button>
+        <button class="lyrics-btn" type="button"> + Lyrics</button>
         <button class="generate-btn" type="button">Generate</button>
+
       </div>
 
       <!-- Lyrics textarea (hidden by default) -->
       <textarea
+        id="lyrics"
         class="lyrics-input"
         placeholder="Enter custom lyrics here"
       ></textarea>
 
+      <p id="errorMsg" class="error"></p>
+      <button id="submitBtn" class="submit-btn" type="button">Submit</button>
     </div>
   </div>
 </section>
 
 <script src="{{ url_for('home.static', filename='js/home.js') }}"></script>
-
+<script src="{{ url_for('home.static', filename='js/api/player.js') }}"></script>
+<script src="{{ url_for('home.static', filename='js/api/create_song.js') }}"></script>
+    
 </body>
 </html>
    
