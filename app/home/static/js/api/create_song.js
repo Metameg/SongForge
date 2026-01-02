@@ -34,4 +34,3 @@ document.getElementById("submitBtn").onclick = async () => {
     console.error(err);
   }
 };
-;
