@@ -1,3 +1,4 @@
+import { socket } from "./socket.js";
 
 const audio = document.getElementById('radioAudio');
 const playBtn = document.getElementById('playBtn');
@@ -39,40 +40,47 @@ function loadTrack(index) {
 
 
 
+socket.on("new_audio", data => {
+  console.log("new audio received");
+  const insertIndex = audio.src ? currentIndex + 1 : 0;
+  playlist.splice(insertIndex, 0, data.conversion_path);
 
-
-async function pollForNewAudio() {
-  try {
-    const res = await fetch("/api/next-audio");
-    const data = await res.json();
-
-    if (!data.conversion_path) return;
-
-    console.log("New song:", data.conversion_path);
-    console.log("playlist:", playlist);
-
-    // CASE 1: nothing has played yet
-    if (!audio.src) {
-      console.log("audio.src not set yet");
-      playlist.splice(0, 0, data.conversion_path);
-      currentIndex = 0;
-
-      loadTrack(currentIndex);
-      return;
-    }
-
-    // CASE 2: something is playing → play next
-    const insertIndex = currentIndex + 1;
-    playlist.splice(insertIndex, 0, data.conversion_path);
-
-
-  } catch (err) {
-    console.error("Polling error:", err);
+  if (!audio.src) {
+    loadTrack(0);
+    audio.play();
   }
-}
+});
 
-// poll every 3 seconds
-setInterval(pollForNewAudio, 3000);
+// async function pollForNewAudio() {
+//   try {
+//     const res = await fetch("/api/next-audio");
+//     const data = await res.json();
+//
+//     if (!data.conversion_path) return;
+//
+//     console.log("New song:", data.conversion_path);
+//
+//     // CASE 1: nothing has played yet
+//     if (!audio.src) {
+//       playlist.splice(0, 0, data.conversion_path);
+//       currentIndex = 0;
+//
+//       loadTrack(currentIndex);
+//       return;
+//     }
+//
+//     // CASE 2: something is playing → play next
+//     const insertIndex = currentIndex + 1;
+//     playlist.splice(insertIndex, 0, data.conversion_path);
+//
+//
+//   } catch (err) {
+//     console.error("Polling error:", err);
+//   }
+// }
+//
+// // poll every 3 seconds
+// setInterval(pollForNewAudio, 3000);
 
 
 

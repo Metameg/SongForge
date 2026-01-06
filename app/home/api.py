@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify, current_app
 import requests
 import os
+import json
+import threading
 from pprint import pprint
 import time
-import threading
+from app.extensions import socketio
 from threading import Semaphore
 import random
 from .services import MusicAPIClient
@@ -28,6 +30,10 @@ def audio_list():
     # Shuffle the playlist
     random.shuffle(files)
     return jsonify(files)
+
+
+def simulate_webhook(webhook_url, payload):
+    requests.post(webhook_url, json=payload, timeout=10)
 
 
 @home_bp.route("/api/create-song", methods=["POST"])
@@ -55,9 +61,11 @@ def create_song():
         "conversion_path": "/audio/song_1.mp3",
     }
 
-    requests.post(
-        f"{current_app.config['PUBLIC_BASE_URL']}/webhook", json=payload, timeout=5
-    )
+    threading.Thread(
+        target=simulate_webhook,
+        args=(current_app.config["WEBHOOK_URL"], payload),
+        daemon=True,
+    ).start()
 
     return jsonify(
         {
@@ -106,9 +114,18 @@ def webhook():
         return {"ok": False, "error": "No conversion_path in webhook"}, 400
 
     job_key = f"job:{conversion_id}"
+
+    r.publish(
+        "audio_events",
+        json.dumps(
+            {
+                "conversion_id": conversion_id,
+                "conversion_path": conversion_path,
+            }
+        ),
+    )
     # Atomic check: only set if not already set
     if not r.hexists(job_key, "conversion_path"):
-        print(job_key)
         r.hset(job_key, "conversion_path", conversion_path)
         r.hset(job_key, "status", "complete")  # mark job as complete
 

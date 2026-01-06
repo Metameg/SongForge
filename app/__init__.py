@@ -1,6 +1,7 @@
 from flask import Flask
 from .config import DevelopmentConfig
 import redis
+from .extensions import socketio
 
 
 def create_app():
@@ -14,6 +15,8 @@ def create_app():
         db=app.config["REDIS_DB"],
         decode_responses=True,
     )
+
+    socketio.init_app(app)
 
     from .home import home_bp
     from .bulktool import bulktool_bp
