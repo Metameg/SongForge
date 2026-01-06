@@ -12,7 +12,6 @@ let currentIndex = 0;
 fetch('/api/audio-list')
   .then(res => res.json())
   .then(files => {
-    console.log(files);
     playlist = files.map(
       f => `/static/audios/${f}`
     );
@@ -21,11 +20,9 @@ fetch('/api/audio-list')
 playBtn.addEventListener('click', () => {
   if (!playlist.length) return;
   if (!audio.src) {
-    console.log("loading");
   
     loadTrack(currentIndex);
   }
-  console.log(audio.src);
   audio.play();
   
 });
@@ -47,7 +44,6 @@ socket.on("new_audio", data => {
 
   if (!audio.src) {
     loadTrack(0);
-    audio.play();
   }
 });
 

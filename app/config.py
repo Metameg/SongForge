@@ -10,7 +10,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://reactions-sisters-wifi-hero.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://auckland-pleasant-kathy-made.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

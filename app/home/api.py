@@ -6,10 +6,8 @@ import threading
 from pprint import pprint
 import time
 from app.extensions import socketio
-from threading import Semaphore
 import random
 from .services import MusicAPIClient
-from dataset import BibleDataset
 from io import BytesIO
 from zipfile import ZipFile
 from pathlib import Path
@@ -55,47 +53,46 @@ def create_song():
         webhook_url=f"{current_app.config['PUBLIC_BASE_URL']}/webhook",
     )
 
-    # conversion_ids, cost, error = client.create_music(prompt, lyrics)
-    payload = {
-        "conversion_id": "test-conversion-123",
-        "conversion_path": "/audio/song_1.mp3",
-    }
+    conversion_ids, cost, error = client.create_music(prompt, lyrics)
+    # payload = {
+    #     "conversion_id": "test-conversion-123",
+    #     "conversion_path": "/audio/song_1.mp3",
+    # }
+    #
+    # threading.Thread(
+    #     target=simulate_webhook,
+    #     args=(current_app.config["WEBHOOK_URL"], payload),
+    #     daemon=True,
+    # ).start()
+    #
+    # return jsonify(
+    #     {
+    #         "status": "success",
+    #         "lyrics": lyrics,
+    #     }
+    # )
 
-    threading.Thread(
-        target=simulate_webhook,
-        args=(current_app.config["WEBHOOK_URL"], payload),
-        daemon=True,
-    ).start()
+    try:
+        if not lyrics:
+            lyrics = client.create_lyrics(prompt)
 
-    return jsonify(
-        {
-            "status": "success",
-            "lyrics": lyrics,
-        }
-    )
+        conversion_ids, cost, error = client.create_music(prompt, lyrics)
 
-    # try:
-    #     if not lyrics:
-    #         lyrics = client.create_lyrics(prompt)
-    #
-    #     conversion_ids, cost, error = client.create_music(prompt, lyrics)
-    #
-    #     if error:
-    #         return jsonify({"status": "failed", "message": error}), 500
-    #
-    #     return jsonify(
-    #         {
-    #             "status": "success",
-    #             "conversion_ids": conversion_ids,
-    #             "cost": cost,
-    #             "lyrics": lyrics,
-    #         }
-    #     )
-    #
-    # except Exception as e:
-    #     current_app.logger.exception(e)
-    #     return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
-    #
+        if error:
+            return jsonify({"status": "failed", "message": error}), 500
+
+        return jsonify(
+            {
+                "status": "success",
+                "conversion_ids": conversion_ids,
+                "cost": cost,
+                "lyrics": lyrics,
+            }
+        )
+
+    except Exception as e:
+        current_app.logger.exception(e)
+        return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
 
 
 @home_bp.route("/webhook", methods=["POST"])
@@ -105,10 +102,10 @@ def webhook():
     r = current_app.extensions["redis"]
 
     # Only proceed if conversion_path exists
-    # conversion_path = data.get("conversion_path")
-    # conversion_path = data.get("conversion_id")
-    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
-    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
+    conversion_path = data.get("conversion_path")
+    conversion_id = data.get("conversion_id")
+    # conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
+    # conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
 
     if not conversion_path:
         return {"ok": False, "error": "No conversion_path in webhook"}, 400
@@ -127,34 +124,35 @@ def webhook():
     # Atomic check: only set if not already set
     if not r.hexists(job_key, "conversion_path"):
         r.hset(job_key, "conversion_path", conversion_path)
-        r.hset(job_key, "status", "complete")  # mark job as complete
+        r.hset(job_key, "status", "queued")  # mark job as complete
 
     return {"ok": True}
 
 
-@home_bp.route("/api/next-audio", methods=["GET"])
-def latest_conversion():
-    r = current_app.extensions["redis"]
-
-    # Get all job keys
-    keys = r.keys("job:*")
-    if not keys:
-        return jsonify({"conversion_path": None})
-
-    # Find the newest completed job
-    for key in reversed(sorted(keys)):
-        data = r.hgetall(key)
-        if data.get("status") == "complete" and data.get("conversion_path"):
-            r.hset(key, "status", "queued")
-
-            return jsonify(
-                {
-                    "conversion_path": data["conversion_path"],
-                    "conversion_id": key.split(":")[1],
-                }
-            )
-
-    return jsonify({"conversion_path": None})
+# @home_bp.route("/api/next-audio", methods=["GET"])
+# def latest_conversion():
+#     r = current_app.extensions["redis"]
+#
+#     # Get all job keys
+#     keys = r.keys("job:*")
+#     if not keys:
+#         return jsonify({"conversion_path": None})
+#
+#     # Find the newest completed job
+#     for key in reversed(sorted(keys)):
+#         data = r.hgetall(key)
+#         if data.get("status") == "complete" and data.get("conversion_path"):
+#             r.hset(key, "status", "queued")
+#
+#             return jsonify(
+#                 {
+#                     "conversion_path": data["conversion_path"],
+#                     "conversion_id": key.split(":")[1],
+#                 }
+#             )
+#
+#     return jsonify({"conversion_path": None})
+#
 
 
 @home_bp.route("/api/mark-played", methods=["POST"])
