@@ -35,7 +35,7 @@
   </div>
 
 
-  <button class="request-btn">Submit a Request</button>
+  <button id="requestBtn" class="request-btn">Submit a Request</button>
 
   <div class="request-modal" id="requestModal">
     <div class="request-box-wrapper">
@@ -47,10 +47,10 @@
           type="text"
           placeholder="R&B cover of a 2000s pop song"
           class="request-input"
+          autocomplete="off"
         />
 
         <button class="lyrics-btn" type="button"> + Lyrics</button>
-        <button class="generate-btn" type="button">Generate</button>
 
       </div>
 
@@ -63,6 +63,14 @@
 
       <p id="errorMsg" class="error"></p>
       <button id="submitBtn" class="submit-btn" type="button">Submit</button>
+
+      <div id="statusTimeline" class="status-timeline"></div>
+
+      <div id="postSubmitActions" class="post-submit-actions hidden">
+        <button id="newRequestBtn" class="secondary-btn">New Request</button>
+        <button id="closeModalBtn" class="ghost-btn">Back</button>
+      </div>
+
     </div>
   </div>
 </section>

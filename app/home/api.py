@@ -53,46 +53,46 @@ def create_song():
         webhook_url=f"{current_app.config['PUBLIC_BASE_URL']}/webhook",
     )
 
-    conversion_ids, cost, error = client.create_music(prompt, lyrics)
-    # payload = {
-    #     "conversion_id": "test-conversion-123",
-    #     "conversion_path": "/audio/song_1.mp3",
-    # }
+    # conversion_ids, cost, error = client.create_music(prompt, lyrics)
+    payload = {
+        "conversion_id": "test-conversion-123",
+        "conversion_path": "/audio/song_1.mp3",
+    }
+
+    threading.Thread(
+        target=simulate_webhook,
+        args=(current_app.config["WEBHOOK_URL"], payload),
+        daemon=True,
+    ).start()
+
+    return jsonify(
+        {
+            "status": "success",
+            "lyrics": lyrics,
+        }
+    )
+
+    # try:
+    #     if not lyrics:
+    #         lyrics = client.create_lyrics(prompt)
     #
-    # threading.Thread(
-    #     target=simulate_webhook,
-    #     args=(current_app.config["WEBHOOK_URL"], payload),
-    #     daemon=True,
-    # ).start()
+    #     conversion_ids, cost, error = client.create_music(prompt, lyrics)
     #
-    # return jsonify(
-    #     {
-    #         "status": "success",
-    #         "lyrics": lyrics,
-    #     }
-    # )
-
-    try:
-        if not lyrics:
-            lyrics = client.create_lyrics(prompt)
-
-        conversion_ids, cost, error = client.create_music(prompt, lyrics)
-
-        if error:
-            return jsonify({"status": "failed", "message": error}), 500
-
-        return jsonify(
-            {
-                "status": "success",
-                "conversion_ids": conversion_ids,
-                "cost": cost,
-                "lyrics": lyrics,
-            }
-        )
-
-    except Exception as e:
-        current_app.logger.exception(e)
-        return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
+    #     if error:
+    #         return jsonify({"status": "failed", "message": error}), 500
+    #
+    #     return jsonify(
+    #         {
+    #             "status": "success",
+    #             "conversion_ids": conversion_ids,
+    #             "cost": cost,
+    #             "lyrics": lyrics,
+    #         }
+    #     )
+    #
+    # except Exception as e:
+    #     current_app.logger.exception(e)
+    #     return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
 
 
 @home_bp.route("/webhook", methods=["POST"])
@@ -102,10 +102,10 @@ def webhook():
     r = current_app.extensions["redis"]
 
     # Only proceed if conversion_path exists
-    conversion_path = data.get("conversion_path")
-    conversion_id = data.get("conversion_id")
-    # conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
-    # conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
+    # conversion_path = data.get("conversion_path")
+    # conversion_id = data.get("conversion_id")
+    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
+    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
 
     if not conversion_path:
         return {"ok": False, "error": "No conversion_path in webhook"}, 400

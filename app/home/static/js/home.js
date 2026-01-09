@@ -1,17 +1,12 @@
-const jobsDiv = document.getElementById("jobs");
-let poller;
-const downloadAllBtn = document.getElementById("download-all");
-const notifiedFailures = new Set();
 
 document.addEventListener("DOMContentLoaded", () => {
-    const openBtn = document.querySelector(".request-btn");
-    const modal = document.getElementById("requestModal");
-
+    const requestBtn = document.getElementById("requestBtn");    const modal = document.getElementById("requestModal");
     const playBtn = document.getElementById("playBtn");
     const lyricsBtn = document.querySelector(".lyrics-btn");
     const wrapper = document.querySelector(".request-box-wrapper");
 
-    openBtn.addEventListener("click", () => {
+    requestBtn.addEventListener("click", () => {
+      resetRequestModal();
       modal.classList.add("active");
     });
 
@@ -25,11 +20,31 @@ document.addEventListener("DOMContentLoaded", () => {
       wrapper.classList.toggle("show-lyrics");
     });
 
-    playBtn.addEventListener("click", () => {
-      
-    });
+
+
+
+    document.getElementById("newRequestBtn").onclick = () => {
+      resetRequestModal();
+    };
+
+    document.getElementById("closeModalBtn").onclick = () => {
+      document.getElementById("requestModal").classList.remove("active");
+    };
 });
 
 
 
 
+function resetRequestModal() {
+  document.getElementById("prompt").value = "";
+  document.getElementById("lyrics").value = "";
+  document.getElementById("errorMsg").textContent = "";
+
+  const submitBtn = document.getElementById("submitBtn");
+  submitBtn.disabled = false;
+  submitBtn.classList.remove("loading", "success");
+  submitBtn.textContent = "Submit";
+
+  document.getElementById("statusTimeline").innerHTML = "";
+  document.getElementById("postSubmitActions").classList.add("hidden");
+}
