@@ -4,48 +4,82 @@ const audio = document.getElementById('radioAudio');
 const playBtn = document.getElementById('playBtn');
 const nowPlaying = document.getElementById('nowPlaying');
 
-let playlist = [];
+// let playlist = [];
 let currentIndex = 0;
 
 
-// Fetch playlist from Flask
-fetch('/api/audio-list')
-  .then(res => res.json())
-  .then(files => {
-    playlist = files.map(
-      f => `/static/audios/${f}`
-    );
-  });
 
-playBtn.addEventListener('click', () => {
-  if (!playlist.length) return;
-  if (!audio.src) {
-  
-    loadTrack(currentIndex);
-  }
+async function syncRadio() {
+  const res = await fetch("/api/radio/now-playing");
+  const data = await res.json();
+
+  if (!data.playing) return;
+
+  audio.src = data.conversion_path;
+
+  const now = Date.now();
+  const offset = (now - data.started_at) / 1000;
+
+  audio.currentTime = Math.max(0, offset);
   audio.play();
-  
-});
-
-
-function loadTrack(index) {
-  audio.src = playlist[index];
-  nowPlaying.textContent = playlist[index]
-    .split('/')
-    .pop();
 }
 
+// fetch("/api/audio-list")
+//   .then(res => res.json())
+//   .then(files => {
+//     playlist = files;
+//   });
+// Fetch playlist from Flask
+// fetch('/api/audio-list')
+//   .then(res => res.json())
+//   .then(files => {
+//     playlist = files.map(
+//       f => `/static/audios/${f}`
+//     );
+//   });
+
+playBtn.addEventListener('click', () => {
+  // if (!playlist.length) return;
+  // if (!audio.src) {
+  //
+  //   loadTrack(currentIndex);
+  // }
+  // audio.play();
+  syncRadio();
+  
+});
 
 
-socket.on("new_audio", data => {
-  console.log("new audio received");
-  const insertIndex = audio.src ? currentIndex + 1 : 0;
-  playlist.splice(insertIndex, 0, data.conversion_path);
+socket.on("radio_events", data => {
+  if (data.event === "track_changed") {
+    audio.src = data.conversion_path;
 
-  if (!audio.src) {
-    loadTrack(0);
+    const now = Date.now();
+    const offset = (now - data.started_at) / 1000;
+
+    audio.currentTime = Math.max(0, offset);
+    audio.play();
   }
 });
+
+// function loadTrack(index) {
+//   audio.src = playlist[index];
+//   nowPlaying.textContent = playlist[index]
+//     .split('/')
+//     .pop();
+// }
+//
+//
+//
+// socket.on("new_audio", data => {
+//   console.log("new audio received", data.queue_position);
+//   const insertIndex = audio.src ? currentIndex + 1 : 0;
+//   playlist.splice(insertIndex, 0, data.conversion_path);
+//
+//   if (!audio.src) {
+//     loadTrack(0);
+//   }
+// });
 
 // async function pollForNewAudio() {
 //   try {

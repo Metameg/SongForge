@@ -15,19 +15,39 @@ from . import home_bp
 import redis
 
 app = Flask(__name__)
-r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+# r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
 
 
-@home_bp.route("/api/audio-list", methods=["GET"])
-def audio_list():
-    audio_dir = os.path.join(current_app.static_folder, "audios")
-    files = [
-        f for f in os.listdir(audio_dir) if f.lower().endswith((".mp3", ".ogg", ".wav"))
-    ]
+@home_bp.route("/api/radio/now-playing", methods=["GET"])
+def now_playing():
+    r = current_app.extensions["redis"]
 
-    # Shuffle the playlist
-    random.shuffle(files)
-    return jsonify(files)
+    song = r.hgetall("radio:now_playing")
+    started_at = r.get("radio:started_at")
+
+    if not song or not started_at:
+        return jsonify({"playing": False})
+
+    return jsonify(
+        {
+            "playing": True,
+            "conversion_path": song["conversion_path"],
+            "started_at": int(started_at),
+            "duration": float(song.get("duration", 0)),
+        }
+    )
+
+
+# @home_bp.route("/api/audio-list", methods=["GET"])
+# def audio_list():
+#     audio_dir = os.path.join(current_app.static_folder, "audios")
+#     files = [
+#         f for f in os.listdir(audio_dir) if f.lower().endswith((".mp3", ".ogg", ".wav"))
+#     ]
+#
+#     # Shuffle the playlist
+#     random.shuffle(files)
+#     return jsonify(files)
 
 
 def simulate_webhook(webhook_url, payload):
@@ -36,6 +56,7 @@ def simulate_webhook(webhook_url, payload):
 
 @home_bp.route("/api/create-song", methods=["POST"])
 def create_song():
+    r = current_app.extensions["redis"]
     data = request.get_json(silent=True)
 
     if not data:
@@ -65,12 +86,7 @@ def create_song():
         daemon=True,
     ).start()
 
-    return jsonify(
-        {
-            "status": "success",
-            "lyrics": lyrics,
-        }
-    )
+    return jsonify({"success": True})
 
     # try:
     #     if not lyrics:
@@ -80,6 +96,21 @@ def create_song():
     #
     #     if error:
     #         return jsonify({"status": "failed", "message": error}), 500
+    #
+    #     # Assume one song per request (simplify radio logic)
+    #     conversion_id = conversion_ids[0]
+    #     job_key = f"job:{conversion_id}"
+    #
+    #     # Create job record (NO QUEUE YET)
+    #     r.hset(
+    #         job_key,
+    #         mapping={
+    #             "status": "processing",
+    #             "prompt": prompt,
+    #             "lyrics": lyrics,
+    #             "created_at": int(time.time() * 1000),
+    #         },
+    #     )
     #
     #     return jsonify(
     #         {
@@ -112,19 +143,35 @@ def webhook():
 
     job_key = f"job:{conversion_id}"
 
-    r.publish(
-        "audio_events",
-        json.dumps(
-            {
-                "conversion_id": conversion_id,
-                "conversion_path": conversion_path,
-            }
-        ),
-    )
     # Atomic check: only set if not already set
     if not r.hexists(job_key, "conversion_path"):
-        r.hset(job_key, "conversion_path", conversion_path)
-        r.hset(job_key, "status", "queued")  # mark job as complete
+        # Push to dynamic queue
+        queue_position = r.rpush(
+            current_app.config["PLAYLIST_DYNAMIC_KEY"], conversion_id
+        )
+
+        # Persist job
+        r.hset(
+            job_key,
+            mapping={
+                "conversion_path": conversion_path,
+                "status": "queued",
+                "queue_position": queue_position,
+            },
+        )
+
+        # Emit to clients
+
+        r.publish(
+            "radio_events",
+            json.dumps(
+                {
+                    "event": "queue_updated",
+                    "conversion_id": conversion_id,
+                    "queue_position": queue_position,
+                }
+            ),
+        )
 
     return {"ok": True}
 

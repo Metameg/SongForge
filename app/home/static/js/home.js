@@ -22,6 +22,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 
+    document.querySelector(".modal-close-btn").onclick = () => {
+      document.getElementById("requestModal").classList.remove("active");
+    };
 
     document.getElementById("newRequestBtn").onclick = () => {
       resetRequestModal();

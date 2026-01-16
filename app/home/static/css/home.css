@@ -227,6 +227,35 @@ p {
     overflow-x: hidden;
 }
 
+
+.modal-close-btn {
+  position: sticky;
+  top: 0;
+  align-self: flex-end;
+
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  margin-left: auto;
+  margin-bottom: 6px;
+}
+
+.modal-close-btn:hover {
+  background: rgba(255,255,255,0.16);
+}
+
 .submit-btn {
   font-family: 'Poppins-Regular', sans-serif;
   margin-top: 24px;

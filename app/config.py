@@ -7,10 +7,13 @@ class Config:
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
     REDIS_DB = 0
+    PLAYLIST_STATIC_KEY = "playlist:static"
+    PLAYLIST_DYNAMIC_KEY = "playlist:dynamic"
+    JOB_KEY_TEMPLATE = "job:{}"
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://auckland-pleasant-kathy-made.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://anderson-flooring-meant-moral.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 
