@@ -24,7 +24,7 @@ def now_playing():
 
     song = r.hgetall("radio:now_playing")
     started_at = r.get("radio:started_at")
-
+    print(f"SONG: {song}, STARTEDAT: {started_at}")
     if not song or not started_at:
         return jsonify({"playing": False})
 

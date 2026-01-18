@@ -12,7 +12,6 @@ let currentIndex = 0;
 async function syncRadio() {
   const res = await fetch("/api/radio/now-playing");
   const data = await res.json();
-
   if (!data.playing) return;
 
   audio.src = data.conversion_path;
@@ -116,6 +115,7 @@ socket.on("radio_events", data => {
 
 
 audio.addEventListener("ended", async () => {
+  console.log("ended");
   const src = audio.src;
   currentIndex++;
 

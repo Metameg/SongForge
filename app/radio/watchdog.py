@@ -5,24 +5,21 @@ from .controller import advance_radio
 
 def radio_watchdog():
     r = current_app.extensions["redis"]
-
-    if not r.setnx("radio:watchdog_lock", "1"):
+    if not r.set("radio:watchdog_lock", "1", nx=True, ex=5):
         return
-    r.expire("radio:watchdog_lock", 5)
 
-    try:
-        started_at = r.get("radio:started_at")
-        duration = r.hget("radio:now_playing", "duration")
+    started_at = r.get("radio:started_at")
+    duration = r.hget("radio:now_playing", "duration")
+    if duration is None or started_at is None:
+        advance_radio()
+        return
 
-        if not started_at or not duration:
-            advance_radio()
-            return
+    started_at = int(started_at)
+    duration = float(duration)
 
-        elapsed = (time.time() * 1000 - int(started_at)) / 1000
-        if elapsed >= float(duration):
-            advance_radio()
-    finally:
-        r.delete("radio:watchdog_lock")
+    elapsed = (time.time() * 1000 - int(started_at)) / 1000
+    if elapsed >= duration:
+        advance_radio()
 
 
 def start_radio_watchdog(app):

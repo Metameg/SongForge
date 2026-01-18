@@ -1,6 +1,6 @@
 
 document.getElementById("submitBtn").onclick = async () => {
-const submitBtn = document.getElementById("submitBtn");
+  const submitBtn = document.getElementById("submitBtn");
   const lyrics = document.getElementById("lyrics").value;
   const prompt = document.getElementById("prompt").value;
   const errorMsg = document.getElementById("errorMsg");

@@ -13,7 +13,9 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://anderson-flooring-meant-moral.trycloudflare.com"
+    PUBLIC_BASE_URL = (
+        "https://according-installations-polymer-painted.trycloudflare.com"
+    )
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 
