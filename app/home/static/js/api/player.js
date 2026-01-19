@@ -116,16 +116,6 @@ socket.on("radio_events", data => {
 
 audio.addEventListener("ended", async () => {
   console.log("ended");
-  const src = audio.src;
-  currentIndex++;
+  syncRadio();
 
-  loadTrack(currentIndex);
-  audio.play();
-
-  // notify backend
-  fetch("/api/mark-played", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ conversion_path: src }),
-  });
 });

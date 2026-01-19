@@ -135,45 +135,49 @@ def webhook():
     # Only proceed if conversion_path exists
     # conversion_path = data.get("conversion_path")
     # conversion_id = data.get("conversion_id")
+    # duration = data.get("duration")
     conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
     conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
-
-    if not conversion_path:
-        return {"ok": False, "error": "No conversion_path in webhook"}, 400
+    duration = 120
+    if not conversion_id or not conversion_path or not duration:
+        return {"ok": False, "error": "Missing required fields"}, 400
 
     job_key = f"job:{conversion_id}"
 
-    # Atomic check: only set if not already set
-    if not r.hexists(job_key, "conversion_path"):
-        # Push to dynamic queue
-        queue_position = r.rpush(
-            current_app.config["PLAYLIST_DYNAMIC_KEY"], conversion_id
-        )
+    # Atomic: only queue once
+    if r.exists(job_key):
+        return {"ok": True, "already_queued": True}
 
-        # Persist job
-        r.hset(
-            job_key,
-            mapping={
-                "conversion_path": conversion_path,
-                "status": "queued",
+    # Persist job metadata
+    r.hset(
+        job_key,
+        mapping={
+            "conversion_path": conversion_path,
+            "duration": float(duration),
+            "status": "queued",
+            "source": "dynamic",
+        },
+    )
+
+    # Push ONLY the ID into the dynamic playlist
+    queue_position = r.rpush(
+        current_app.config["PLAYLIST_DYNAMIC_KEY"],
+        conversion_id,
+    )
+
+    # Notify listeners
+    r.publish(
+        "radio_events",
+        json.dumps(
+            {
+                "event": "queue_updated",
+                "conversion_id": conversion_id,
                 "queue_position": queue_position,
-            },
-        )
+            }
+        ),
+    )
 
-        # Emit to clients
-
-        r.publish(
-            "radio_events",
-            json.dumps(
-                {
-                    "event": "queue_updated",
-                    "conversion_id": conversion_id,
-                    "queue_position": queue_position,
-                }
-            ),
-        )
-
-    return {"ok": True}
+    return {"ok": True, "queue_position": queue_position}
 
 
 # @home_bp.route("/api/next-audio", methods=["GET"])
@@ -202,16 +206,16 @@ def webhook():
 #
 
 
-@home_bp.route("/api/mark-played", methods=["POST"])
-def mark_played():
-    r = current_app.extensions["redis"]
-    data = request.get_json()
-    path = data.get("conversion_path")
-    keys = r.keys("job:*")
-
-    for key in keys:
-        if r.hget(key, "conversion_path") == path:
-            r.hset(key, "status", "played")
-            break
-
-    return {"ok": True}
+# @home_bp.route("/api/mark-played", methods=["POST"])
+# def mark_played():
+#     r = current_app.extensions["redis"]
+#     data = request.get_json()
+#     path = data.get("conversion_path")
+#     keys = r.keys("job:*")
+#
+#     for key in keys:
+#         if r.hget(key, "conversion_path") == path:
+#             r.hset(key, "status", "played")
+#             break
+#
+#     return {"ok": True}

@@ -56,6 +56,7 @@ def advance_radio():
                 "conversion_path": path,
                 "started_at": now,
                 "duration": duration,
+                "index_key": r.get("playlist:static:index"),
             }
         ),
     )

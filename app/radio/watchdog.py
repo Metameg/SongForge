@@ -18,6 +18,7 @@ def radio_watchdog():
     duration = float(duration)
 
     elapsed = (time.time() * 1000 - int(started_at)) / 1000
+    print(f"elapsed: {elapsed}, duration:{duration}")
     if elapsed >= duration:
         advance_radio()
 
