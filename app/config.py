@@ -13,7 +13,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://flashing-festival-routing-indicating.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://freeware-character-figured-wives.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

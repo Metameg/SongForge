@@ -139,6 +139,8 @@ def webhook():
     conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
     conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
     duration = 120
+
+    print("hooked")
     if not conversion_id or not conversion_path or not duration:
         return {"ok": False, "error": "Missing required fields"}, 400
 
@@ -146,6 +148,7 @@ def webhook():
 
     # Atomic: only queue once
     if r.exists(job_key):
+        print("alread   queued")
         return {"ok": True, "already_queued": True}
 
     # Persist job metadata
@@ -177,7 +180,7 @@ def webhook():
         ),
     )
 
-    return {"ok": True, "queue_position": queue_position}
+    return {"ok": True}
 
 
 # @home_bp.route("/api/next-audio", methods=["GET"])

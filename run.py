@@ -37,11 +37,11 @@ def init_static_playlist(app, r):
 
 def redis_listener(r):
     pubsub = r.pubsub()
-    pubsub.subscribe("audio_events")
+    pubsub.subscribe("radio_events")
     for message in pubsub.listen():
         if message["type"] == "message":
             data = json.loads(message["data"])
-            print("Emitting new_audio:", data)  # debug
+            # print("Emitting new_audio:", data)  # debug
             socketio.emit("new_audio", data)  # ⚡ broadcast=True
 
 
