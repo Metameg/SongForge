@@ -13,7 +13,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://freeware-character-figured-wives.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://certified-clicks-refresh-army.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

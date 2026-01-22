@@ -71,20 +71,20 @@ def create_song():
     client = MusicAPIClient(
         open_ai_key=current_app.config["OPEN_AI_KEY"],
         musicgpt_key=current_app.config["MUSICGPT_KEY"],
-        webhook_url=f"{current_app.config['PUBLIC_BASE_URL']}/webhook",
+        webhook_url=current_app.config["WEBHOOK_URL"],
     )
 
-    # conversion_ids, cost, error = client.create_music(prompt, lyrics)
-    payload = {
-        "conversion_id": "test-conversion-123",
-        "conversion_path": "/audio/song_1.mp3",
-    }
-
-    threading.Thread(
-        target=simulate_webhook,
-        args=(current_app.config["WEBHOOK_URL"], payload),
-        daemon=True,
-    ).start()
+    conversion_ids, cost, error = client.create_music(prompt, lyrics)
+    # payload = {
+    #     "conversion_id": "test-conversion-123",
+    #     "conversion_path": "/audio/song_1.mp3",
+    # }
+    #
+    # threading.Thread(
+    #     target=simulate_webhook,
+    #     args=(current_app.config["WEBHOOK_URL"], payload),
+    #     daemon=True,
+    # ).start()
 
     return jsonify({"success": True})
 
@@ -133,14 +133,21 @@ def webhook():
     r = current_app.extensions["redis"]
 
     # Only proceed if conversion_path exists
-    # conversion_path = data.get("conversion_path")
-    # conversion_id = data.get("conversion_id")
+    conversion_path = data.get("conversion_path")
+    conversion_id = data.get("conversion_id")
+    print("DATA:")
+    pprint(data)
     # duration = data.get("duration")
-    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
-    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
+    # conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
+    # conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
     duration = 120
+    try:
+        lyrics = json.loads(data.get("lyrics_timestamped"))
+        duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
+        duration = duration_ms / 1000.0
+    except (json.JSONDecodeError, TypeError):
+        duration = None
 
-    print("hooked")
     if not conversion_id or not conversion_path or not duration:
         return {"ok": False, "error": "Missing required fields"}, 400
 
