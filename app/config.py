@@ -9,11 +9,13 @@ class Config:
     REDIS_DB = 0
     PLAYLIST_STATIC_KEY = "playlist:static"
     PLAYLIST_DYNAMIC_KEY = "playlist:dynamic"
+    HISTORY_KEY = "playlist:history"
+    MAX_HISTORY_JOBS = 1
     JOB_KEY_TEMPLATE = "job:{}"
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://certified-clicks-refresh-army.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://eos-uses-clothes-caution.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

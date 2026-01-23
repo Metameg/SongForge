@@ -13,6 +13,7 @@ from zipfile import ZipFile
 from pathlib import Path
 from . import home_bp
 import redis
+from mutagen._file import File as MutagenFile
 
 app = Flask(__name__)
 # r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
@@ -74,20 +75,21 @@ def create_song():
         webhook_url=current_app.config["WEBHOOK_URL"],
     )
 
-    conversion_ids, cost, error = client.create_music(prompt, lyrics)
-    # payload = {
-    #     "conversion_id": "test-conversion-123",
-    #     "conversion_path": "/audio/song_1.mp3",
-    # }
-    #
-    # threading.Thread(
-    #     target=simulate_webhook,
-    #     args=(current_app.config["WEBHOOK_URL"], payload),
-    #     daemon=True,
-    # ).start()
+    # MUSICGPT CALL
+    # conversion_ids, cost, error = client.create_music(prompt, lyrics)
+
+    payload = {
+        "conversion_id": "test-conversion-123",
+        "conversion_path": "/audio/song_1.mp3",
+    }
+
+    threading.Thread(
+        target=simulate_webhook,
+        args=(current_app.config["WEBHOOK_URL"], payload),
+        daemon=True,
+    ).start()
 
     return jsonify({"success": True})
-
     # try:
     #     if not lyrics:
     #         lyrics = client.create_lyrics(prompt)
@@ -133,20 +135,21 @@ def webhook():
     r = current_app.extensions["redis"]
 
     # Only proceed if conversion_path exists
-    conversion_path = data.get("conversion_path")
-    conversion_id = data.get("conversion_id")
-    print("DATA:")
-    pprint(data)
+    # conversion_path = data.get("conversion_path")
+    # conversion_id = data.get("conversion_id")
+    # print("DATA:")
+    # pprint(data)
     # duration = data.get("duration")
-    # conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/4fea5fd7-a903-4930-a711-16ad8bf2c436/4fea5fd7-a903-4930-a711-16ad8bf2c436.mp3"
-    # conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c436"
+    #
+    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/66e5fd55-ff04-4293-a29d-31f39a2e6ccb/66e5fd55-ff04-4293-a29d-31f39a2e6ccb.mp3"
+    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
     duration = 120
-    try:
-        lyrics = json.loads(data.get("lyrics_timestamped"))
-        duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
-        duration = duration_ms / 1000.0
-    except (json.JSONDecodeError, TypeError):
-        duration = None
+    # try:
+    #     lyrics = json.loads(data.get("lyrics_timestamped"))
+    #     duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
+    #     duration = duration_ms / 1000.0
+    # except (json.JSONDecodeError, TypeError):
+    #     duration = None
 
     if not conversion_id or not conversion_path or not duration:
         return {"ok": False, "error": "Missing required fields"}, 400
@@ -216,16 +219,33 @@ def webhook():
 #
 
 
-# @home_bp.route("/api/mark-played", methods=["POST"])
-# def mark_played():
-#     r = current_app.extensions["redis"]
-#     data = request.get_json()
-#     path = data.get("conversion_path")
-#     keys = r.keys("job:*")
-#
-#     for key in keys:
-#         if r.hget(key, "conversion_path") == path:
-#             r.hset(key, "status", "played")
-#             break
-#
-#     return {"ok": True}
+@home_bp.route("/api/mark-played", methods=["POST"])
+def mark_played():
+    r = current_app.extensions["redis"]
+    data = request.get_json()
+    path = data.get("conversion_path")
+    keys = r.keys("job:*")
+
+    for key in keys:
+        if r.hget(key, "conversion_path") == path:
+            r.hset(key, "status", "played")
+
+            r.rpush(current_app.config["HISTORY_KEY"], key)
+
+            # check length
+            length = r.llen(current_app.config["HISTORY_KEY"])
+
+            if length > current_app.config["MAX_HISTORY_JOBS"]:
+                # get the oldest job in history
+                evicted = r.lrange(current_app.config["HISTORY_KEY"], 0, 0)
+
+                # trim history to keep newest job
+                r.ltrim(current_app.config["HISTORY_KEY"], 1, -1)
+
+                # delete evicted job hashes
+                for cid in evicted:
+                    r.delete(f"job:{cid}")
+
+            break
+
+    return {"ok": True}
