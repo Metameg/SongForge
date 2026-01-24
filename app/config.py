@@ -15,7 +15,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://integrating-bacteria-men-bubble.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://answering-genius-decreased-send.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

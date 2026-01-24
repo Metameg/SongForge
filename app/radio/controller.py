@@ -49,7 +49,7 @@ def advance_radio():
         },
     )
     r.set("radio:started_at", now)
-    print("PUBLISHING", cid)
+
     # Notify clients
     r.publish(
         "radio_events",

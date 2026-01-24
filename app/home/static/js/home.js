@@ -1,9 +1,19 @@
 
+import { RadioPlayer } from "./api/radio.js";
+
 document.addEventListener("DOMContentLoaded", () => {
-    const requestBtn = document.getElementById("requestBtn");    const modal = document.getElementById("requestModal");
+    const modal = document.getElementById("requestModal");
+    const requestBtn = document.getElementById("requestBtn"); 
     const playBtn = document.getElementById("playBtn");
     const lyricsBtn = document.querySelector(".lyrics-btn");
     const wrapper = document.querySelector(".request-box-wrapper");
+
+
+    const radio = new RadioPlayer({
+      audioEl: document.getElementById("radioAudio"),
+      playButton: document.getElementById("playBtn"),
+      nowPlayingEl: document.getElementById("nowPlaying"),
+    });
 
     requestBtn.addEventListener("click", () => {
       resetRequestModal();
