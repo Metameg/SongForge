@@ -30,6 +30,9 @@ def advance_radio():
     if not cid:
         return
 
+    if isinstance(cid, bytes):
+        cid = cid.decode()
+
     job_key = f"job:{cid}"
     path = r.hget(job_key, "conversion_path")
     duration = float(r.hget(job_key, "duration") or 0)
@@ -46,13 +49,14 @@ def advance_radio():
         },
     )
     r.set("radio:started_at", now)
-
+    print("PUBLISHING", cid)
     # Notify clients
     r.publish(
         "radio_events",
         json.dumps(
             {
                 "event": "track_changed",
+                "cid": cid,
                 "conversion_path": path,
                 "started_at": now,
                 "duration": duration,

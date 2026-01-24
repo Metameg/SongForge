@@ -4,8 +4,7 @@ const audio = document.getElementById('radioAudio');
 const playBtn = document.getElementById('playBtn');
 const nowPlaying = document.getElementById('nowPlaying');
 
-// let playlist = [];
-let currentIndex = 0;
+let cid = "";
 
 
 
@@ -33,7 +32,7 @@ playBtn.addEventListener('click', () => {
 socket.on("radio_events", data => {
   if (data.event === "track_changed") {
     audio.src = data.conversion_path;
-
+    cid = data.cid;
     const now = Date.now();
     const offset = (now - data.started_at) / 1000;
 
@@ -44,27 +43,20 @@ socket.on("radio_events", data => {
 
 
 
-
-
 audio.addEventListener("ended", async () => { 
-  await markPlayed(audio);
-
-  syncRadio();
+  syncRadio(); 
+  markPlayed(audio);
 });
 
 async function markPlayed() {
-  const conversion_path = audio.src;
-
-  const res = await fetch("/api/mark-played", {
+  await fetch("/api/mark-played", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      conversion_path,
+      cid
     }),
   });
 
-  const data = await res.json();
-  console.log(data);
 }

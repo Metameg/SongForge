@@ -143,7 +143,7 @@ def webhook():
     #
     conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/66e5fd55-ff04-4293-a29d-31f39a2e6ccb/66e5fd55-ff04-4293-a29d-31f39a2e6ccb.mp3"
     conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
-    duration = 120
+    duration = 226
     # try:
     #     lyrics = json.loads(data.get("lyrics_timestamped"))
     #     duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
@@ -193,41 +193,21 @@ def webhook():
     return {"ok": True}
 
 
-# @home_bp.route("/api/next-audio", methods=["GET"])
-# def latest_conversion():
-#     r = current_app.extensions["redis"]
-#
-#     # Get all job keys
-#     keys = r.keys("job:*")
-#     if not keys:
-#         return jsonify({"conversion_path": None})
-#
-#     # Find the newest completed job
-#     for key in reversed(sorted(keys)):
-#         data = r.hgetall(key)
-#         if data.get("status") == "complete" and data.get("conversion_path"):
-#             r.hset(key, "status", "queued")
-#
-#             return jsonify(
-#                 {
-#                     "conversion_path": data["conversion_path"],
-#                     "conversion_id": key.split(":")[1],
-#                 }
-#             )
-#
-#     return jsonify({"conversion_path": None})
-#
-
-
 @home_bp.route("/api/mark-played", methods=["POST"])
 def mark_played():
     r = current_app.extensions["redis"]
     data = request.get_json()
-    path = data.get("conversion_path")
+    cid = data.get("cid")
     keys = r.keys("job:*")
 
+    if (
+        cid.startswith("job:static")
+        or r.lpos(current_app.config["HISTORY_KEY"], cid) is not None
+    ):
+        return {"ok": True}
+
     for key in keys:
-        if r.hget(key, "conversion_path") == path:
+        if key == f"job:{cid}":
             r.hset(key, "status", "played")
 
             r.rpush(current_app.config["HISTORY_KEY"], key)

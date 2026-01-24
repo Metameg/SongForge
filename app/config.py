@@ -15,7 +15,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://eos-uses-clothes-caution.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://integrating-bacteria-men-bubble.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 
