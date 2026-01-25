@@ -1,5 +1,6 @@
 
-import { RadioPlayer } from "./api/radio.js";
+// import { RadioPlayer } from "./api/radio.js";
+import { initializeRadioPlayer } from "./api/radio.js";
 
 document.addEventListener("DOMContentLoaded", () => {
     const modal = document.getElementById("requestModal");
@@ -9,11 +10,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const wrapper = document.querySelector(".request-box-wrapper");
 
 
-    const radio = new RadioPlayer({
+    const radio = initializeRadioPlayer({
       audioEl: document.getElementById("radioAudio"),
-      playButton: document.getElementById("playBtn"),
+      playButton: playBtn,
       nowPlayingEl: document.getElementById("nowPlaying"),
+      queueStatusEl: document.getElementById("queueStatus")
     });
+
+
 
     requestBtn.addEventListener("click", () => {
       resetRequestModal();

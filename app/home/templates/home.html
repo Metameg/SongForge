@@ -37,6 +37,12 @@
 
   <button id="requestBtn" class="request-btn">Submit a Request</button>
 
+
+  <div class="queue-status" id="queueStatus">
+    You currently have no songs in queue.
+    Create a song request now to place song in queue.
+  </div>
+
   <div class="request-modal" id="requestModal">
     <div class="request-box-wrapper">
       <button class="modal-close-btn" aria-label="Close">
@@ -82,7 +88,7 @@
 
 <script type="module" src="{{ url_for('home.static', filename='js/home.js') }}"></script>
 <!-- <script type="module" src="{{ url_for('home.static', filename='js/api/player.js') }}"></script> -->
-<script src="{{ url_for('home.static', filename='js/api/create_song.js') }}"></script>
+<script type="module" src="{{ url_for('home.static', filename='js/api/create_song.js') }}"></script>
     
 </body>
 </html>

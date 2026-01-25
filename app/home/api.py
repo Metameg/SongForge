@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, current_app
+from flask import session, request, jsonify, current_app
 import requests
 import os
 import json
@@ -15,17 +15,14 @@ from . import home_bp
 import redis
 from mutagen._file import File as MutagenFile
 
-app = Flask(__name__)
-# r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+# app = Flask(__name__)
 
 
 @home_bp.route("/api/radio/now-playing", methods=["GET"])
 def now_playing():
     r = current_app.extensions["redis"]
-
     song = r.hgetall("radio:now_playing")
     started_at = r.get("radio:started_at")
-    print(f"SONG: {song}, STARTEDAT: {started_at}")
     if not song or not started_at:
         return jsonify({"playing": False})
 
@@ -39,18 +36,6 @@ def now_playing():
     )
 
 
-# @home_bp.route("/api/audio-list", methods=["GET"])
-# def audio_list():
-#     audio_dir = os.path.join(current_app.static_folder, "audios")
-#     files = [
-#         f for f in os.listdir(audio_dir) if f.lower().endswith((".mp3", ".ogg", ".wav"))
-#     ]
-#
-#     # Shuffle the playlist
-#     random.shuffle(files)
-#     return jsonify(files)
-
-
 def simulate_webhook(webhook_url, payload):
     requests.post(webhook_url, json=payload, timeout=10)
 
@@ -58,6 +43,12 @@ def simulate_webhook(webhook_url, payload):
 @home_bp.route("/api/create-song", methods=["POST"])
 def create_song():
     r = current_app.extensions["redis"]
+
+    client_id = session.get("client_id")
+    if not client_id:
+        return {"ok": False, "error": "No client session"}, 401
+
+    print(client_id)
     data = request.get_json(silent=True)
 
     if not data:
@@ -88,6 +79,18 @@ def create_song():
         args=(current_app.config["WEBHOOK_URL"], payload),
         daemon=True,
     ).start()
+
+    job_key = "job:4fea5fd7-a903-4930-a711-16ad8bf2c43"
+    r.hset(
+        job_key,
+        mapping={
+            "client_id": client_id,
+            "status": "processing",
+            "prompt": prompt,
+            "lyrics": lyrics,
+            "created_at": int(time.time() * 1000),
+        },
+    )
 
     return jsonify({"success": True})
     # try:
@@ -133,7 +136,6 @@ def webhook():
     data = request.json
 
     r = current_app.extensions["redis"]
-
     # Only proceed if conversion_path exists
     # conversion_path = data.get("conversion_path")
     # conversion_id = data.get("conversion_id")
@@ -156,10 +158,26 @@ def webhook():
 
     job_key = f"job:{conversion_id}"
 
-    # Atomic: only queue once
-    if r.exists(job_key):
-        print("alread   queued")
+    job = r.hgetall(job_key)
+    client_id = job["client_id"]
+
+    # get all entries in the playlist
+    playlist_entries = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+
+    already_queued = False
+    for entry in playlist_entries:
+        data = json.loads(entry)
+        print(data.get("conversion_id"))
+        print(job_key)
+        print()
+        if f"job:{data.get('conversion_id')}" == job_key:
+            already_queued = True
+            break
+
+    if already_queued:
+        print("already queued")
         return {"ok": True, "already_queued": True}
+    print("webhook", job_key, client_id)
 
     # Persist job metadata
     r.hset(
@@ -171,26 +189,72 @@ def webhook():
             "source": "dynamic",
         },
     )
+    payload = {
+        "conversion_id": conversion_id,
+        "client_id": client_id,
+    }
 
-    # Push ONLY the ID into the dynamic playlist
     queue_position = r.rpush(
         current_app.config["PLAYLIST_DYNAMIC_KEY"],
-        conversion_id,
+        json.dumps(payload),
     )
+
+    socketio.emit(
+        "queue_position_update",
+        {
+            "conversion_id": conversion_id,
+            "queue_position": queue_position,
+            "queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
+        },
+        to=client_id,
+    )
+    # Push ONLY the ID into the dynamic playlist
+    # queue_position = r.rpush(
+    #     current_app.config["PLAYLIST_DYNAMIC_KEY"],
+    #     conversion_id,
+    # )
 
     # Notify listeners
-    r.publish(
-        "radio_events",
-        json.dumps(
-            {
-                "event": "queue_updated",
-                "conversion_id": conversion_id,
-                "queue_position": queue_position,
-            }
-        ),
-    )
+    # r.publish(
+    #     "radio_events",
+    #     json.dumps(
+    #         {
+    #             "event": "queue_updated",
+    #             "conversion_id": conversion_id,
+    #             "queue_position": queue_position,
+    #         }
+    #     ),
+    # )
 
     return {"ok": True}
+
+
+@home_bp.route("/api/my-queue-position", methods=["GET"])
+def my_queue_position():
+    r = current_app.extensions["redis"]
+
+    # get the client_id from the session
+    client_id = session.get("client_id")
+    print("checking queue", client_id)
+    if not client_id:
+        return {"in_queue": False, "message": "No client ID found."}
+
+    raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+
+    for idx, raw in enumerate(raw_items):
+        try:
+            item = json.loads(raw.decode())
+        except Exception:
+            continue
+
+        if item.get("session_id") == client_id:  # <- match against client_id only
+            return {
+                "in_queue": True,
+                "queue_position": idx + 1,
+                "queue_length": len(raw_items),
+            }
+
+    return {"in_queue": False, "message": "You currently have no songs in queue."}
 
 
 @home_bp.route("/api/mark-played", methods=["POST"])
@@ -201,9 +265,10 @@ def mark_played():
     keys = r.keys("job:*")
 
     if (
-        cid.startswith("job:static")
+        cid.startswith("static")
         or r.lpos(current_app.config["HISTORY_KEY"], cid) is not None
     ):
+        print("not adding to history")
         return {"ok": True}
 
     for key in keys:

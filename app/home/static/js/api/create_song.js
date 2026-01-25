@@ -1,4 +1,6 @@
 
+import { radioPlayerInstance } from "./radio.js";
+
 document.getElementById("submitBtn").onclick = async () => {
   const submitBtn = document.getElementById("submitBtn");
   const lyrics = document.getElementById("lyrics").value;
@@ -53,6 +55,9 @@ document.getElementById("submitBtn").onclick = async () => {
     submitBtn.textContent = "✓ Submitted";
 
     document.getElementById("postSubmitActions").classList.remove("hidden");
+    
+    radioPlayerInstance.updateQueuePosition();
+
 
   } catch (err) {
     console.error(err);
@@ -89,3 +94,6 @@ function completeStatus(item) {
   item.querySelector(".status-icon").innerHTML =
     `<div class="checkmark">✓</div>`;
 }
+
+
+

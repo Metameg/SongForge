@@ -2,4 +2,4 @@
 // src/socket.js
 import { io } from "https://cdn.socket.io/4.7.1/socket.io.esm.min.js";
 
-export const socket = io("https://answering-genius-decreased-send.trycloudflare.com"); // or PUBLIC_BASE_URL
+export const socket = io("https://sacrifice-bugs-edinburgh-captured.trycloudflare.com"); // or PUBLIC_BASE_URL
