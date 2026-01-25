@@ -483,3 +483,145 @@ p {
     width: 100%;
   }
 }
+
+/* ---------- Queue Status Styles ---------- */
+.queue-status {
+  margin-top: 24px;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+/* Empty State */
+.queue-empty {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, rgba(0, 126, 191, 0.1) 0%, rgba(0, 126, 191, 0.05) 100%);
+  border: 1px solid rgba(0, 126, 191, 0.2);
+  border-radius: 16px;
+}
+
+.queue-empty-icon {
+  font-size: 32px;
+  color: rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+}
+
+.queue-empty-text {
+  flex: 1;
+}
+
+.queue-empty-title {
+  font-family: 'Poppins', sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0 0 4px 0;
+}
+
+.queue-empty-subtitle {
+  font-family: 'Poppins-Regular', sans-serif;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0;
+}
+
+/* Active Queue State */
+.queue-active {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 20px 24px;
+  background: linear-gradient(135deg, rgba(0, 126, 191, 0.15) 0%, rgba(0, 126, 191, 0.08) 100%);
+  border: 1px solid rgba(0, 126, 191, 0.3);
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.queue-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #007ebf 0%, rgba(0, 126, 191, 0.3) 100%);
+}
+
+.queue-position-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  background: linear-gradient(135deg, #007ebf 0%, #005a8a 100%);
+  border-radius: 12px;
+  flex-shrink: 0;
+  box-shadow: 0 4px 12px rgba(0, 126, 191, 0.3);
+}
+
+.queue-number {
+  font-family: 'Poppins', sans-serif;
+  font-size: 24px;
+  font-weight: 900;
+  color: #fff;
+}
+
+.queue-info {
+  flex: 1;
+}
+
+.queue-info-title {
+  font-family: 'Poppins', sans-serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  margin: 0 0 4px 0;
+}
+
+.queue-info-detail {
+  font-family: 'Poppins-Regular', sans-serif;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0 0 12px 0;
+}
+
+.queue-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: rgba(0, 126, 191, 0.2);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+.queue-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #007ebf 0%, #00a8ff 100%);
+  border-radius: 999px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 12px rgba(0, 126, 191, 0.6);
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+  .queue-active {
+    gap: 16px;
+    padding: 16px 20px;
+  }
+  
+  .queue-position-badge {
+    width: 56px;
+    height: 56px;
+  }
+  
+  .queue-number {
+    font-size: 20px;
+  }
+  
+  .queue-empty {
+    padding: 16px 20px;
+  }
+}

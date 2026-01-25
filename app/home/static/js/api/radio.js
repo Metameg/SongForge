@@ -87,19 +87,42 @@ export class RadioPlayer {
     this._renderQueueStatus();
   }
 
+  // Enhanced queue status rendering
   _renderQueueStatus() {
     if (!this.queueStatusEl) return;
     
     if (!this.userQueueEntry || !this.userQueueEntry['in_queue']) {
-      this.queueStatusEl.textContent =
-        "You currently have no songs in queue. Create a song request now to place song in queue.";
+      this.queueStatusEl.innerHTML = `
+        <div class="queue-empty">
+          <div class="queue-empty-icon">♪</div>
+          <div class="queue-empty-text">
+            <p class="queue-empty-title">No songs in queue</p>
+            <p class="queue-empty-subtitle">Create a song request to get started</p>
+          </div>
+        </div>
+      `;
       return;
     }
     
     const { queue_position, queue_length } = this.userQueueEntry;
-    this.queueStatusEl.textContent =
-      `Your song is #${queue_position} out of ${queue_length} in the queue.`;
+    const percentage = ((queue_length - queue_position + 1) / queue_length) * 100;
+    
+    this.queueStatusEl.innerHTML = `
+      <div class="queue-active">
+        <div class="queue-position-badge">
+          <span class="queue-number">#${queue_position}</span>
+        </div>
+        <div class="queue-info">
+          <p class="queue-info-title">Your song is in the queue</p>
+          <p class="queue-info-detail">Position ${queue_position} of ${queue_length}</p>
+          <div class="queue-progress-bar">
+            <div class="queue-progress-fill" style="width: ${percentage}%"></div>
+          </div>
+        </div>
+      </div>
+    `;
   }
+    
 
    async updateQueuePosition() {
 
