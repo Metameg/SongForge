@@ -14,7 +14,7 @@ from pathlib import Path
 from . import home_bp
 import redis
 from mutagen._file import File as MutagenFile
-
+from .utilities import emit_queue_position_to_client
 # app = Flask(__name__)
 
 
@@ -194,20 +194,25 @@ def webhook():
         "client_id": client_id,
     }
 
-    queue_position = r.rpush(
+    r.rpush(
         current_app.config["PLAYLIST_DYNAMIC_KEY"],
         json.dumps(payload),
     )
 
-    socketio.emit(
-        "queue_position_update",
-        {
-            "conversion_id": conversion_id,
-            "queue_position": queue_position,
-            "queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
-        },
-        to=client_id,
-    )
+    emit_queue_position_to_client(socketio, client_id)
+    # print("QUEUE DETAILS")
+    # print("L:", r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]))
+    # print("POS:", queue_position)
+    # print("CLIENTID:", client_id)
+    # socketio.emit(
+    #     "queue_position_update",
+    #     {
+    #         "conversion_id": conversion_id,
+    #         "queue_position": queue_position,
+    #         "queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
+    #     },
+    #     to=client_id,
+    # )
     # Push ONLY the ID into the dynamic playlist
     # queue_position = r.rpush(
     #     current_app.config["PLAYLIST_DYNAMIC_KEY"],

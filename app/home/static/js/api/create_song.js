@@ -56,7 +56,6 @@ document.getElementById("submitBtn").onclick = async () => {
 
     document.getElementById("postSubmitActions").classList.remove("hidden");
     
-    radioPlayerInstance.updateQueuePosition();
 
 
   } catch (err) {
@@ -68,6 +67,9 @@ document.getElementById("submitBtn").onclick = async () => {
     submitBtn.classList.remove("loading");
     submitBtn.textContent = "Submit";
   }
+
+
+    // await radioPlayerInstance.updateQueuePosition();
 };
 
 

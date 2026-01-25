@@ -53,6 +53,7 @@ export class RadioPlayer {
     });
 
     socket.on("queue_position_update", (data) => {
+      console.log("anything?");
       this._onQueuePositionUpdate(data);
     });
   }
@@ -76,6 +77,8 @@ export class RadioPlayer {
     if (this.nowPlaying) {
       this.nowPlaying.textContent = data.cid;
     }
+
+    this.updateQueuePosition();
   }
 
   _onQueuePositionUpdate(data) {
@@ -87,7 +90,7 @@ export class RadioPlayer {
   _renderQueueStatus() {
     if (!this.queueStatusEl) return;
     
-    if (!this.userQueueEntry) {
+    if (!this.userQueueEntry || !this.userQueueEntry['in_queue']) {
       this.queueStatusEl.textContent =
         "You currently have no songs in queue. Create a song request now to place song in queue.";
       return;
@@ -99,16 +102,23 @@ export class RadioPlayer {
   }
 
    async updateQueuePosition() {
+
+    console.log("updating queue position");
     try {
       const res = await fetch("/api/my-queue-position");
       const data = await res.json();
       
       this.userQueueEntry = data;
+      console.log(this.userQueueEntry);
       this._renderQueueStatus();
     } catch (error) {
       console.error("Error fetching queue position:", error);
     }
   }
+
+
+
+
 
   /* ---------------- Audio ---------------- */
   _bindAudio() {
