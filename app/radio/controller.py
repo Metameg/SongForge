@@ -73,7 +73,6 @@ def advance_radio():
 
 
 def emit_queue_positions(r):
-    print("emit_queue_positions")
     queue_key = current_app.config["PLAYLIST_DYNAMIC_KEY"]
 
     raw_items = r.lrange(queue_key, 0, -1)

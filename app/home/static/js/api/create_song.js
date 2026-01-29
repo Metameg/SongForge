@@ -1,12 +1,15 @@
 
-import { radioPlayerInstance } from "./radio.js";
+import { socket } from "./socket.js";
+
+const statusTimeline = document.getElementById("statusTimeline");
+let submittingStatus;
+let completedStatus;
 
 document.getElementById("submitBtn").onclick = async () => {
   const submitBtn = document.getElementById("submitBtn");
   const lyrics = document.getElementById("lyrics").value;
   const prompt = document.getElementById("prompt").value;
   const errorMsg = document.getElementById("errorMsg");
-
   errorMsg.textContent = ""; // clear previous error
 
   if (!prompt) {
@@ -14,15 +17,11 @@ document.getElementById("submitBtn").onclick = async () => {
     return;
   }
 
-
   // 🔒 Lock button + show loading
   submitBtn.disabled = true;
   submitBtn.classList.add("loading");
   submitBtn.textContent = "Submitting…";
-
-  const creatingStatus = addStatus(
-    "Creating song. This may take a moment. Do not refresh your browser."
-  );
+  submittingStatus = addStatus("Submitting song...");
 
   try {
     const res = await fetch("/api/create-song", {
@@ -37,26 +36,16 @@ document.getElementById("submitBtn").onclick = async () => {
 
     if (!res.ok) {
       errorMsg.textContent = data.message || "Something went wrong.";
+      failStatus(submittingStatus, "Something went wrong. Please try again.");
       return;
     }
 
-    // ✅ Mark first step complete
-    completeStatus(creatingStatus);
-
-    // 🟢 Status: Added to queue
-    const queuedStatus = addStatus(
-      "Song created successfully. It has been added to the queue."
-    );
-    completeStatus(queuedStatus);
-
+    
     // ✅ Success state
     submitBtn.classList.remove("loading");
     submitBtn.classList.add("success");
     submitBtn.textContent = "✓ Submitted";
-
-    document.getElementById("postSubmitActions").classList.remove("hidden");
-    
-
+ 
 
   } catch (err) {
     console.error(err);
@@ -67,14 +56,26 @@ document.getElementById("submitBtn").onclick = async () => {
     submitBtn.classList.remove("loading");
     submitBtn.textContent = "Submit";
   }
-
-
-    // await radioPlayerInstance.updateQueuePosition();
 };
 
 
+socket.on("job_status_update", (payload) => {
+  const { status, message } = payload;
 
-const statusTimeline = document.getElementById("statusTimeline");
+  switch (status) {
+    case "processing":
+      completeStatus(submittingStatus);
+      completedStatus = addStatus("Creating song audio. This may take a few minutes.");
+      break;
+
+    case "queued":
+      completeStatus(completedStatus);
+      document.getElementById("postSubmitActions").classList.remove("hidden");
+      break;
+
+  }
+});
+
 
 function addStatus(message) {
   const item = document.createElement("div");
@@ -98,4 +99,15 @@ function completeStatus(item) {
 }
 
 
+function failStatus(item, message) {
+  item.classList.add("failed");
+
+  if (message) {
+    const text = item.querySelector(".status-text");
+    if (text) text.textContent = message;
+  }
+
+  item.querySelector(".status-icon").innerHTML =
+    `<div class="error-mark">✕</div>`;
+}
 

@@ -66,3 +66,14 @@ def emit_queue_position_to_client(socketio, client_id):
             },
             to=client_id,
         )
+
+
+def emit_job_status(socketio, client_id, status, message=None):
+    socketio.emit(
+        "job_status_update",
+        {
+            "status": status,
+            "message": message,
+        },
+        room=client_id,
+    )

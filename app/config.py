@@ -10,12 +10,12 @@ class Config:
     PLAYLIST_STATIC_KEY = "playlist:static"
     PLAYLIST_DYNAMIC_KEY = "playlist:dynamic"
     HISTORY_KEY = "playlist:history"
-    MAX_HISTORY_JOBS = 1
+    MAX_HISTORY_JOBS = 10
     JOB_KEY_TEMPLATE = "job:{}"
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://edge-ethernet-solved-desktop.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://productive-reader-costs-early.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

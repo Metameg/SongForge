@@ -14,7 +14,7 @@ from pathlib import Path
 from . import home_bp
 import redis
 from mutagen._file import File as MutagenFile
-from .utilities import emit_queue_position_to_client
+from .utilities import emit_job_status, emit_queue_position_to_client
 # app = Flask(__name__)
 
 
@@ -48,7 +48,6 @@ def create_song():
     if not client_id:
         return {"ok": False, "error": "No client session"}, 401
 
-    print(client_id)
     data = request.get_json(silent=True)
 
     if not data:
@@ -60,39 +59,52 @@ def create_song():
     if not prompt:
         return jsonify({"status": "failed", "message": "Prompt is required"}), 400
 
-    client = MusicAPIClient(
-        open_ai_key=current_app.config["OPEN_AI_KEY"],
-        musicgpt_key=current_app.config["MUSICGPT_KEY"],
-        webhook_url=current_app.config["WEBHOOK_URL"],
-    )
+    try:
+        emit_job_status(
+            socketio,
+            client_id,
+            status="processing",
+            message="Creating Song",
+        )
+        client = MusicAPIClient(
+            open_ai_key=current_app.config["OPEN_AI_KEY"],
+            musicgpt_key=current_app.config["MUSICGPT_KEY"],
+            webhook_url=current_app.config["WEBHOOK_URL"],
+        )
 
-    # MUSICGPT CALL
-    # conversion_ids, cost, error = client.create_music(prompt, lyrics)
+        # MUSICGPT CALL
+        conversion_ids, cost, error = client.create_music(prompt, lyrics)
 
-    payload = {
-        "conversion_id": "test-conversion-123",
-        "conversion_path": "/audio/song_1.mp3",
-    }
+        # payload = {
+        #     "conversion_id": "test-conversion-123",
+        #     "conversion_path": "/audio/song_1.mp3",
+        # }
+        #
+        # threading.Thread(
+        #     target=simulate_webhook,
+        #     args=(current_app.config["WEBHOOK_URL"], payload),
+        #     daemon=True,
+        # ).start()
+        conversion_id = conversion_ids[0]
+        job_key = f"job:{conversion_id}"
+        # job_key = "job:4fea5fd7-a903-4930-a711-16ad8bf2c43"
+        r.hset(
+            job_key,
+            mapping={
+                "client_id": client_id,
+                "status": "processing",
+                "prompt": prompt,
+                "lyrics": lyrics,
+                "created_at": int(time.time() * 1000),
+            },
+        )
 
-    threading.Thread(
-        target=simulate_webhook,
-        args=(current_app.config["WEBHOOK_URL"], payload),
-        daemon=True,
-    ).start()
+        return jsonify({"status": "success"})
 
-    job_key = "job:4fea5fd7-a903-4930-a711-16ad8bf2c43"
-    r.hset(
-        job_key,
-        mapping={
-            "client_id": client_id,
-            "status": "processing",
-            "prompt": prompt,
-            "lyrics": lyrics,
-            "created_at": int(time.time() * 1000),
-        },
-    )
+    except Exception as e:
+        current_app.logger.exception(e)
+        return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
 
-    return jsonify({"success": True})
     # try:
     #     if not lyrics:
     #         lyrics = client.create_lyrics(prompt)
@@ -137,39 +149,22 @@ def webhook():
 
     r = current_app.extensions["redis"]
     # Only proceed if conversion_path exists
-    # conversion_path = data.get("conversion_path")
-    # conversion_id = data.get("conversion_id")
-    # print("DATA:")
-    # pprint(data)
-    # duration = data.get("duration")
-    #
-    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/66e5fd55-ff04-4293-a29d-31f39a2e6ccb/66e5fd55-ff04-4293-a29d-31f39a2e6ccb.mp3"
-    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
-    duration = 226
-    # try:
-    #     lyrics = json.loads(data.get("lyrics_timestamped"))
-    #     duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
-    #     duration = duration_ms / 1000.0
-    # except (json.JSONDecodeError, TypeError):
-    #     duration = None
-
-    if not conversion_id or not conversion_path or not duration:
-        return {"ok": False, "error": "Missing required fields"}, 400
+    conversion_path = data.get("conversion_path")
+    conversion_id = data.get("conversion_id")
 
     job_key = f"job:{conversion_id}"
 
     job = r.hgetall(job_key)
-    client_id = job["client_id"]
 
-    # get all entries in the playlist
+    if not conversion_id or not conversion_path or not job:
+        print("job still doesn't exist")
+        return {"ok": False, "error": "Missing required fields"}, 400
+
+    # Check duplicate queues
     playlist_entries = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
-
     already_queued = False
     for entry in playlist_entries:
         data = json.loads(entry)
-        print(data.get("conversion_id"))
-        print(job_key)
-        print()
         if f"job:{data.get('conversion_id')}" == job_key:
             already_queued = True
             break
@@ -177,61 +172,97 @@ def webhook():
     if already_queued:
         print("already queued")
         return {"ok": True, "already_queued": True}
-    print("webhook", job_key, client_id)
+    print("DATA:")
+    pprint(data)
+    #
+    # conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/3f2f4043-a87b-4544-8316-3c3655e4109e/3f2f4043-a87b-4544-8316-3c3655e4109e.mp3"
+    # conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
+    # duration = 226
+    # try:
 
-    # Persist job metadata
-    r.hset(
-        job_key,
-        mapping={
-            "conversion_path": conversion_path,
-            "duration": float(duration),
-            "status": "queued",
-            "source": "dynamic",
-        },
-    )
-    payload = {
-        "conversion_id": conversion_id,
-        "client_id": client_id,
-    }
+    client_id = job["client_id"]
 
-    r.rpush(
-        current_app.config["PLAYLIST_DYNAMIC_KEY"],
-        json.dumps(payload),
-    )
+    if data.get("subtype") == "music_ai":
+        r.hset(
+            job_key,
+            mapping={
+                "album_cover": data.get("album_cover_path"),
+                "conversion_path": conversion_path,
+                "duration": float(data.get("conversion_duration")),
+                "title": data.get("title"),
+                "status": "queued",
+                "source": "dynamic",
+            },
+        )
 
-    emit_queue_position_to_client(socketio, client_id)
-    # print("QUEUE DETAILS")
-    # print("L:", r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]))
-    # print("POS:", queue_position)
-    # print("CLIENTID:", client_id)
-    # socketio.emit(
-    #     "queue_position_update",
-    #     {
-    #         "conversion_id": conversion_id,
-    #         "queue_position": queue_position,
-    #         "queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
-    #     },
-    #     to=client_id,
-    # )
-    # Push ONLY the ID into the dynamic playlist
-    # queue_position = r.rpush(
-    #     current_app.config["PLAYLIST_DYNAMIC_KEY"],
-    #     conversion_id,
-    # )
+        emit_job_status(
+            socketio,
+            client_id,
+            status="queued",
+            message="Song Finished",
+        )
 
-    # Notify listeners
-    # r.publish(
-    #     "radio_events",
-    #     json.dumps(
-    #         {
-    #             "event": "queue_updated",
-    #             "conversion_id": conversion_id,
-    #             "queue_position": queue_position,
-    #         }
-    #     ),
-    # )
+        payload = {
+            "conversion_id": conversion_id,
+            "client_id": client_id,
+        }
+
+        r.rpush(
+            current_app.config["PLAYLIST_DYNAMIC_KEY"],
+            json.dumps(payload),
+        )
+
+        # emit_job_status(
+        #     socketio,
+        #     client_id,
+        #     conversion_id,
+        #     status="queued",
+        #     message="Song added to queue",
+        # )
+
+        emit_queue_position_to_client(socketio, client_id)
+
+        return {
+            "ok": True,
+            "message": "Song Finished",
+        }
 
     return {"ok": True}
+
+    # duration = 0
+    # if data.get("subtype") == "lyrics_timestamped":
+    #     emit_job_status(
+    #         socketio,
+    #         client_id,
+    #         conversion_id,
+    #         status="lyrics_timestamped",
+    #         message="Lyrics synchronized",
+    #     )
+
+    # lyrics = json.loads(data.get("lyrics_timestamped"))
+    # duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
+    # duration = duration_ms / 1000.0
+    # except (json.JSONDecodeError, TypeError):
+    #     duration = None
+
+    # Persist job metadata
+    # r.hset(
+    #     job_key,
+    #     mapping={
+    #         "conversion_path": conversion_path,
+    #         "duration": float(duration),
+    #         "status": "queued",
+    #         "source": "dynamic",
+    #     },
+    # )
+
+    # Push to queue
+
+    # return {
+    #     "ok": True,
+    #     "subtype": data.get("subtype"),
+    #     "message": "successfully created song",
+    # }
 
 
 @home_bp.route("/api/my-queue-position", methods=["GET"])
