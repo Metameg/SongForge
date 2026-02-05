@@ -101,6 +101,14 @@ export class RadioPlayer {
           </div>
         </div>
       `;
+
+
+      document.getElementById("submitBtn").disabled = false;
+      document.getElementById("submitBtn").textContent = "Submit";
+      document.getElementById("submitBtn").classList.remove("success");
+      document.getElementById("submitError").textContent = "";
+      this._resetRequestModal();
+
       return;
     }
     
@@ -121,6 +129,20 @@ export class RadioPlayer {
         </div>
       </div>
     `;
+  }
+
+  _resetRequestModal() {
+    document.getElementById("prompt").value = "";
+    document.getElementById("lyrics").value = "";
+    document.getElementById("errorMsg").textContent = "";
+
+    const submitBtn = document.getElementById("submitBtn");
+    submitBtn.disabled = false;
+    submitBtn.classList.remove("loading", "success");
+    submitBtn.textContent = "Submit";
+
+    document.getElementById("statusTimeline").innerHTML = "";
+    document.getElementById("postSubmitActions").classList.add("hidden");
   }
     
 

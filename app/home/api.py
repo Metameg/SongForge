@@ -37,6 +37,7 @@ def now_playing():
 
 
 def simulate_webhook(webhook_url, payload):
+    time.sleep(5)
     requests.post(webhook_url, json=payload, timeout=10)
 
 
@@ -47,6 +48,16 @@ def create_song():
     client_id = session.get("client_id")
     if not client_id:
         return {"ok": False, "error": "No client session"}, 401
+
+    # If client has an active job return
+    active_job_key = f"client:{client_id}:active_job"
+    if r.exists(active_job_key):
+        return jsonify(
+            {
+                "status": "failed",
+                "message": "You already have a song processing or queued. Please wait.",
+            }
+        ), 409
 
     data = request.get_json(silent=True)
 
@@ -73,21 +84,21 @@ def create_song():
         )
 
         # MUSICGPT CALL
-        conversion_ids, cost, error = client.create_music(prompt, lyrics)
+        # conversion_ids, cost, error = client.create_music(prompt, lyrics)
 
-        # payload = {
-        #     "conversion_id": "test-conversion-123",
-        #     "conversion_path": "/audio/song_1.mp3",
-        # }
-        #
-        # threading.Thread(
-        #     target=simulate_webhook,
-        #     args=(current_app.config["WEBHOOK_URL"], payload),
-        #     daemon=True,
-        # ).start()
-        conversion_id = conversion_ids[0]
-        job_key = f"job:{conversion_id}"
-        # job_key = "job:4fea5fd7-a903-4930-a711-16ad8bf2c43"
+        payload = {
+            "conversion_id": "test-conversion-123",
+            "conversion_path": "/audio/song_1.mp3",
+        }
+
+        threading.Thread(
+            target=simulate_webhook,
+            args=(current_app.config["WEBHOOK_URL"], payload),
+            daemon=True,
+        ).start()
+        # conversion_id = conversion_ids[0]
+        # job_key = f"job:{conversion_id}"
+        job_key = "job:4fea5fd7-a903-4930-a711-16ad8bf2c43"
         r.hset(
             job_key,
             mapping={
@@ -98,6 +109,7 @@ def create_song():
                 "created_at": int(time.time() * 1000),
             },
         )
+        r.set(active_job_key, job_key)
 
         return jsonify({"status": "success"})
 
@@ -149,9 +161,11 @@ def webhook():
 
     r = current_app.extensions["redis"]
     # Only proceed if conversion_path exists
-    conversion_path = data.get("conversion_path")
-    conversion_id = data.get("conversion_id")
-
+    # conversion_path = data.get("conversion_path")
+    # conversion_id = data.get("conversion_id")
+    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/3f2f4043-a87b-4544-8316-3c3655e4109e/3f2f4043-a87b-4544-8316-3c3655e4109e.mp3"
+    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
+    duration = 226
     job_key = f"job:{conversion_id}"
 
     job = r.hgetall(job_key)
@@ -169,27 +183,26 @@ def webhook():
             already_queued = True
             break
 
-    if already_queued:
-        print("already queued")
-        return {"ok": True, "already_queued": True}
+    # if already_queued:
+    #     print("already queued")
+    #     return {"ok": True, "already_queued": True}
     print("DATA:")
     pprint(data)
     #
-    # conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/3f2f4043-a87b-4544-8316-3c3655e4109e/3f2f4043-a87b-4544-8316-3c3655e4109e.mp3"
-    # conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
-    # duration = 226
+
     # try:
 
     client_id = job["client_id"]
 
-    if data.get("subtype") == "music_ai":
+    if data.get("subtype") == "music_ai" or True:
         r.hset(
             job_key,
             mapping={
-                "album_cover": data.get("album_cover_path"),
+                # "album_cover": data.get("album_cover_path"),
                 "conversion_path": conversion_path,
-                "duration": float(data.get("conversion_duration")),
-                "title": data.get("title"),
+                # "duration": float(data.get("conversion_duration")),
+                "duration": duration,
+                # "title": data.get("title"),
                 "status": "queued",
                 "source": "dynamic",
             },
@@ -212,16 +225,9 @@ def webhook():
             json.dumps(payload),
         )
 
-        # emit_job_status(
-        #     socketio,
-        #     client_id,
-        #     conversion_id,
-        #     status="queued",
-        #     message="Song added to queue",
-        # )
-
         emit_queue_position_to_client(socketio, client_id)
 
+        r.delete(f"client:{client_id}:active_job")
         return {
             "ok": True,
             "message": "Song Finished",
@@ -277,13 +283,16 @@ def my_queue_position():
 
     raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
 
-    for idx, raw in enumerate(raw_items):
-        try:
-            item = json.loads(raw.decode())
-        except Exception:
-            continue
+    for idx, item in enumerate(raw_items):
+        item = json.loads(item)
 
-        if item.get("session_id") == client_id:  # <- match against client_id only
+        # try:
+        #     item = json.loads(raw.decode())
+        #     print(item)
+        # except Exception:
+        #     continue
+
+        if item.get("client_id") == client_id:  # <- match against client_id only
             return {
                 "in_queue": True,
                 "queue_position": idx + 1,
@@ -296,6 +305,7 @@ def my_queue_position():
 @home_bp.route("/api/mark-played", methods=["POST"])
 def mark_played():
     r = current_app.extensions["redis"]
+
     data = request.get_json()
     cid = data.get("cid")
     keys = r.keys("job:*")
@@ -330,3 +340,25 @@ def mark_played():
             break
 
     return {"ok": True}
+
+
+# @home_bp.route("/api/has-song-in-queue", methods=["GET"])
+# def has_song_in_queue():
+#     r = current_app.extensions["redis"]
+#
+#     client_id = session.get("client_id")
+#     if not client_id:
+#         return {"has_song": False, "message": "No client ID found."}
+#
+#     raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+#
+#     for raw in raw_items:
+#         try:
+#             item = json.loads(raw.decode())
+#         except Exception:
+#             continue
+#
+#         if item.get("client_id") == client_id:
+#             return {"has_song": True}
+#
+#     return {"has_song": False}

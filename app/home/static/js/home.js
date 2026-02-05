@@ -19,9 +19,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 
-    requestBtn.addEventListener("click", () => {
-      resetRequestModal();
+    requestBtn.addEventListener("click", async () => {
       modal.classList.add("active");
+
+      const res = await fetch("/api/my-queue-position");
+      const data = await res.json();
+      console.log(data);
+      if (data.in_queue) {
+        console.log("has song");
+        submitBtn.disabled = true;
+        document.getElementById("submitError").textContent = "Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
+        return
+      }
+
+      // resetRequestModal();
     });
 
     modal.addEventListener("click", e => {
@@ -40,9 +51,19 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("requestModal").classList.remove("active");
     };
 
-    document.getElementById("newRequestBtn").onclick = () => {
-      resetRequestModal();
-    };
+    // document.getElementById("newRequestBtn").onclick = async () => {
+    //
+    //   const res = await fetch("/api/my-queue-position");
+    //   const data = await res.json();
+    //   if (data.in_queue) {
+    //     console.log("has song");
+    //     submitBtn.disabled = true;
+    //     document.getElementById("submitError").textContent = "Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
+    //     return
+    //   }
+    //
+    //   resetRequestModal();
+    // };
 
     document.getElementById("closeModalBtn").onclick = () => {
       document.getElementById("requestModal").classList.remove("active");

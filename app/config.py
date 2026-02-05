@@ -15,7 +15,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://productive-reader-costs-early.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://caution-sheet-heart-discover.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 
