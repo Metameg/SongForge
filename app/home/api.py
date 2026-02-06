@@ -171,7 +171,6 @@ def webhook():
     job = r.hgetall(job_key)
 
     if not conversion_id or not conversion_path or not job:
-        print("job still doesn't exist")
         return {"ok": False, "error": "Missing required fields"}, 400
 
     # Check duplicate queues
@@ -186,8 +185,6 @@ def webhook():
     # if already_queued:
     #     print("already queued")
     #     return {"ok": True, "already_queued": True}
-    print("DATA:")
-    pprint(data)
     #
 
     # try:
@@ -277,7 +274,6 @@ def my_queue_position():
 
     # get the client_id from the session
     client_id = session.get("client_id")
-    print("checking queue", client_id)
     if not client_id:
         return {"in_queue": False, "message": "No client ID found."}
 
@@ -285,12 +281,6 @@ def my_queue_position():
 
     for idx, item in enumerate(raw_items):
         item = json.loads(item)
-
-        # try:
-        #     item = json.loads(raw.decode())
-        #     print(item)
-        # except Exception:
-        #     continue
 
         if item.get("client_id") == client_id:  # <- match against client_id only
             return {
@@ -314,7 +304,6 @@ def mark_played():
         cid.startswith("static")
         or r.lpos(current_app.config["HISTORY_KEY"], cid) is not None
     ):
-        print("not adding to history")
         return {"ok": True}
 
     for key in keys:

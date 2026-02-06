@@ -16,7 +16,7 @@ document.getElementById("submitBtn").onclick = async () => {
     const data = await res.json();
     if (data.in_queue) {
       submitBtn.disabled = true;
-      document.getElementById("submitError").textContent = "Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
+      document.getElementById("submitError").textContent = "⚠ Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
       return
   }
 

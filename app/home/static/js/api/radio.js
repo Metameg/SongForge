@@ -23,7 +23,6 @@ export class RadioPlayer {
     this._bindSocket();
     this._bindAudio();
     
-    console.log("RadioPlayer initialized");
   }
 
   /* ---------------- UI ---------------- */
@@ -53,13 +52,11 @@ export class RadioPlayer {
     });
 
     socket.on("queue_position_update", (data) => {
-      console.log("anything?");
       this._onQueuePositionUpdate(data);
     });
   }
 
   async _onTrackChanged(data) {
-    console.log("Track changed:", data.cid);
     
     // Clear waiting state
     this.waitingForNextTrack = false;
@@ -82,7 +79,6 @@ export class RadioPlayer {
   }
 
   _onQueuePositionUpdate(data) {
-    console.log("Queue position updated:", data);
     this.userQueueEntry = data;
     this._renderQueueStatus();
   }
@@ -148,13 +144,11 @@ export class RadioPlayer {
 
    async updateQueuePosition() {
 
-    console.log("updating queue position");
     try {
       const res = await fetch("/api/my-queue-position");
       const data = await res.json();
       
       this.userQueueEntry = data;
-      console.log(this.userQueueEntry);
       this._renderQueueStatus();
     } catch (error) {
       console.error("Error fetching queue position:", error);
@@ -168,7 +162,6 @@ export class RadioPlayer {
   /* ---------------- Audio ---------------- */
   _bindAudio() {
     this.audio.addEventListener("ended", () => {
-      console.log("Track ended - pausing until next track arrives");
       
       // Pause and wait for track_changed event
       this.waitingForNextTrack = true;
@@ -177,7 +170,6 @@ export class RadioPlayer {
       // Safety fallback: if track_changed doesn't arrive, try syncing
       setTimeout(() => {
         if (this.waitingForNextTrack && this.userWantsPlaying) {
-          console.log("No track_changed received, forcing sync");
           this.waitingForNextTrack = false;
           this.syncRadio();
         }
@@ -196,14 +188,8 @@ export class RadioPlayer {
 
     // Handle cases where browser blocks autoplay
     this.audio.addEventListener("pause", (e) => {
-      // Only attempt resume if:
-      // 1. User wants to be playing
-      // 2. We're not transitioning
-      // 3. We're not waiting for the next track
       if (this.userWantsPlaying && !this.isTransitioning && !this.waitingForNextTrack) {
-        console.log("Unexpected pause - attempting resume");
         this.audio.play().catch(err => {
-          console.log("Autoplay blocked:", err.message);
         });
       }
     });
@@ -234,14 +220,12 @@ export class RadioPlayer {
 
   /* ---------------- API ---------------- */
   async syncRadio() {
-    console.log("Syncing radio...");
     
     try {
       const res = await fetch("/api/radio/now-playing");
       const data = await res.json();
       
       if (!data.playing) {
-        console.log("No track currently playing");
         this.audio.pause();
         return;
       }
@@ -277,7 +261,6 @@ export class RadioPlayer {
         },
         body: JSON.stringify({ cid: this.cid }),
       });
-      console.log("Marked as played:", this.cid);
     } catch (error) {
       console.error("Error marking track as played:", error);
     }

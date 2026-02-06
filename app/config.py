@@ -15,7 +15,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://caution-sheet-heart-discover.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://building-fairfield-opportunity-tests.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

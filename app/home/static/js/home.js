@@ -1,5 +1,4 @@
 
-// import { RadioPlayer } from "./api/radio.js";
 import { initializeRadioPlayer } from "./api/radio.js";
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -24,15 +23,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const res = await fetch("/api/my-queue-position");
       const data = await res.json();
-      console.log(data);
       if (data.in_queue) {
-        console.log("has song");
         submitBtn.disabled = true;
-        document.getElementById("submitError").textContent = "Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
+        document.getElementById("submitError").textContent = "⚠ Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
         return
       }
 
-      // resetRequestModal();
     });
 
     modal.addEventListener("click", e => {
@@ -43,6 +39,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     lyricsBtn.addEventListener("click", () => {
       wrapper.classList.toggle("show-lyrics");
+      lyricsBtn.classList.toggle("active");
     });
 
 
@@ -51,19 +48,7 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("requestModal").classList.remove("active");
     };
 
-    // document.getElementById("newRequestBtn").onclick = async () => {
-    //
-    //   const res = await fetch("/api/my-queue-position");
-    //   const data = await res.json();
-    //   if (data.in_queue) {
-    //     console.log("has song");
-    //     submitBtn.disabled = true;
-    //     document.getElementById("submitError").textContent = "Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
-    //     return
-    //   }
-    //
-    //   resetRequestModal();
-    // };
+    
 
     document.getElementById("closeModalBtn").onclick = () => {
       document.getElementById("requestModal").classList.remove("active");
