@@ -77,3 +77,20 @@ def emit_job_status(socketio, client_id, status, message=None):
         },
         room=client_id,
     )
+
+
+def remove_from_processing(r, key, job_key):
+    items = r.lrange(key, 0, -1)
+
+    remaining = []
+    for item in items:
+        data = json.loads(item)
+        print(data)
+        print("JOBKEY:", job_key, "data", data.get("job_key"))
+        if data.get("job_key") != job_key:
+            remaining.append(item)
+
+    r.delete(key)
+
+    if remaining:
+        r.rpush(key, *remaining)

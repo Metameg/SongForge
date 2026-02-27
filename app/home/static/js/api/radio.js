@@ -5,12 +5,14 @@ export class RadioPlayer {
     audioEl,
     playButton,
     nowPlayingEl,
-    queueStatusEl
+    queueStatusEl,
+    thumbnailEl
   }) {
     this.audio = audioEl;
     this.playBtn = playButton;
     this.nowPlaying = nowPlayingEl;
     this.queueStatusEl = queueStatusEl;
+    this.thumbnailEl = thumbnailEl;
     
     // State
     this.cid = null;
@@ -72,21 +74,42 @@ export class RadioPlayer {
     
     // Update UI
     if (this.nowPlaying) {
-      this.nowPlaying.textContent = data.cid;
+      this.nowPlaying.textContent = data.title;
+      if (data.source != 'static') {
+        this.thumbnailEl.style.backgroundImage = `url("${data.album_cover}")`;
+      } else {
+        this.thumbnailEl.style.backgroundImage = null;
+      }
     }
 
-    this.updateQueuePosition();
+
+    // this.updateQueuePosition();
   }
 
   _onQueuePositionUpdate(data) {
+    console.log("queue status update", data);
     this.userQueueEntry = data;
     this._renderQueueStatus();
   }
 
   // Enhanced queue status rendering
   _renderQueueStatus() {
-    if (!this.queueStatusEl) return;
-    
+    if (this.userQueueEntry?.now_playing) {
+        this.queueStatusEl.innerHTML = `
+            <div class="queue-now-playing">
+                <div class="queue-now-playing-icon">🎵</div>
+                <div class="queue-now-playing-text">
+                    <p class="queue-now-playing-title">Your song is now playing!</p>
+                    <p class="queue-now-playing-subtitle">Sit back and enjoy 🎶</p>
+                </div>
+            </div>
+        `;
+        document.getElementById("submitBtn").textContent = "Playing...";
+        return;
+    }
+
+    // if (!this.queueStatusEl) return;
+    console.log(this.userQueueEntry);
     if (!this.userQueueEntry || !this.userQueueEntry['in_queue']) {
       this.queueStatusEl.innerHTML = `
         <div class="queue-empty">
@@ -103,6 +126,7 @@ export class RadioPlayer {
       document.getElementById("submitBtn").textContent = "Submit";
       document.getElementById("submitBtn").classList.remove("success");
       document.getElementById("submitError").textContent = "";
+
       this._resetRequestModal();
 
       return;
@@ -128,8 +152,7 @@ export class RadioPlayer {
   }
 
   _resetRequestModal() {
-    document.getElementById("prompt").value = "";
-    document.getElementById("lyrics").value = "";
+    
     document.getElementById("errorMsg").textContent = "";
 
     const submitBtn = document.getElementById("submitBtn");

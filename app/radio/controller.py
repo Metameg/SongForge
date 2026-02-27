@@ -26,7 +26,7 @@ def select_next_track(r):
 
 
 def advance_radio():
-    print("changing song")
+    print("changing songs")
     r = current_app.extensions["redis"]
 
     cid, source = select_next_track(r)
@@ -39,12 +39,14 @@ def advance_radio():
     job_key = f"job:{cid}"
     path = r.hget(job_key, "conversion_path")
     duration = float(r.hget(job_key, "duration") or 0)
-
+    album_cover_path = (r.hget(job_key, "album_cover"),)
+    title = r.hget(job_key, "title")
     now = int(time.time() * 1000)
 
     r.hset(
         "radio:now_playing",
         mapping={
+            "job_key": job_key,
             "conversion_id": cid,
             "conversion_path": path,
             "source": source,
@@ -61,8 +63,11 @@ def advance_radio():
                 "event": "track_changed",
                 "cid": cid,
                 "conversion_path": path,
+                "title": title,
+                "album_cover": album_cover_path,
                 "started_at": now,
                 "duration": duration,
+                "source": source,
                 "index_key": r.get("playlist:static:index"),
             }
         ),
@@ -70,6 +75,20 @@ def advance_radio():
 
     # 🔁 Update remaining queue positions (per-user)
     emit_queue_positions(r)
+    print("SOURCE", source)
+    if source == "dynamic":
+        client_id = r.hget(job_key, "client_id")
+        if client_id:
+            if isinstance(client_id, bytes):
+                client_id = client_id.decode()
+            socketio.emit(
+                "queue_position_update",
+                {
+                    "conversion_id": cid,
+                    "now_playing": True,
+                },
+                to=client_id,
+            )
 
 
 def emit_queue_positions(r):
@@ -87,7 +106,6 @@ def emit_queue_positions(r):
 
         # Use client_id stored in the job, not Flask session
         client_id = item.get("client_id")  # 🔑 previously session_id
-        print("queue client id", client_id)
         conversion_id = item.get("conversion_id")
 
         if not client_id or not conversion_id:

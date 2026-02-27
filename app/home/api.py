@@ -14,8 +14,11 @@ from pathlib import Path
 from . import home_bp
 import redis
 from mutagen._file import File as MutagenFile
-from .utilities import emit_job_status, emit_queue_position_to_client
-# app = Flask(__name__)
+from .utilities import (
+    emit_job_status,
+    emit_queue_position_to_client,
+    remove_from_processing,
+)
 
 
 @home_bp.route("/api/radio/now-playing", methods=["GET"])
@@ -86,9 +89,20 @@ def create_song():
         # MUSICGPT CALL
         # conversion_ids, cost, error = client.create_music(prompt, lyrics)
 
+        # conversion_id = conversion_ids[0]
+        # job_key = f"job:{conversion_id}"
+
+        conversion_id = "6bb6918a-bd85-4e18-ac25-b4db55209127"
+        job_key = "job:6bb6918a-bd85-4e18-ac25-b4db55209127"
+
         payload = {
-            "conversion_id": "test-conversion-123",
-            "conversion_path": "/audio/song_1.mp3",
+            "job_key": job_key,
+            "conversion_id": conversion_id,
+            "client_id": client_id,
+            "status": "processing",
+            "prompt": prompt,
+            "lyrics": lyrics,
+            "created_at": int(time.time() * 1000),
         }
 
         threading.Thread(
@@ -96,18 +110,14 @@ def create_song():
             args=(current_app.config["WEBHOOK_URL"], payload),
             daemon=True,
         ).start()
-        # conversion_id = conversion_ids[0]
-        # job_key = f"job:{conversion_id}"
-        job_key = "job:4fea5fd7-a903-4930-a711-16ad8bf2c43"
+
+        r.rpush(
+            current_app.config["PLAYLIST_PROCESSING_KEY"],
+            json.dumps(payload),
+        )
         r.hset(
             job_key,
-            mapping={
-                "client_id": client_id,
-                "status": "processing",
-                "prompt": prompt,
-                "lyrics": lyrics,
-                "created_at": int(time.time() * 1000),
-            },
+            mapping=payload,
         )
         r.set(active_job_key, job_key)
 
@@ -163,24 +173,33 @@ def webhook():
     # Only proceed if conversion_path exists
     # conversion_path = data.get("conversion_path")
     # conversion_id = data.get("conversion_id")
-    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/3f2f4043-a87b-4544-8316-3c3655e4109e/3f2f4043-a87b-4544-8316-3c3655e4109e.mp3"
-    conversion_id = "4fea5fd7-a903-4930-a711-16ad8bf2c43"
-    duration = 226
+
+    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/6bb6918a-bd85-4e18-ac25-b4db55209127/6bb6918a-bd85-4e18-ac25-b4db55209127.mp3"
+    conversion_id = "6bb6918a-bd85-4e18-ac25-b4db55209127"
+    duration = 178.329
     job_key = f"job:{conversion_id}"
 
+    # For test image (Testing)
+    # current_dir = os.path.dirname(os.path.abspath(__file__))
+    # app_dir = os.path.dirname(current_dir)
+    album_cover_path = os.path.join(
+        "https://www.virtualmusicalinstruments.com/musical_instruments/guitar/images/virtual_acoustic_guitar.jpg"
+    )
+    title = "Test song"
     job = r.hgetall(job_key)
-
-    if not conversion_id or not conversion_path or not job:
-        return {"ok": False, "error": "Missing required fields"}, 400
+    print("WEBHOOK", job_key)
+    pprint(data)
+    # if not conversion_id or not conversion_path or not job:
+    #     return {"ok": False, "error": "Missing required fields"}, 400
 
     # Check duplicate queues
-    playlist_entries = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
-    already_queued = False
-    for entry in playlist_entries:
-        data = json.loads(entry)
-        if f"job:{data.get('conversion_id')}" == job_key:
-            already_queued = True
-            break
+    # playlist_entries = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+    # already_queued = FalsePL
+    # for entry in playlist_entries:
+    #     data = json.loads(entry)
+    #     if f"job:{data.get('conversion_id')}" == job_key:
+    #         already_queued = True
+    #         break
 
     # if already_queued:
     #     print("already queued")
@@ -195,11 +214,14 @@ def webhook():
         r.hset(
             job_key,
             mapping={
+                "job_key": job_key,
+                "album_cover": album_cover_path,
                 # "album_cover": data.get("album_cover_path"),
                 "conversion_path": conversion_path,
                 # "duration": float(data.get("conversion_duration")),
                 "duration": duration,
                 # "title": data.get("title"),
+                "title": title,
                 "status": "queued",
                 "source": "dynamic",
             },
@@ -216,6 +238,10 @@ def webhook():
             "conversion_id": conversion_id,
             "client_id": client_id,
         }
+
+        remove_from_processing(
+            r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key
+        )
 
         r.rpush(
             current_app.config["PLAYLIST_DYNAMIC_KEY"],
@@ -277,7 +303,9 @@ def my_queue_position():
     if not client_id:
         return {"in_queue": False, "message": "No client ID found."}
 
-    raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+    raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1) + r.lrange(
+        current_app.config["PLAYLIST_PROCESSING_KEY"], 0, -1
+    )
 
     for idx, item in enumerate(raw_items):
         item = json.loads(item)

@@ -9,13 +9,14 @@ class Config:
     REDIS_DB = 0
     PLAYLIST_STATIC_KEY = "playlist:static"
     PLAYLIST_DYNAMIC_KEY = "playlist:dynamic"
+    PLAYLIST_PROCESSING_KEY = "playlist:processing"
     HISTORY_KEY = "playlist:history"
     MAX_HISTORY_JOBS = 10
     JOB_KEY_TEMPLATE = "job:{}"
 
 
 class DevelopmentConfig(Config):
-    PUBLIC_BASE_URL = "https://building-fairfield-opportunity-tests.trycloudflare.com"
+    PUBLIC_BASE_URL = "https://trees-shark-presenting-benjamin.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
 
 

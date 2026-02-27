@@ -13,7 +13,8 @@ document.addEventListener("DOMContentLoaded", () => {
       audioEl: document.getElementById("radioAudio"),
       playButton: playBtn,
       nowPlayingEl: document.getElementById("nowPlaying"),
-      queueStatusEl: document.getElementById("queueStatus")
+      queueStatusEl: document.getElementById("queueStatus"),
+      thumbnailEl: document.getElementById("thumbnailImg")
     });
 
 
@@ -25,7 +26,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       if (data.in_queue) {
         submitBtn.disabled = true;
-        document.getElementById("submitError").textContent = "⚠ Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
+        document.getElementById("submitError").textContent = "⚠ You currently have a song being created or in queue. Please wait for your song to start playing before submitting another request.";
         return
       }
 
@@ -45,12 +46,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
     document.querySelector(".modal-close-btn").onclick = () => {
+      document.getElementById("prompt").value = "";
+      document.getElementById("lyrics").value = "";
       document.getElementById("requestModal").classList.remove("active");
     };
 
     
 
     document.getElementById("closeModalBtn").onclick = () => {
+      document.getElementById("prompt").value = "";
+      document.getElementById("lyrics").value = "";
       document.getElementById("requestModal").classList.remove("active");
     };
 });
@@ -58,16 +63,3 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 
-function resetRequestModal() {
-  document.getElementById("prompt").value = "";
-  document.getElementById("lyrics").value = "";
-  document.getElementById("errorMsg").textContent = "";
-
-  const submitBtn = document.getElementById("submitBtn");
-  submitBtn.disabled = false;
-  submitBtn.classList.remove("loading", "success");
-  submitBtn.textContent = "Submit";
-
-  document.getElementById("statusTimeline").innerHTML = "";
-  document.getElementById("postSubmitActions").classList.add("hidden");
-}

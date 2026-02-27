@@ -4,6 +4,7 @@ import { socket } from "./socket.js";
 const statusTimeline = document.getElementById("statusTimeline");
 let submittingStatus;
 let completedStatus;
+let finishedStatus;
 
 document.getElementById("submitBtn").onclick = async () => {
   const submitBtn = document.getElementById("submitBtn");
@@ -79,6 +80,8 @@ socket.on("job_status_update", (payload) => {
     case "queued":
       completeStatus(completedStatus);
       document.getElementById("postSubmitActions").classList.remove("hidden");
+      finishedStatus = addStatus("Song created successfully and has been added to the queue!");
+      completeStatus(finishedStatus);
       break;
 
   }
