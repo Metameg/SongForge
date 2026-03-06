@@ -10,27 +10,31 @@ from mutagen._file import File as MutagenFile
 
 
 def init_static_playlist(app, r):
-    list_exists = r.llen(app.config["PLAYLIST_STATIC_KEY"]) > 0
     audio_dir = os.path.join(app.static_folder, "audios")
+    files = [f for f in os.listdir(audio_dir) if f.lower().endswith((".mp3", ".ogg", ".wav"))]
 
-    for f in os.listdir(audio_dir):
-        if f.lower().endswith((".mp3", ".ogg", ".wav")):
+    # Rebuild the list if it doesn't match the files on disk
+    if r.llen(app.config["PLAYLIST_STATIC_KEY"]) != len(files):
+        r.delete(app.config["PLAYLIST_STATIC_KEY"])
+        r.delete("playlist:static:index")
+
+        for f in sorted(files):
             cid = f"static-{f}"
-            job_key = f"job:{cid}"
+            r.rpush(app.config["PLAYLIST_STATIC_KEY"], cid)
 
-            audio = MutagenFile(os.path.join(audio_dir, f))
-            if audio is None or not hasattr(audio, "info") or audio.info is None:
-                app.logger.warning(f"Skipping unreadable audio file: {f}")
-                continue
-            duration = audio.info.length  # seconds
+    # Always write job hashes so they survive Redis restarts or partial init failures
+    for f in files:
+        cid = f"static-{f}"
+        job_key = f"job:{cid}"
 
-            # Always write job hashes so they survive Redis restarts or partial failures
-            r.hset(job_key, "conversion_path", f"/static/audios/{f}")
-            r.hset(job_key, "status", "static")
-            r.hset(job_key, "duration", duration)
+        audio = MutagenFile(os.path.join(audio_dir, f))
+        if audio is None or not hasattr(audio, "info") or audio.info is None:
+            app.logger.warning(f"Skipping unreadable audio file: {f}")
+            continue
 
-            if not list_exists:
-                r.rpush(app.config["PLAYLIST_STATIC_KEY"], cid)
+        r.hset(job_key, "conversion_path", f"/static/audios/{f}")
+        r.hset(job_key, "status", "static")
+        r.hset(job_key, "duration", audio.info.length)
 
 
 def redis_listener(r):
