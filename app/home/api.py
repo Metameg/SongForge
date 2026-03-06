@@ -29,19 +29,27 @@ def now_playing():
     if not song or not started_at:
         return jsonify({"playing": False})
 
+    cid = song.get("conversion_id", "")
+    job_key = song.get("job_key", f"job:{cid}")
+    job = r.hgetall(job_key) if job_key else {}
+
     return jsonify(
         {
             "playing": True,
+            "cid": cid,
             "conversion_path": song["conversion_path"],
             "started_at": int(started_at),
             "duration": float(song.get("duration", 0)),
+            "source": song.get("source", "static"),
+            "title": job.get("title", ""),
+            "album_cover": job.get("album_cover", ""),
         }
     )
 
 
-def simulate_webhook(webhook_url, payload):
+def simulate_webhook(payload):
     time.sleep(5)
-    requests.post(webhook_url, json=payload, timeout=10)
+    requests.post("http://localhost:5000/webhook", json=payload, timeout=10)
 
 
 @home_bp.route("/api/create-song", methods=["POST"])
@@ -107,7 +115,7 @@ def create_song():
 
         threading.Thread(
             target=simulate_webhook,
-            args=(current_app.config["WEBHOOK_URL"], payload),
+            args=(payload,),
             daemon=True,
         ).start()
 
@@ -115,10 +123,8 @@ def create_song():
             current_app.config["PLAYLIST_PROCESSING_KEY"],
             json.dumps(payload),
         )
-        r.hset(
-            job_key,
-            mapping=payload,
-        )
+        for k, v in payload.items():
+            r.hset(job_key, k, v)
         r.set(active_job_key, job_key)
 
         return jsonify({"status": "success"})
@@ -211,21 +217,13 @@ def webhook():
     client_id = job["client_id"]
 
     if data.get("subtype") == "music_ai" or True:
-        r.hset(
-            job_key,
-            mapping={
-                "job_key": job_key,
-                "album_cover": album_cover_path,
-                # "album_cover": data.get("album_cover_path"),
-                "conversion_path": conversion_path,
-                # "duration": float(data.get("conversion_duration")),
-                "duration": duration,
-                # "title": data.get("title"),
-                "title": title,
-                "status": "queued",
-                "source": "dynamic",
-            },
-        )
+        r.hset(job_key, "job_key", job_key)
+        r.hset(job_key, "album_cover", album_cover_path)
+        r.hset(job_key, "conversion_path", conversion_path)
+        r.hset(job_key, "duration", duration)
+        r.hset(job_key, "title", title)
+        r.hset(job_key, "status", "queued")
+        r.hset(job_key, "source", "dynamic")
 
         emit_job_status(
             socketio,
@@ -328,10 +326,8 @@ def mark_played():
     cid = data.get("cid")
     keys = r.keys("job:*")
 
-    if (
-        cid.startswith("static")
-        or r.lpos(current_app.config["HISTORY_KEY"], cid) is not None
-    ):
+    history = r.lrange(current_app.config["HISTORY_KEY"], 0, -1)
+    if cid.startswith("static") or f"job:{cid}" in history:
         return {"ok": True}
 
     for key in keys:

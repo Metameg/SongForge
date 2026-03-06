@@ -21,12 +21,21 @@
 
   <div class="audio-card">
     <div id="thumbnailImg" class="audio-thumb">
-      <button id="playBtn" class="play-btn" >
-        ▶
-      </button>
+      <div class="audio-visualizer">
+        <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+        <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+        <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+        <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+        <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+      </div>
+      <button id="playBtn" class="play-btn">▶</button>
     </div>
 
     <div class="audio-meta">
+      <div class="live-badge">
+        <span class="live-dot"></span>
+        <span class="live-label">LIVE</span>
+      </div>
       <h1>Live Stream</h1>
       <span id="nowPlaying">Now Playing</span>
     </div>

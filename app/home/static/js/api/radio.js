@@ -45,6 +45,16 @@ export class RadioPlayer {
     this.playBtn.textContent = this.userWantsPlaying ? "⏸" : "▶";
   }
 
+  _setAlbumCover(url) {
+    if (url) {
+      this.thumbnailEl.style.backgroundImage = `url("${url}")`;
+      this.thumbnailEl.classList.add("has-cover");
+    } else {
+      this.thumbnailEl.style.backgroundImage = "";
+      this.thumbnailEl.classList.remove("has-cover");
+    }
+  }
+
   /* ---------------- Socket ---------------- */
   _bindSocket() {
     socket.on("radio_events", (data) => {
@@ -74,16 +84,19 @@ export class RadioPlayer {
     
     // Update UI
     if (this.nowPlaying) {
-      this.nowPlaying.textContent = data.title;
-      if (data.source != 'static') {
-        this.thumbnailEl.style.backgroundImage = `url("${data.album_cover}")`;
-      } else {
-        this.thumbnailEl.style.backgroundImage = null;
-      }
+      this.nowPlaying.textContent = data.title || "Now Playing";
+    }
+    if (data.source !== "static" && data.album_cover) {
+      this._setAlbumCover(data.album_cover);
+    } else {
+      this._setAlbumCover(null);
     }
 
-
-    // this.updateQueuePosition();
+    // If this track matches the user's queued song, flip queue widget to "now playing"
+    if (data.source !== "static" && this.userQueueEntry?.conversion_id === data.cid) {
+      this.userQueueEntry = { ...this.userQueueEntry, now_playing: true, in_queue: false };
+      this._renderQueueStatus();
+    }
   }
 
   _onQueuePositionUpdate(data) {
@@ -184,6 +197,14 @@ export class RadioPlayer {
 
   /* ---------------- Audio ---------------- */
   _bindAudio() {
+    this.audio.addEventListener("play", () => {
+      this.thumbnailEl.classList.add("playing");
+    });
+
+    this.audio.addEventListener("pause", () => {
+      this.thumbnailEl.classList.remove("playing");
+    });
+
     this.audio.addEventListener("ended", () => {
       
       // Pause and wait for track_changed event
@@ -260,9 +281,14 @@ export class RadioPlayer {
       if (needsSync) {
         this.cid = data.cid;
         await this._loadTrack(data.conversion_path, data.started_at);
-        
+
         if (this.nowPlaying) {
-          this.nowPlaying.textContent = data.cid;
+          this.nowPlaying.textContent = data.title || "Now Playing";
+        }
+        if (data.source !== "static" && data.album_cover) {
+          this._setAlbumCover(data.album_cover);
+        } else {
+          this._setAlbumCover(null);
         }
       } else if (this.userWantsPlaying && this.audio.paused && !this.waitingForNextTrack) {
         // Just resume if we have the right track but it's paused

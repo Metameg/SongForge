@@ -43,16 +43,14 @@ def advance_radio():
     title = r.hget(job_key, "title")
     now = int(time.time() * 1000)
 
-    r.hset(
-        "radio:now_playing",
-        mapping={
-            "job_key": job_key,
-            "conversion_id": cid,
-            "conversion_path": path,
-            "source": source,
-            "duration": duration,
-        },
-    )
+    if not path:
+        return
+
+    r.hset("radio:now_playing", "job_key", job_key)
+    r.hset("radio:now_playing", "conversion_id", cid)
+    r.hset("radio:now_playing", "conversion_path", path)
+    r.hset("radio:now_playing", "source", source)
+    r.hset("radio:now_playing", "duration", duration)
     r.set("radio:started_at", now)
 
     # Notify clients

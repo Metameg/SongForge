@@ -42,8 +42,24 @@ def get_queue_info_by_client(client_id):
 def emit_queue_position_to_client(socketio, client_id):
     """
     Emit queue position update to a specific client.
-    Finds their position in the queue and emits the update.
+    Always checks if the client's song is currently on-air first.
     """
+    r = current_app.extensions["redis"]
+
+    # If this client's song is currently playing, tell them that — not queue position
+    now_playing = r.hgetall("radio:now_playing")
+    if now_playing.get("source") == "dynamic":
+        job_key = now_playing.get("job_key")
+        if job_key:
+            job = r.hgetall(job_key)
+            if job.get("client_id") == client_id:
+                socketio.emit(
+                    "queue_position_update",
+                    {"now_playing": True, "conversion_id": now_playing.get("conversion_id")},
+                    to=client_id,
+                )
+                return
+
     queue_info = get_queue_info_by_client(client_id)
 
     if queue_info["found"]:

@@ -69,12 +69,114 @@ p {
 .audio-thumb {
   position: relative;
   height: 260px;
-  background: linear-gradient(135deg, #092132 0%,#67447c 50%,#4e60a2 80%);
+  background: linear-gradient(135deg, #092132 0%, #1a1040 40%, #0d1a2e 100%);
   display: flex;
   align-items: center;
   justify-content: center;
   background-position: center;
+  background-size: cover;
   background-repeat: no-repeat;
+  overflow: hidden;
+}
+
+/* ---------- Audio Visualizer ---------- */
+.audio-visualizer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 28px;
+  pointer-events: none;
+  transition: opacity 0.5s ease;
+}
+
+.has-cover .audio-visualizer {
+  opacity: 0;
+}
+
+.bar {
+  flex: 1;
+  max-width: 7px;
+  height: 120px;
+  border-radius: 4px;
+  background: linear-gradient(to top, #007ebf 0%, #6c3fc5 60%, #c471ed 100%);
+  box-shadow: 0 0 8px rgba(100, 60, 200, 0.4);
+  transform-origin: center;
+  transform: scaleY(0.08);
+  opacity: 0.35;
+  animation: barWave 1.6s ease-in-out infinite alternate;
+  animation-play-state: paused;
+}
+
+.audio-thumb.playing .bar {
+  animation-play-state: running;
+  opacity: 1;
+  box-shadow: 0 0 14px rgba(100, 60, 200, 0.7);
+}
+
+/* Staggered delays — evenly distributed across one full wave cycle */
+.bar:nth-child(1)  { animation-delay:  0s;     }
+.bar:nth-child(2)  { animation-delay: -0.08s;  }
+.bar:nth-child(3)  { animation-delay: -0.16s;  }
+.bar:nth-child(4)  { animation-delay: -0.24s;  }
+.bar:nth-child(5)  { animation-delay: -0.32s;  }
+.bar:nth-child(6)  { animation-delay: -0.40s;  }
+.bar:nth-child(7)  { animation-delay: -0.48s;  }
+.bar:nth-child(8)  { animation-delay: -0.56s;  }
+.bar:nth-child(9)  { animation-delay: -0.64s;  }
+.bar:nth-child(10) { animation-delay: -0.72s;  }
+.bar:nth-child(11) { animation-delay: -0.80s;  }
+.bar:nth-child(12) { animation-delay: -0.88s;  }
+.bar:nth-child(13) { animation-delay: -0.96s;  }
+.bar:nth-child(14) { animation-delay: -1.04s;  }
+.bar:nth-child(15) { animation-delay: -1.12s;  }
+.bar:nth-child(16) { animation-delay: -1.20s;  }
+.bar:nth-child(17) { animation-delay: -1.28s;  }
+.bar:nth-child(18) { animation-delay: -1.36s;  }
+.bar:nth-child(19) { animation-delay: -1.44s;  }
+.bar:nth-child(20) { animation-delay: -1.52s;  }
+
+@keyframes barWave {
+  0%   { transform: scaleY(0.08); }
+  100% { transform: scaleY(1);    }
+}
+
+/* ---------- LIVE Badge ---------- */
+.audio-meta {
+  position: relative;
+}
+
+.live-badge {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e74c3c;
+  flex-shrink: 0;
+  animation: livePulse 1.4s ease-in-out infinite;
+}
+
+.live-label {
+  font-family: 'Poppins', sans-serif;
+  font-size: 11px;
+  font-weight: 900;
+  color: #e74c3c;
+  letter-spacing: 1.5px;
+}
+
+@keyframes livePulse {
+  0%, 100% { opacity: 1;   box-shadow: 0 0 0 0   rgba(231, 76, 60, 0.7); }
+  50%       { opacity: 0.6; box-shadow: 0 0 0 6px rgba(231, 76, 60, 0);   }
 }
 
 .play-btn {
@@ -670,6 +772,65 @@ p {
   border-radius: 999px;
   transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow: 0 0 12px rgba(0, 126, 191, 0.6);
+}
+
+/* Now Playing State */
+.queue-now-playing {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  background: linear-gradient(135deg, rgba(46, 204, 113, 0.18) 0%, rgba(46, 204, 113, 0.06) 100%);
+  border: 1px solid rgba(46, 204, 113, 0.5);
+  border-radius: 16px;
+  position: relative;
+  overflow: hidden;
+  animation: nowPlayingGlow 2.5s ease-in-out infinite;
+}
+
+.queue-now-playing::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #2ecc71 0%, #27ae60 50%, rgba(46, 204, 113, 0.2) 100%);
+}
+
+.queue-now-playing-icon {
+  font-size: 40px;
+  flex-shrink: 0;
+  animation: musicBounce 0.5s ease-in-out infinite alternate;
+}
+
+.queue-now-playing-text {
+  flex: 1;
+}
+
+.queue-now-playing-title {
+  font-family: 'Poppins', sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: #2ecc71;
+  margin: 0 0 4px 0;
+}
+
+.queue-now-playing-subtitle {
+  font-family: 'Poppins-Regular', sans-serif;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  margin: 0;
+}
+
+@keyframes nowPlayingGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0); }
+  50% { box-shadow: 0 0 24px 4px rgba(46, 204, 113, 0.18); }
+}
+
+@keyframes musicBounce {
+  from { transform: scale(1) rotate(-8deg); }
+  to   { transform: scale(1.2) rotate(8deg); }
 }
 
 /* Responsive adjustments */
