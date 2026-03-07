@@ -65,6 +65,7 @@
       <h1>Create Song</h1>
       <p>Fill out the form below and your song will be created and automatically be added to the playlist's queue.</p>
       <!-- Main prompt row -->
+      <label class="input-label" for="prompt">Song Prompt</label>
       <div class="request-box">
         <input
           id="prompt"
@@ -79,14 +80,15 @@
       </div>
 
       <!-- Lyrics textarea (hidden by default) -->
+      <label class="input-label lyrics-label" for="lyrics">Custom Lyrics</label>
       <textarea
         id="lyrics"
         class="lyrics-input"
         placeholder="Enter custom lyrics here"
       ></textarea>
 
-      <p id="errorMsg" class="error"></p>
       <button id="submitBtn" class="submit-btn" type="button">Submit</button>
+      <p id="errorMsg" class="error"></p>
       <p id="submitError"></p>
 
       <div id="statusTimeline" class="status-timeline"></div>

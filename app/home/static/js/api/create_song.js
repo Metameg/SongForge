@@ -64,7 +64,12 @@ document.getElementById("submitBtn").onclick = async () => {
 
 
 socket.on("job_status_update", (payload) => {
-  const { status, message } = payload;
+  const { status, message, restore } = payload;
+
+  if (restore) {
+    restoreJobStatus(status);
+    return;
+  }
 
   switch (status) {
     case "processing":
@@ -92,6 +97,29 @@ socket.on("job_status_update", (payload) => {
       break;
   }
 });
+
+function restoreJobStatus(status) {
+  const submitBtn = document.getElementById("submitBtn");
+  if (status === "processing") {
+    submittingStatus = addStatus("Song submitted");
+    completeStatus(submittingStatus);
+    completedStatus = addStatus("Creating song audio. This may take a few minutes…");
+    submitBtn.disabled = true;
+    submitBtn.classList.remove("loading", "success");
+    submitBtn.textContent = "Creating…";
+  } else if (status === "queued") {
+    submittingStatus = addStatus("Song submitted");
+    completeStatus(submittingStatus);
+    completedStatus = addStatus("Creating song audio. This may take a few minutes…");
+    completeStatus(completedStatus);
+    finishedStatus = addStatus("Song created and added to the queue!");
+    completeStatus(finishedStatus);
+    document.getElementById("postSubmitActions").classList.remove("hidden");
+    submitBtn.disabled = true;
+    submitBtn.classList.add("success");
+    submitBtn.textContent = "✓ Submitted";
+  }
+}
 
 
 function addStatus(message) {

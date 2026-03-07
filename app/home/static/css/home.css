@@ -383,6 +383,7 @@ p {
 
 /* ---------- Modal Layout Wrapper ---------- */
 .request-box-wrapper {
+    position: relative;
     background: #000000;
     padding: 18px;
     border-radius: 20px;
@@ -651,6 +652,27 @@ p {
     0 8px 24px rgba(0,126,191,0.35);
 
   transform: translateY(-1px);
+}
+
+/* ---------- Input Labels ---------- */
+.input-label {
+  display: block;
+  font-family: 'Poppins', sans-serif;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 8px;
+  margin-top: 16px;
+}
+
+.lyrics-label {
+  display: none;
+}
+
+.request-box-wrapper.show-lyrics .lyrics-label {
+  display: block;
 }
 
 /* ---------- Lyrics Input ---------- */
@@ -1075,7 +1097,10 @@ p {
   }
 
   .modal-close-btn {
-    display: none;
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    margin: 0;
   }
 
   .request-box {
