@@ -2,15 +2,11 @@ from flask import session, request, jsonify, current_app
 import requests
 import os
 import json
-import threading
-from pprint import pprint
 import time
+import threading
+from datetime import datetime, timedelta, timezone
 from app.extensions import socketio
-import random
 from .services import MusicAPIClient
-from io import BytesIO
-from zipfile import ZipFile
-from pathlib import Path
 from . import home_bp
 import redis
 from mutagen._file import File as MutagenFile
@@ -19,6 +15,53 @@ from .utilities import (
     emit_queue_position_to_client,
     remove_from_processing,
 )
+
+DAILY_SONG_LIMIT = 5
+PARALLEL_GENERATION_LIMIT = 5
+SIM_DELAY_SECONDS = 5  # how long to wait before firing the simulated webhook
+
+
+def _run_simulated_webhook(app, job_key, conversion_id, client_id):
+    """Dev-mode only: simulate MusicGPT webhook delivery after a short delay."""
+    time.sleep(SIM_DELAY_SECONDS)
+    with app.app_context():
+        r = app.extensions["redis"]
+
+        audio_path = "https://lalals.s3.amazonaws.com/conversions/standard/c3b77b63-4f91-44b1-8e75-da8a6cc7fad7/c3b77b63-4f91-44b1-8e75-da8a6cc7fad7.mp3"
+        duration = 120
+
+        prompt = r.hget(job_key, "prompt") or "unknown"
+        title = f"[SIM] {prompt[:50]}"
+
+        r.decr("musicgpt:active_generations")
+
+        r.hset(job_key, "conversion_path", audio_path)
+        r.hset(job_key, "duration", duration)
+        r.hset(job_key, "title", title)
+        r.hset(job_key, "album_cover", "")
+        r.hset(job_key, "status", "queued")
+        r.hset(job_key, "source", "dynamic")
+
+        emit_job_status(socketio, client_id, status="queued", message="Song created and added to queue!")
+
+        remove_from_processing(r, app.config["PLAYLIST_PROCESSING_KEY"], job_key)
+        queue_payload = {"conversion_id": conversion_id, "client_id": client_id}
+        r.rpush(app.config["PLAYLIST_DYNAMIC_KEY"], json.dumps(queue_payload))
+
+        emit_queue_position_to_client(socketio, client_id)
+        socketio.emit("queue_changed", {})
+
+
+@home_bp.route("/api/debug/status", methods=["GET"])
+def debug_status():
+    """Dev-only: check tunnel URL, active generations, and Redis health."""
+    r = current_app.extensions["redis"]
+    return jsonify({
+        "webhook_url": r.get("config:webhook_url") or current_app.config.get("WEBHOOK_URL"),
+        "active_generations": int(r.get("musicgpt:active_generations") or 0),
+        "dynamic_queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
+        "processing_queue_length": r.llen(current_app.config["PLAYLIST_PROCESSING_KEY"]),
+    })
 
 
 @home_bp.route("/api/radio/now-playing", methods=["GET"])
@@ -47,61 +90,72 @@ def now_playing():
     )
 
 
-def simulate_webhook(payload):
-    time.sleep(5)
-    requests.post("http://localhost:5000/webhook", json=payload, timeout=10)
-
-
 @home_bp.route("/api/create-song", methods=["POST"])
 def create_song():
     r = current_app.extensions["redis"]
 
     client_id = session.get("client_id")
     if not client_id:
-        return {"ok": False, "error": "No client session"}, 401
+        return jsonify({"status": "failed", "message": "No client session. Please refresh the page."}), 401
 
-    # If client has an active job return
+    # Gate 1: one song at a time — must wait until current song finishes playing
     active_job_key = f"client:{client_id}:active_job"
     if r.exists(active_job_key):
-        return jsonify(
-            {
-                "status": "failed",
-                "message": "You already have a song processing or queued. Please wait.",
-            }
-        ), 409
+        return jsonify({
+            "status": "failed",
+            "message": "You already have a song in progress. Please wait for it to finish playing before creating another.",
+        }), 409
+
+    # Gate 2: daily limit of 5 songs per user (resets at midnight UTC)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    daily_key = f"client:{client_id}:daily:{today}"
+    daily_count = int(r.get(daily_key) or 0)
+    if daily_count >= DAILY_SONG_LIMIT:
+        now = datetime.now(timezone.utc)
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        reset_seconds = int((midnight - now).total_seconds())
+        hours = reset_seconds // 3600
+        minutes = (reset_seconds % 3600) // 60
+        return jsonify({
+            "status": "failed",
+            "message": (
+                f"You've reached your daily limit of {DAILY_SONG_LIMIT} songs. "
+                f"You can create more songs in {hours}h {minutes}m."
+            ),
+        }), 429
+
+    # Gate 3: platform-wide parallel generation cap (API subscription limit)
+    active_generations = int(r.get("musicgpt:active_generations") or 0)
+    if active_generations >= PARALLEL_GENERATION_LIMIT:
+        return jsonify({
+            "status": "failed",
+            "message": "There are too many songs being generated right now. Please try again later.",
+        }), 503
 
     data = request.get_json(silent=True)
-
     if not data:
-        return jsonify({"status": "failed", "message": "Invalid JSON payload"}), 400
+        return jsonify({"status": "failed", "message": "Invalid request payload."}), 400
 
     lyrics = data.get("lyrics", "").strip()
     prompt = data.get("prompt", "").strip()
 
     if not prompt:
-        return jsonify({"status": "failed", "message": "Prompt is required"}), 400
+        return jsonify({"status": "failed", "message": "A prompt is required to create a song."}), 400
 
+    if len(prompt) > 280:
+        return jsonify({"status": "failed", "message": "Prompt must be 280 characters or fewer."}), 400
+
+    job_key = None
     try:
-        emit_job_status(
-            socketio,
-            client_id,
-            status="processing",
-            message="Creating Song",
-        )
-        client = MusicAPIClient(
-            open_ai_key=current_app.config["OPEN_AI_KEY"],
-            musicgpt_key=current_app.config["MUSICGPT_KEY"],
-            webhook_url=current_app.config["WEBHOOK_URL"],
-        )
+        emit_job_status(socketio, client_id, status="processing", message="Creating Song")
 
-        # MUSICGPT CALL
-        # conversion_ids, cost, error = client.create_music(prompt, lyrics)
+        import uuid
+        conversion_id = str(uuid.uuid4())
+        job_key = f"job:{conversion_id}"
 
-        # conversion_id = conversion_ids[0]
-        # job_key = f"job:{conversion_id}"
-
-        conversion_id = "6bb6918a-bd85-4e18-ac25-b4db55209127"
-        job_key = "job:6bb6918a-bd85-4e18-ac25-b4db55209127"
+        r.incr("musicgpt:active_generations")
+        r.incr(daily_key)
+        r.expire(daily_key, 90000)
 
         payload = {
             "job_key": job_key,
@@ -113,193 +167,157 @@ def create_song():
             "created_at": int(time.time() * 1000),
         }
 
-        threading.Thread(
-            target=simulate_webhook,
-            args=(payload,),
-            daemon=True,
-        ).start()
-
-        r.rpush(
-            current_app.config["PLAYLIST_PROCESSING_KEY"],
-            json.dumps(payload),
-        )
+        r.rpush(current_app.config["PLAYLIST_PROCESSING_KEY"], json.dumps(payload))
         for k, v in payload.items():
             r.hset(job_key, k, v)
-        r.set(active_job_key, job_key)
+
+        r.set(active_job_key, job_key, ex=14400)
+
+        if current_app.config.get("DEV_SIMULATE_WEBHOOK"):
+            app = current_app._get_current_object()
+            threading.Thread(
+                target=_run_simulated_webhook,
+                args=(app, job_key, conversion_id, client_id),
+                daemon=True,
+            ).start()
+        else:
+            # --- Real MusicGPT API path (restore by setting DEV_SIMULATE_WEBHOOK = False) ---
+            # webhook_url = r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
+            # client = MusicAPIClient(
+            #     open_ai_key=current_app.config["OPEN_AI_KEY"],
+            #     musicgpt_key=current_app.config["MUSICGPT_KEY"],
+            #     webhook_url=webhook_url,
+            # )
+            # conversion_ids, cost, error = client.create_music(prompt, lyrics)
+            # if error:
+            #     r.decr("musicgpt:active_generations")
+            #     if "402" in error:
+            #         msg = "The platform has run out of credits. Please contact the administrator."
+            #     elif "500" in error:
+            #         msg = "The music generation service is temporarily unavailable. Please try again later."
+            #     else:
+            #         msg = "Song generation failed. Please try again later."
+            #     current_app.logger.error(f"MusicGPT error for client {client_id}: {error}")
+            #     return jsonify({"status": "failed", "message": msg}), 503
+            pass
 
         return jsonify({"status": "success"})
 
     except Exception as e:
+        r.decr("musicgpt:active_generations")
+        r.delete(active_job_key)
+        r.decr(daily_key)
+        if job_key:
+            remove_from_processing(r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key)
         current_app.logger.exception(e)
-        return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
-
-    # try:
-    #     if not lyrics:
-    #         lyrics = client.create_lyrics(prompt)
-    #
-    #     conversion_ids, cost, error = client.create_music(prompt, lyrics)
-    #
-    #     if error:
-    #         return jsonify({"status": "failed", "message": error}), 500
-    #
-    #     # Assume one song per request (simplify radio logic)
-    #     conversion_id = conversion_ids[0]
-    #     job_key = f"job:{conversion_id}"
-    #
-    #     # Create job record (NO QUEUE YET)
-    #     r.hset(
-    #         job_key,
-    #         mapping={
-    #             "status": "processing",
-    #             "prompt": prompt,
-    #             "lyrics": lyrics,
-    #             "created_at": int(time.time() * 1000),
-    #         },
-    #     )
-    #
-    #     return jsonify(
-    #         {
-    #             "status": "success",
-    #             "conversion_ids": conversion_ids,
-    #             "cost": cost,
-    #             "lyrics": lyrics,
-    #         }
-    #     )
-    #
-    # except Exception as e:
-    #     current_app.logger.exception(e)
-    #     return jsonify({"status": "failed", "message": "Unexpected server error"}), 500
+        return jsonify({"status": "failed", "message": "An unexpected error occurred. Please try again."}), 500
 
 
 @home_bp.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
+    if not data:
+        return {"ok": False, "error": "No payload"}, 400
 
     r = current_app.extensions["redis"]
-    # Only proceed if conversion_path exists
-    # conversion_path = data.get("conversion_path")
-    # conversion_id = data.get("conversion_id")
 
-    conversion_path = "https://lalals.s3.amazonaws.com/conversions/standard/6bb6918a-bd85-4e18-ac25-b4db55209127/6bb6918a-bd85-4e18-ac25-b4db55209127.mp3"
-    conversion_id = "6bb6918a-bd85-4e18-ac25-b4db55209127"
-    duration = 178.329
+    subtype = data.get("subtype", "")
+    conversion_id = data.get("conversion_id")
+
+    import json as _json
+    current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r} payload={_json.dumps(data, indent=2)}")
+
+    # Album cover arrives in a separate webhook before music_ai — attach it to the job early
+    if subtype == "album_cover_generation":
+        cover_url = data.get("image_path") or ""
+        # The cover payload has conversion_id_1/2 but no single conversion_id
+        for cid_field in ("conversion_id_1", "conversion_id_2"):
+            cid = data.get(cid_field)
+            if cid and r.exists(f"job:{cid}"):
+                r.hset(f"job:{cid}", "album_cover", cover_url)
+        return {"ok": True}
+
+    # Only continue processing the main music generation event
+    if subtype != "music_ai":
+        return {"ok": True, "skipped": True}
+
+    if not conversion_id:
+        return {"ok": False, "error": "Missing conversion_id"}, 400
+
     job_key = f"job:{conversion_id}"
-
-    # For test image (Testing)
-    # current_dir = os.path.dirname(os.path.abspath(__file__))
-    # app_dir = os.path.dirname(current_dir)
-    album_cover_path = os.path.join(
-        "https://www.virtualmusicalinstruments.com/musical_instruments/guitar/images/virtual_acoustic_guitar.jpg"
-    )
-    title = "Test song"
     job = r.hgetall(job_key)
-    print("WEBHOOK", job_key)
-    pprint(data)
-    # if not conversion_id or not conversion_path or not job:
-    #     return {"ok": False, "error": "Missing required fields"}, 400
 
-    # Check duplicate queues
-    # playlist_entries = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
-    # already_queued = FalsePL
-    # for entry in playlist_entries:
-    #     data = json.loads(entry)
-    #     if f"job:{data.get('conversion_id')}" == job_key:
-    #         already_queued = True
-    #         break
+    if not job:
+        # Not a job we're tracking (e.g., conversion_id_2 which we ignore)
+        return {"ok": True, "skipped": True}
 
-    # if already_queued:
-    #     print("already queued")
-    #     return {"ok": True, "already_queued": True}
-    #
+    # Deduplicate: MusicGPT retries webhook delivery — ignore if already queued/played
+    if job.get("status") in ("queued", "played"):
+        return {"ok": True, "skipped": True}
 
-    # try:
+    conversion_path = data.get("conversion_path")
+    if not conversion_path:
+        return {"ok": False, "error": "Missing conversion_path"}, 400
 
-    client_id = job["client_id"]
+    duration = float(data.get("conversion_duration") or 0)
+    title = data.get("title") or "Untitled"
+    # Use album_cover already set by the album_cover_generation webhook, fallback to music_ai payload
+    existing_cover = r.hget(job_key, "album_cover") or ""
+    album_cover = existing_cover or data.get("album_cover_path") or ""
 
-    if data.get("subtype") == "music_ai" or True:
-        r.hset(job_key, "job_key", job_key)
-        r.hset(job_key, "album_cover", album_cover_path)
-        r.hset(job_key, "conversion_path", conversion_path)
-        r.hset(job_key, "duration", duration)
-        r.hset(job_key, "title", title)
-        r.hset(job_key, "status", "queued")
-        r.hset(job_key, "source", "dynamic")
+    client_id = job.get("client_id")
 
-        emit_job_status(
-            socketio,
-            client_id,
-            status="queued",
-            message="Song Finished",
-        )
+    # Release generation slot
+    r.decr("musicgpt:active_generations")
 
-        payload = {
-            "conversion_id": conversion_id,
-            "client_id": client_id,
-        }
+    # Persist final metadata on the job
+    r.hset(job_key, "job_key", job_key)
+    r.hset(job_key, "conversion_path", conversion_path)
+    r.hset(job_key, "duration", duration)
+    r.hset(job_key, "title", title)
+    r.hset(job_key, "album_cover", album_cover)
+    r.hset(job_key, "status", "queued")
+    r.hset(job_key, "source", "dynamic")
 
-        remove_from_processing(
-            r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key
-        )
+    if client_id:
+        emit_job_status(socketio, client_id, status="queued", message="Song created and added to queue!")
 
-        r.rpush(
-            current_app.config["PLAYLIST_DYNAMIC_KEY"],
-            json.dumps(payload),
-        )
+    # Move from processing → dynamic playback queue
+    remove_from_processing(r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key)
 
+    queue_payload = {"conversion_id": conversion_id, "client_id": client_id}
+    r.rpush(current_app.config["PLAYLIST_DYNAMIC_KEY"], json.dumps(queue_payload))
+
+    if client_id:
         emit_queue_position_to_client(socketio, client_id)
 
-        r.delete(f"client:{client_id}:active_job")
-        return {
-            "ok": True,
-            "message": "Song Finished",
-        }
+    # Notify all connected clients that the queue changed so they can refresh their own position
+    socketio.emit("queue_changed", {}, broadcast=True)
 
-    return {"ok": True}
+    # active_job intentionally NOT deleted here —
+    # user stays locked until their song finishes playing (handled in mark_played)
 
-    # duration = 0
-    # if data.get("subtype") == "lyrics_timestamped":
-    #     emit_job_status(
-    #         socketio,
-    #         client_id,
-    #         conversion_id,
-    #         status="lyrics_timestamped",
-    #         message="Lyrics synchronized",
-    #     )
-
-    # lyrics = json.loads(data.get("lyrics_timestamped"))
-    # duration_ms = max((line.get("end", 0) for line in lyrics), default=0)
-    # duration = duration_ms / 1000.0
-    # except (json.JSONDecodeError, TypeError):
-    #     duration = None
-
-    # Persist job metadata
-    # r.hset(
-    #     job_key,
-    #     mapping={
-    #         "conversion_path": conversion_path,
-    #         "duration": float(duration),
-    #         "status": "queued",
-    #         "source": "dynamic",
-    #     },
-    # )
-
-    # Push to queue
-
-    # return {
-    #     "ok": True,
-    #     "subtype": data.get("subtype"),
-    #     "message": "successfully created song",
-    # }
+    return {"ok": True, "message": "Song queued successfully"}
 
 
 @home_bp.route("/api/my-queue-position", methods=["GET"])
 def my_queue_position():
     r = current_app.extensions["redis"]
 
-    # get the client_id from the session
     client_id = session.get("client_id")
     if not client_id:
-        return {"in_queue": False, "message": "No client ID found."}
+        return {"in_queue": False, "has_active_job": False, "message": "No client ID found."}
+
+    has_active_job = bool(r.exists(f"client:{client_id}:active_job"))
+
+    # Check if this client's song is currently on air
+    now_playing = r.hgetall("radio:now_playing")
+    if now_playing.get("source") == "dynamic":
+        job_key = now_playing.get("job_key")
+        if job_key:
+            job = r.hgetall(job_key)
+            if job.get("client_id") == client_id:
+                return jsonify({"now_playing": True, "conversion_id": now_playing.get("conversion_id")})
 
     raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1) + r.lrange(
         current_app.config["PLAYLIST_PROCESSING_KEY"], 0, -1
@@ -307,15 +325,16 @@ def my_queue_position():
 
     for idx, item in enumerate(raw_items):
         item = json.loads(item)
-
-        if item.get("client_id") == client_id:  # <- match against client_id only
+        if item.get("client_id") == client_id:
             return {
                 "in_queue": True,
+                "has_active_job": has_active_job,
                 "queue_position": idx + 1,
                 "queue_length": len(raw_items),
+                "conversion_id": item.get("conversion_id"),
             }
 
-    return {"in_queue": False, "message": "You currently have no songs in queue."}
+    return {"in_queue": False, "has_active_job": has_active_job, "message": "You currently have no songs in queue."}
 
 
 @home_bp.route("/api/mark-played", methods=["POST"])
@@ -324,54 +343,40 @@ def mark_played():
 
     data = request.get_json()
     cid = data.get("cid")
-    keys = r.keys("job:*")
 
-    history = r.lrange(current_app.config["HISTORY_KEY"], 0, -1)
-    if cid.startswith("static") or f"job:{cid}" in history:
+    if not cid or cid.startswith("static"):
         return {"ok": True}
 
-    for key in keys:
-        if key == f"job:{cid}":
-            r.hset(key, "status", "played")
+    history = r.lrange(current_app.config["HISTORY_KEY"], 0, -1)
+    if f"job:{cid}" in history:
+        return {"ok": True}
 
-            r.rpush(current_app.config["HISTORY_KEY"], key)
+    job_key = f"job:{cid}"
+    job = r.hgetall(job_key)
 
-            # check length
-            length = r.llen(current_app.config["HISTORY_KEY"])
+    if job:
+        r.hset(job_key, "status", "played")
+        r.rpush(current_app.config["HISTORY_KEY"], job_key)
 
-            if length > current_app.config["MAX_HISTORY_JOBS"]:
-                # get the oldest job in history
-                evicted = r.lrange(current_app.config["HISTORY_KEY"], 0, 0)
+        # Unlock the client so they can create their next song
+        client_id = job.get("client_id")
+        if client_id:
+            r.delete(f"client:{client_id}:active_job")
+            emit_job_status(
+                socketio,
+                client_id,
+                status="played",
+                message="Your song has finished playing! You can now create another song.",
+            )
+            # Push an empty queue state so the frontend resets immediately
+            emit_queue_position_to_client(socketio, client_id)
 
-                # trim history to keep newest job
-                r.ltrim(current_app.config["HISTORY_KEY"], 1, -1)
-
-                # delete evicted job hashes
-                for cid in evicted:
-                    r.delete(f"job:{cid}")
-
-            break
+        # Trim history to cap
+        length = r.llen(current_app.config["HISTORY_KEY"])
+        if length > current_app.config["MAX_HISTORY_JOBS"]:
+            evicted = r.lrange(current_app.config["HISTORY_KEY"], 0, 0)
+            r.ltrim(current_app.config["HISTORY_KEY"], 1, -1)
+            for evicted_key in evicted:
+                r.delete(evicted_key)
 
     return {"ok": True}
-
-
-# @home_bp.route("/api/has-song-in-queue", methods=["GET"])
-# def has_song_in_queue():
-#     r = current_app.extensions["redis"]
-#
-#     client_id = session.get("client_id")
-#     if not client_id:
-#         return {"has_song": False, "message": "No client ID found."}
-#
-#     raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
-#
-#     for raw in raw_items:
-#         try:
-#             item = json.loads(raw.decode())
-#         except Exception:
-#             continue
-#
-#         if item.get("client_id") == client_id:
-#             return {"has_song": True}
-#
-#     return {"has_song": False}

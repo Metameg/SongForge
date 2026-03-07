@@ -20,6 +20,7 @@ export class RadioPlayer {
     this.userQueueEntry = null;
     this.isTransitioning = false;
     this.waitingForNextTrack = false; // NEW: Waiting for track_changed
+    this._queueFetchSeq = 0; // sequence counter to discard stale updateQueuePosition results
     
     this._bindUI();
     this._bindSocket();
@@ -45,6 +46,17 @@ export class RadioPlayer {
     this.playBtn.textContent = this.userWantsPlaying ? "⏸" : "▶";
   }
 
+  _setNowPlayingTitle(title, source) {
+    if (!this.nowPlaying) return;
+    if (source === "static") {
+      this.nowPlaying.textContent = "Curated Selection";
+      this.nowPlaying.className = "source-static";
+    } else {
+      this.nowPlaying.textContent = title || "Now Playing";
+      this.nowPlaying.className = "source-dynamic";
+    }
+  }
+
   _setAlbumCover(url) {
     if (url) {
       this.thumbnailEl.style.backgroundImage = `url("${url}")`;
@@ -66,6 +78,10 @@ export class RadioPlayer {
     socket.on("queue_position_update", (data) => {
       this._onQueuePositionUpdate(data);
     });
+
+    socket.on("queue_changed", () => {
+      this.updateQueuePosition();
+    });
   }
 
   async _onTrackChanged(data) {
@@ -83,19 +99,23 @@ export class RadioPlayer {
     await this._loadTrack(data.conversion_path, data.started_at);
     
     // Update UI
-    if (this.nowPlaying) {
-      this.nowPlaying.textContent = data.title || "Now Playing";
-    }
+    this._setNowPlayingTitle(data.title, data.source);
     if (data.source !== "static" && data.album_cover) {
       this._setAlbumCover(data.album_cover);
     } else {
       this._setAlbumCover(null);
     }
 
-    // If this track matches the user's queued song, flip queue widget to "now playing"
-    if (data.source !== "static" && this.userQueueEntry?.conversion_id === data.cid) {
-      this.userQueueEntry = { ...this.userQueueEntry, now_playing: true, in_queue: false };
-      this._renderQueueStatus();
+    // If this track matches the user's queued song, flip queue widget immediately (fast path).
+    // Also always fetch a server-confirmed queue state for dynamic tracks so both the
+    // now-playing client and queued clients update reliably, regardless of whether
+    // userQueueEntry.conversion_id was populated.
+    if (data.source !== "static") {
+      if (this.userQueueEntry?.conversion_id === data.cid) {
+        this.userQueueEntry = { ...this.userQueueEntry, now_playing: true, in_queue: false };
+        this._renderQueueStatus();
+      }
+      this.updateQueuePosition();
     }
   }
 
@@ -117,13 +137,31 @@ export class RadioPlayer {
                 </div>
             </div>
         `;
-        document.getElementById("submitBtn").textContent = "Playing...";
+        const submitBtn = document.getElementById("submitBtn");
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Playing...";
+        submitBtn.classList.remove("loading", "success");
+        document.getElementById("submitError").textContent = "Your song is currently playing. You can create another once it finishes.";
         return;
     }
 
     // if (!this.queueStatusEl) return;
     console.log(this.userQueueEntry);
     if (!this.userQueueEntry || !this.userQueueEntry['in_queue']) {
+      if (this.userQueueEntry?.has_active_job) {
+        // Song is still being created — don't reset the UI
+        this.queueStatusEl.innerHTML = `
+          <div class="queue-empty">
+            <div class="queue-empty-icon">♪</div>
+            <div class="queue-empty-text">
+              <p class="queue-empty-title">Song is being created…</p>
+              <p class="queue-empty-subtitle">Your song will appear in the queue shortly</p>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
       this.queueStatusEl.innerHTML = `
         <div class="queue-empty">
           <div class="queue-empty-icon">♪</div>
@@ -133,7 +171,6 @@ export class RadioPlayer {
           </div>
         </div>
       `;
-
 
       document.getElementById("submitBtn").disabled = false;
       document.getElementById("submitBtn").textContent = "Submit";
@@ -179,11 +216,14 @@ export class RadioPlayer {
     
 
    async updateQueuePosition() {
-
+    const seq = ++this._queueFetchSeq;
     try {
       const res = await fetch("/api/my-queue-position");
       const data = await res.json();
-      
+
+      // Discard if a newer fetch has already completed
+      if (seq !== this._queueFetchSeq) return;
+
       this.userQueueEntry = data;
       this._renderQueueStatus();
     } catch (error) {
@@ -242,16 +282,20 @@ export class RadioPlayer {
   /* ---------------- Track Loading ---------------- */
   async _loadTrack(conversionPath, startedAt) {
     this.isTransitioning = true;
-    
+
     try {
-      // Calculate offset
-      const offset = Math.max(0, (Date.now() - startedAt) / 1000);
-      
-      // Load new track
       this.audio.src = conversionPath;
+
+      // Wait for metadata before seeking — setting currentTime before this is silently ignored
+      await new Promise((resolve, reject) => {
+        this.audio.addEventListener("loadedmetadata", resolve, { once: true });
+        this.audio.addEventListener("error", reject, { once: true });
+      });
+
+      // Recalculate offset after metadata loads since time has passed
+      const offset = Math.max(0, (Date.now() - startedAt) / 1000);
       this.audio.currentTime = offset;
-      
-      // Play if user wants it playing
+
       if (this.userWantsPlaying) {
         await this.audio.play();
       }
@@ -282,16 +326,17 @@ export class RadioPlayer {
         this.cid = data.cid;
         await this._loadTrack(data.conversion_path, data.started_at);
 
-        if (this.nowPlaying) {
-          this.nowPlaying.textContent = data.title || "Now Playing";
-        }
+        this._setNowPlayingTitle(data.title, data.source);
         if (data.source !== "static" && data.album_cover) {
           this._setAlbumCover(data.album_cover);
         } else {
           this._setAlbumCover(null);
         }
       } else if (this.userWantsPlaying && this.audio.paused && !this.waitingForNextTrack) {
-        // Just resume if we have the right track but it's paused
+        // Re-sync to current global position before resuming — the audio may have
+        // been seeked to a stale position from when track_changed first fired
+        const offset = Math.max(0, (Date.now() - data.started_at) / 1000);
+        this.audio.currentTime = offset;
         await this.audio.play();
       }
     } catch (error) {

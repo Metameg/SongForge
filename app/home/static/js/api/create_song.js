@@ -13,14 +13,6 @@ document.getElementById("submitBtn").onclick = async () => {
   const errorMsg = document.getElementById("errorMsg");
   errorMsg.textContent = ""; // clear previous error
   
-  const res = await fetch("/api/my-queue-position");
-    const data = await res.json();
-    if (data.in_queue) {
-      submitBtn.disabled = true;
-      document.getElementById("submitError").textContent = "⚠ Only 1 song allowed in queue. Please wait for your song to play before generating a new song request.";
-      return
-  }
-
   if (!prompt) {
     errorMsg.textContent = "Prompt is required.";
     return;
@@ -45,7 +37,10 @@ document.getElementById("submitBtn").onclick = async () => {
 
     if (!res.ok) {
       errorMsg.textContent = data.message || "Something went wrong.";
-      failStatus(submittingStatus, "Something went wrong. Please try again.");
+      failStatus(submittingStatus, data.message || "Something went wrong. Please try again.");
+      submitBtn.disabled = false;
+      submitBtn.classList.remove("loading");
+      submitBtn.textContent = "Submit";
       return;
     }
 
@@ -74,16 +69,27 @@ socket.on("job_status_update", (payload) => {
   switch (status) {
     case "processing":
       completeStatus(submittingStatus);
-      completedStatus = addStatus("Creating song audio. This may take a few minutes.");
+      completedStatus = addStatus("Creating song audio. This may take a few minutes…");
       break;
 
     case "queued":
       completeStatus(completedStatus);
       document.getElementById("postSubmitActions").classList.remove("hidden");
-      finishedStatus = addStatus("Song created successfully and has been added to the queue!");
+      finishedStatus = addStatus("Song created and added to the queue!");
       completeStatus(finishedStatus);
       break;
 
+    case "played":
+      // Song finished playing — reset form so user can create another
+      document.getElementById("statusTimeline").innerHTML = "";
+      document.getElementById("postSubmitActions").classList.add("hidden");
+      document.getElementById("submitError").textContent = "";
+      document.getElementById("errorMsg").textContent = "";
+      const submitBtn = document.getElementById("submitBtn");
+      submitBtn.disabled = false;
+      submitBtn.classList.remove("loading", "success");
+      submitBtn.textContent = "Submit";
+      break;
   }
 });
 

@@ -21,15 +21,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
     requestBtn.addEventListener("click", async () => {
       modal.classList.add("active");
+      document.getElementById("submitError").textContent = "";
 
       const res = await fetch("/api/my-queue-position");
       const data = await res.json();
-      if (data.in_queue) {
-        submitBtn.disabled = true;
-        document.getElementById("submitError").textContent = "⚠ You currently have a song being created or in queue. Please wait for your song to start playing before submitting another request.";
-        return
-      }
+      const submitBtn = document.getElementById("submitBtn");
 
+      if (data.has_active_job) {
+        submitBtn.disabled = true;
+        const msg = data.in_queue
+          ? "You already have a song in the queue. Wait for it to play before submitting another."
+          : "Your song is currently playing. You can create another once it finishes.";
+        document.getElementById("submitError").textContent = msg;
+      } else {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Submit";
+        submitBtn.classList.remove("loading", "success");
+      }
     });
 
     modal.addEventListener("click", e => {

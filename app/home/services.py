@@ -42,9 +42,8 @@ class MusicAPIClient:
 
     def create_music(self, prompt, lyrics):
         payload = {
-            "prompt": "Create a soulful song that is very catchy and empahsises an incredible voice that compliments a bluesy riff",
-            "music_style": prompt,
-            "lyrics": lyrics,
+            "prompt": prompt,
+            "lyrics": lyrics if lyrics else "",
             "make_instrumental": False,
             "vocal_only": False,
             "webhook_url": self.webhook_url,

@@ -1,4 +1,4 @@
-from flask import session, current_app
+from flask import session, current_app, request
 from flask_socketio import join_room
 from .home.utilities import emit_queue_position_to_client
 
@@ -25,8 +25,8 @@ def register_socket_handlers(socketio):
                     socketio.emit(
                         "queue_position_update",
                         {"now_playing": True, "conversion_id": now_playing.get("conversion_id")},
-                        to=client_id,
+                        to=request.sid,
                     )
                     return
 
-        emit_queue_position_to_client(socketio, client_id)
+        emit_queue_position_to_client(socketio, client_id, to=request.sid)

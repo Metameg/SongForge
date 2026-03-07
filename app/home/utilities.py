@@ -11,13 +11,9 @@ def get_queue_info_by_client(client_id):
         If not found, found=False
     """
     r = current_app.extensions["redis"]
-    queue_key = current_app.config["PLAYLIST_DYNAMIC_KEY"]
-    raw_items = r.lrange(queue_key, 0, -1)
+    raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
     queue_length = len(raw_items)
 
-    print("queue length", queue_length)
-    print("client id", client_id)
-    print()
 
     for idx, raw in enumerate(raw_items):
         try:
@@ -39,11 +35,16 @@ def get_queue_info_by_client(client_id):
     }
 
 
-def emit_queue_position_to_client(socketio, client_id):
+def emit_queue_position_to_client(socketio, client_id, to=None):
     """
     Emit queue position update to a specific client.
     Always checks if the client's song is currently on-air first.
+
+    `to` — override the socket target. Pass request.sid on connect so only the
+    newly connecting socket is updated, not every tab the user has open.
+    Defaults to the client_id room (broadcasts to all tabs for that user).
     """
+    target = to or client_id
     r = current_app.extensions["redis"]
 
     # If this client's song is currently playing, tell them that — not queue position
@@ -56,7 +57,7 @@ def emit_queue_position_to_client(socketio, client_id):
                 socketio.emit(
                     "queue_position_update",
                     {"now_playing": True, "conversion_id": now_playing.get("conversion_id")},
-                    to=client_id,
+                    to=target,
                 )
                 return
 
@@ -71,16 +72,18 @@ def emit_queue_position_to_client(socketio, client_id):
                 "queue_length": queue_info["queue_length"],
                 "in_queue": True,
             },
-            to=client_id,
+            to=target,
         )
     else:
+        has_active_job = bool(r.exists(f"client:{client_id}:active_job"))
         socketio.emit(
             "queue_position_update",
             {
                 "in_queue": False,
+                "has_active_job": has_active_job,
                 "message": "You currently have no songs in queue.",
             },
-            to=client_id,
+            to=target,
         )
 
 
@@ -98,15 +101,8 @@ def emit_job_status(socketio, client_id, status, message=None):
 def remove_from_processing(r, key, job_key):
     items = r.lrange(key, 0, -1)
 
-    remaining = []
     for item in items:
         data = json.loads(item)
-        print(data)
-        print("JOBKEY:", job_key, "data", data.get("job_key"))
-        if data.get("job_key") != job_key:
-            remaining.append(item)
-
-    r.delete(key)
-
-    if remaining:
-        r.rpush(key, *remaining)
+        if data.get("job_key") == job_key:
+            r.lrem(key, 1, item)
+            return

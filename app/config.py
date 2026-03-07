@@ -18,6 +18,7 @@ class Config:
 class DevelopmentConfig(Config):
     PUBLIC_BASE_URL = "https://trees-shark-presenting-benjamin.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
+    DEV_SIMULATE_WEBHOOK = True  # Skip MusicGPT API; simulate webhook locally after a delay
 
 
 class ProductionConfig(Config):

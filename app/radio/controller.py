@@ -26,8 +26,19 @@ def select_next_track(r):
 
 
 def advance_radio():
-    print("changing songs")
     r = current_app.extensions["redis"]
+
+    # If the outgoing track was a dynamic song, clean up the owner's active_job
+    # server-side so they're not locked out if they closed their browser during playback
+    prev = r.hgetall("radio:now_playing")
+    if prev.get("source") == "dynamic":
+        prev_job = r.hgetall(prev.get("job_key", "")) if prev.get("job_key") else {}
+        if prev_job.get("status") != "played":
+            r.hset(prev["job_key"], "status", "played")
+            client_id = prev_job.get("client_id")
+            if client_id:
+                r.delete(f"client:{client_id}:active_job")
+                socketio.emit("queue_position_update", {"in_queue": False}, to=client_id)
 
     cid, source = select_next_track(r)
     if not cid:
@@ -39,7 +50,7 @@ def advance_radio():
     job_key = f"job:{cid}"
     path = r.hget(job_key, "conversion_path")
     duration = float(r.hget(job_key, "duration") or 0)
-    album_cover_path = (r.hget(job_key, "album_cover"),)
+    album_cover_path = r.hget(job_key, "album_cover") or ""
     title = r.hget(job_key, "title")
     now = int(time.time() * 1000)
 
@@ -73,7 +84,7 @@ def advance_radio():
 
     # 🔁 Update remaining queue positions (per-user)
     emit_queue_positions(r)
-    print("SOURCE", source)
+    current_app.logger.debug(f"advance_radio: source={source}, cid={cid}")
     if source == "dynamic":
         client_id = r.hget(job_key, "client_id")
         if client_id:
@@ -116,6 +127,7 @@ def emit_queue_positions(r):
                 "conversion_id": conversion_id,
                 "queue_position": idx + 1,
                 "queue_length": queue_length,
+                "in_queue": True,
             },
             to=client_id,  # use client_id from job
         )

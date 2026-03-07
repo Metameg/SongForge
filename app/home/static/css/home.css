@@ -209,9 +209,36 @@ p {
   font-weight: 600;
 }
 
-.audio-meta span {
-  font-size: 13px;
-  color: #777;
+/* ---------- Now Playing Title ---------- */
+#nowPlaying {
+  display: block;
+  margin-top: 6px;
+  font-size: 20px;
+  font-family: 'Poppins', sans-serif;
+  font-weight: 900;
+  letter-spacing: 0.3px;
+  line-height: 1.25;
+  transition: color 0.4s ease;
+  color: #fff;
+}
+
+/* Dynamic (user-created) song — gradient accent */
+#nowPlaying.source-dynamic {
+  background: linear-gradient(90deg, #50c4ff 0%, #c471ed 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 8px rgba(80, 196, 255, 0.35));
+}
+
+/* Static / curated track — subdued, distinct from user songs */
+#nowPlaying.source-static {
+  font-family: 'Poppins-Regular', sans-serif;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.38);
 }
 .prompt-section {
     max-width: 700px;
