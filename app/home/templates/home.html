@@ -2,11 +2,14 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Parallel Music Jobs</title>
     <link
         rel="stylesheet"
         href="{{ url_for('home.static', filename='css/home.css') }}"
     >
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
 
@@ -38,6 +41,10 @@
       </div>
       <h1>Live Stream</h1>
       <span id="nowPlaying">Now Playing</span>
+      <div class="queue-count-row">
+        <span class="queue-count-label">Songs in queue</span>
+        <span id="queueCount" class="queue-count-value">0</span>
+      </div>
     </div>
 
     <audio id="radioAudio"></audio>
@@ -59,6 +66,7 @@
       <h1>Create Song</h1>
       <p>Fill out the form below and your song will be created and automatically be added to the playlist's queue.</p>
       <!-- Main prompt row -->
+      <label class="input-label" for="prompt">Song Prompt</label>
       <div class="request-box">
         <input
           id="prompt"
@@ -73,14 +81,17 @@
       </div>
 
       <!-- Lyrics textarea (hidden by default) -->
+      <label class="input-label lyrics-label" for="lyrics">Custom Lyrics</label>
       <textarea
         id="lyrics"
         class="lyrics-input"
         placeholder="Enter custom lyrics here"
       ></textarea>
 
-      <p id="errorMsg" class="error"></p>
+      <div class="cf-turnstile" data-sitekey="0x4AAAAAACnysCJdGW2yrR7r" data-theme="dark" data-size="flexible"></div>
+
       <button id="submitBtn" class="submit-btn" type="button">Submit</button>
+      <p id="errorMsg" class="error"></p>
       <p id="submitError"></p>
 
       <div id="statusTimeline" class="status-timeline"></div>

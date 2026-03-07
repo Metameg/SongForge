@@ -231,6 +231,36 @@ p {
   filter: drop-shadow(0 0 8px rgba(80, 196, 255, 0.35));
 }
 
+/* ---------- Queue Count ---------- */
+.queue-count-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.queue-count-label {
+  font-family: 'Poppins-Regular', sans-serif;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.queue-count-value {
+  font-family: 'Poppins', sans-serif;
+  font-size: 12px;
+  font-weight: 900;
+  color: #50c4ff;
+  background: rgba(80, 196, 255, 0.1);
+  border: 1px solid rgba(80, 196, 255, 0.25);
+  border-radius: 999px;
+  padding: 1px 10px;
+  min-width: 20px;
+  text-align: center;
+}
+
 /* Static / curated track — subdued, distinct from user songs */
 #nowPlaying.source-static {
   font-family: 'Poppins-Regular', sans-serif;
@@ -353,6 +383,7 @@ p {
 
 /* ---------- Modal Layout Wrapper ---------- */
 .request-box-wrapper {
+    position: relative;
     background: #000000;
     padding: 18px;
     border-radius: 20px;
@@ -623,6 +654,35 @@ p {
   transform: translateY(-1px);
 }
 
+/* ---------- Turnstile Widget ---------- */
+.cf-turnstile {
+  margin-top: 16px;
+  border-radius: 10px;
+  overflow: hidden;
+  opacity: 0.85;
+}
+
+/* ---------- Input Labels ---------- */
+.input-label {
+  display: block;
+  font-family: 'Poppins', sans-serif;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 8px;
+  margin-top: 16px;
+}
+
+.lyrics-label {
+  display: none;
+}
+
+.request-box-wrapper.show-lyrics .lyrics-label {
+  display: block;
+}
+
 /* ---------- Lyrics Input ---------- */
 .lyrics-input {
   margin-top: 10px;
@@ -860,23 +920,229 @@ p {
   to   { transform: scale(1.2) rotate(8deg); }
 }
 
-/* Responsive adjustments */
-@media (max-width: 480px) {
-  .queue-active {
-    gap: 16px;
-    padding: 16px 20px;
+/* ---------- Mobile ---------- */
+@media (max-width: 600px) {
+
+  /* Page */
+  .live-radio {
+    padding: 48px 16px 32px;
   }
-  
+
+  .radio-header h1 {
+    font-size: 24px;
+  }
+
+  .radio-header p {
+    font-size: 13px;
+    margin-top: 4px;
+  }
+
+  /* --- Horizontal mini-player card --- */
+  .audio-card {
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    border-radius: 16px;
+  }
+
+  .audio-thumb {
+    width: 100px;
+    height: 100px;
+    flex-shrink: 0;
+    border-radius: 0;
+  }
+
+  .audio-visualizer {
+    padding: 0 8px;
+    gap: 2px;
+  }
+
+  .play-btn {
+    width: 48px;
+    height: 48px;
+    font-size: 18px;
+  }
+
+  .audio-meta {
+    flex: 1;
+    text-align: left;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+  }
+
+  .audio-meta h1 {
+    font-size: 15px;
+    margin: 0;
+  }
+
+  /* Live badge: pull out of absolute so it flows in the flex column */
+  .live-badge {
+    position: static;
+    justify-content: flex-start;
+    margin-bottom: 2px;
+  }
+
+  .live-label {
+    font-size: 10px;
+  }
+
+  .live-dot {
+    width: 7px;
+    height: 7px;
+  }
+
+  #nowPlaying {
+    font-size: 13px;
+    margin-top: 2px;
+  }
+
+  .queue-count-row {
+    margin-top: 6px;
+    justify-content: flex-start;
+  }
+
+  .queue-count-label {
+    font-size: 10px;
+  }
+
+  .queue-count-value {
+    font-size: 10px;
+    padding: 1px 8px;
+  }
+
+  /* Request button */
+  .request-btn {
+    width: 100%;
+    margin-top: 14px;
+    padding: 14px;
+    font-size: 15px;
+    border-radius: 12px;
+    text-align: center;
+  }
+
+  /* Queue status */
+  .queue-status {
+    margin-top: 12px;
+  }
+
+  .queue-empty,
+  .queue-active,
+  .queue-now-playing {
+    padding: 14px 16px;
+    gap: 12px;
+    border-radius: 12px;
+  }
+
+  .queue-empty-icon {
+    font-size: 24px;
+  }
+
+  .queue-empty-title {
+    font-size: 13px;
+  }
+
+  .queue-empty-subtitle {
+    font-size: 12px;
+  }
+
   .queue-position-badge {
-    width: 56px;
-    height: 56px;
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
   }
-  
+
   .queue-number {
-    font-size: 20px;
+    font-size: 18px;
   }
-  
-  .queue-empty {
-    padding: 16px 20px;
+
+  .queue-info-title {
+    font-size: 13px;
+  }
+
+  .queue-info-detail {
+    font-size: 12px;
+    margin-bottom: 0;
+  }
+
+  .queue-now-playing-icon {
+    font-size: 28px;
+  }
+
+  .queue-now-playing-title {
+    font-size: 14px;
+  }
+
+  .queue-now-playing-subtitle {
+    font-size: 12px;
+  }
+
+  /* --- Bottom sheet modal --- */
+  .request-modal {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .request-box-wrapper {
+    width: 100%;
+    border-radius: 20px 20px 0 0;
+    max-height: 88dvh;
+    margin: 0;
+    padding: 8px 16px 32px;
+  }
+
+  /* Drag handle indicator */
+  .request-box-wrapper::before {
+    content: '';
+    display: block;
+    width: 40px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 999px;
+    margin: 8px auto 16px;
+  }
+
+  .modal-close-btn {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    margin: 0;
+  }
+
+  .request-box {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 12px;
+    padding: 14px;
+  }
+
+  /* Fix iOS auto-zoom on input focus (requires font-size >= 16px) */
+  .request-input,
+  .lyrics-input {
+    font-size: 16px;
+  }
+
+  .lyrics-input {
+    width: 100%;
+    max-width: 100%;
+    border-radius: 12px;
+  }
+
+  .submit-btn {
+    width: 100%;
+    border-radius: 12px;
+    padding: 14px;
+    font-size: 15px;
+  }
+
+  .ghost-btn,
+  .secondary-btn {
+    border-radius: 12px;
+  }
+
+  .post-submit-actions {
+    flex-direction: column;
   }
 }

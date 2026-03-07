@@ -15,6 +15,7 @@ from .utilities import (
     emit_queue_position_to_client,
     remove_from_processing,
 )
+from app.radio.controller import emit_queue_positions
 
 DAILY_SONG_LIMIT = 5
 PARALLEL_GENERATION_LIMIT = 5
@@ -48,8 +49,9 @@ def _run_simulated_webhook(app, job_key, conversion_id, client_id):
         queue_payload = {"conversion_id": conversion_id, "client_id": client_id}
         r.rpush(app.config["PLAYLIST_DYNAMIC_KEY"], json.dumps(queue_payload))
 
-        emit_queue_position_to_client(socketio, client_id)
-        socketio.emit("queue_changed", {})
+        queue_length = r.llen(app.config["PLAYLIST_DYNAMIC_KEY"])
+        emit_queue_positions(r)
+        r.publish("queue_events", json.dumps({"queue_length": queue_length}))
 
 
 @home_bp.route("/api/debug/status", methods=["GET"])
@@ -136,6 +138,18 @@ def create_song():
     if not data:
         return jsonify({"status": "failed", "message": "Invalid request payload."}), 400
 
+    # Turnstile verification
+    turnstile_secret = current_app.config.get("TURNSTILE_SECRET_KEY")
+    if turnstile_secret:
+        token = data.get("cf-turnstile-response", "")
+        verify = requests.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data={"secret": turnstile_secret, "response": token},
+            timeout=5,
+        )
+        if not verify.json().get("success"):
+            return jsonify({"status": "failed", "message": "Human verification failed. Please try again."}), 403
+
     lyrics = data.get("lyrics", "").strip()
     prompt = data.get("prompt", "").strip()
 
@@ -149,13 +163,37 @@ def create_song():
     try:
         emit_job_status(socketio, client_id, status="processing", message="Creating Song")
 
-        import uuid
-        conversion_id = str(uuid.uuid4())
-        job_key = f"job:{conversion_id}"
-
         r.incr("musicgpt:active_generations")
         r.incr(daily_key)
         r.expire(daily_key, 90000)
+
+        if current_app.config.get("DEV_SIMULATE_WEBHOOK"):
+            import uuid
+            conversion_id = str(uuid.uuid4())
+        else:
+            webhook_url = r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
+            api_client = MusicAPIClient(
+                open_ai_key=current_app.config["OPEN_AI_KEY"],
+                musicgpt_key=current_app.config["MUSICGPT_KEY"],
+                webhook_url=webhook_url,
+            )
+            if lyrics:
+                lyrics = api_client.create_lyrics(lyrics)
+            conversion_ids, cost, error = api_client.create_music(prompt, lyrics)
+            if error:
+                r.decr("musicgpt:active_generations")
+                r.decr(daily_key)
+                if "402" in error:
+                    msg = "The platform has run out of credits. Please contact the administrator."
+                elif "500" in error:
+                    msg = "The music generation service is temporarily unavailable. Please try again later."
+                else:
+                    msg = "Song generation failed. Please try again later."
+                current_app.logger.error(f"MusicGPT error for client {client_id}: {error}")
+                return jsonify({"status": "failed", "message": msg}), 503
+            conversion_id = conversion_ids[0]
+
+        job_key = f"job:{conversion_id}"
 
         payload = {
             "job_key": job_key,
@@ -180,26 +218,6 @@ def create_song():
                 args=(app, job_key, conversion_id, client_id),
                 daemon=True,
             ).start()
-        else:
-            # --- Real MusicGPT API path (restore by setting DEV_SIMULATE_WEBHOOK = False) ---
-            # webhook_url = r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
-            # client = MusicAPIClient(
-            #     open_ai_key=current_app.config["OPEN_AI_KEY"],
-            #     musicgpt_key=current_app.config["MUSICGPT_KEY"],
-            #     webhook_url=webhook_url,
-            # )
-            # conversion_ids, cost, error = client.create_music(prompt, lyrics)
-            # if error:
-            #     r.decr("musicgpt:active_generations")
-            #     if "402" in error:
-            #         msg = "The platform has run out of credits. Please contact the administrator."
-            #     elif "500" in error:
-            #         msg = "The music generation service is temporarily unavailable. Please try again later."
-            #     else:
-            #         msg = "Song generation failed. Please try again later."
-            #     current_app.logger.error(f"MusicGPT error for client {client_id}: {error}")
-            #     return jsonify({"status": "failed", "message": msg}), 503
-            pass
 
         return jsonify({"status": "success"})
 
@@ -288,11 +306,12 @@ def webhook():
     queue_payload = {"conversion_id": conversion_id, "client_id": client_id}
     r.rpush(current_app.config["PLAYLIST_DYNAMIC_KEY"], json.dumps(queue_payload))
 
-    if client_id:
-        emit_queue_position_to_client(socketio, client_id)
+    # Notify all queued clients of their updated positions (includes the new client)
+    emit_queue_positions(r)
 
     # Notify all connected clients that the queue changed so they can refresh their own position
-    socketio.emit("queue_changed", {}, broadcast=True)
+    queue_length = r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"])
+    r.publish("queue_events", json.dumps({"queue_length": queue_length}))
 
     # active_job intentionally NOT deleted here —
     # user stays locked until their song finishes playing (handled in mark_played)
@@ -304,9 +323,12 @@ def webhook():
 def my_queue_position():
     r = current_app.extensions["redis"]
 
+    raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+    queue_length = len(raw_items)
+
     client_id = session.get("client_id")
     if not client_id:
-        return {"in_queue": False, "has_active_job": False, "message": "No client ID found."}
+        return {"in_queue": False, "has_active_job": False, "queue_length": queue_length}
 
     has_active_job = bool(r.exists(f"client:{client_id}:active_job"))
 
@@ -317,11 +339,7 @@ def my_queue_position():
         if job_key:
             job = r.hgetall(job_key)
             if job.get("client_id") == client_id:
-                return jsonify({"now_playing": True, "conversion_id": now_playing.get("conversion_id")})
-
-    raw_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1) + r.lrange(
-        current_app.config["PLAYLIST_PROCESSING_KEY"], 0, -1
-    )
+                return jsonify({"now_playing": True, "conversion_id": now_playing.get("conversion_id"), "queue_length": queue_length})
 
     for idx, item in enumerate(raw_items):
         item = json.loads(item)
@@ -330,11 +348,11 @@ def my_queue_position():
                 "in_queue": True,
                 "has_active_job": has_active_job,
                 "queue_position": idx + 1,
-                "queue_length": len(raw_items),
+                "queue_length": queue_length,
                 "conversion_id": item.get("conversion_id"),
             }
 
-    return {"in_queue": False, "has_active_job": has_active_job, "message": "You currently have no songs in queue."}
+    return {"in_queue": False, "has_active_job": has_active_job, "queue_length": queue_length}
 
 
 @home_bp.route("/api/mark-played", methods=["POST"])

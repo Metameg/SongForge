@@ -22,15 +22,16 @@ class MusicAPIClient:
                 },
                 {
                     "role": "user",
-                    "content": f"""Given the following body of text, take the highlights and turn it into a catchy
-                    song. Use tages like <verse>, <bridge>, and <chorus> to organize the song.
+                    "content": f"""You are given text that a user wants turned into song lyrics.
 
-                    Here is the text to turn into a song:
-                    {text}
+Your rules:
+1. If the text is already structured song lyrics (has verses, choruses, repeated lines, or poetic structure), return it AS-IS — do not rewrite or paraphrase it.
+2. If the text is prose, a sentence, or a short phrase, expand it into a full song. Keep the user's exact words and phrases IN ORDER as the core lines. Only add creative filler (repeated choruses, bridges, additional verses) to make it a complete, full-length song.
+3. Always use <verse>, <chorus>, and <bridge> tags to organize the output.
+4. Never omit or reorder any of the user's original words.
 
-                    Keep as much of the original text IN ORDER as possible in the lyrics. A good rule of thumb is 
-                    to use shorter, more meaningful sentences as highlights of the song. It is vital to capture the meaning
-                    of the text in these song lyrics.""",
+Here is the user's text:
+{text}""",
                 },
             ],
         )
