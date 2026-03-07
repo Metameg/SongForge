@@ -4,6 +4,7 @@ import os
 class Config:
     OPEN_AI_KEY = os.getenv("OPEN_AI_KEY")
     MUSICGPT_KEY = os.getenv("MUSICGPT_KEY")
+    TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
     REDIS_DB = 0

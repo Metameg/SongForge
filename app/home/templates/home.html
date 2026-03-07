@@ -9,6 +9,7 @@
         rel="stylesheet"
         href="{{ url_for('home.static', filename='css/home.css') }}"
     >
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body>
 
@@ -86,6 +87,8 @@
         class="lyrics-input"
         placeholder="Enter custom lyrics here"
       ></textarea>
+
+      <div class="cf-turnstile" data-sitekey="0x4AAAAAACnysCJdGW2yrR7r" data-theme="dark" data-size="flexible"></div>
 
       <button id="submitBtn" class="submit-btn" type="button">Submit</button>
       <p id="errorMsg" class="error"></p>

@@ -30,7 +30,11 @@ document.getElementById("submitBtn").onclick = async () => {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ lyrics, prompt }),
+      body: JSON.stringify({
+        lyrics,
+        prompt,
+        "cf-turnstile-response": document.querySelector('[name="cf-turnstile-response"]')?.value || "",
+      }),
     });
 
     const data = await res.json();
@@ -41,6 +45,7 @@ document.getElementById("submitBtn").onclick = async () => {
       submitBtn.disabled = false;
       submitBtn.classList.remove("loading");
       submitBtn.textContent = "Submit";
+      if (window.turnstile) window.turnstile.reset();
       return;
     }
 

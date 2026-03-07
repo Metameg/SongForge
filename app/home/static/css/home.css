@@ -654,6 +654,14 @@ p {
   transform: translateY(-1px);
 }
 
+/* ---------- Turnstile Widget ---------- */
+.cf-turnstile {
+  margin-top: 16px;
+  border-radius: 10px;
+  overflow: hidden;
+  opacity: 0.85;
+}
+
 /* ---------- Input Labels ---------- */
 .input-label {
   display: block;
