@@ -139,16 +139,16 @@ def create_song():
         return jsonify({"status": "failed", "message": "Invalid request payload."}), 400
 
     # Turnstile verification
-    turnstile_secret = current_app.config.get("TURNSTILE_SECRET_KEY")
-    if turnstile_secret:
-        token = data.get("cf-turnstile-response", "")
-        verify = requests.post(
-            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-            data={"secret": turnstile_secret, "response": token},
-            timeout=5,
-        )
-        if not verify.json().get("success"):
-            return jsonify({"status": "failed", "message": "Human verification failed. Please try again."}), 403
+    # turnstile_secret = current_app.config.get("TURNSTILE_SECRET_KEY")
+    # if turnstile_secret:
+    #     token = data.get("cf-turnstile-response", "")
+    #     verify = requests.post(
+    #         "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+    #         data={"secret": turnstile_secret, "response": token},
+    #         timeout=5,
+    #     )
+    #     if not verify.json().get("success"):
+    #         return jsonify({"status": "failed", "message": "Human verification failed. Please try again."}), 403
 
     lyrics = data.get("lyrics", "").strip()
     prompt = data.get("prompt", "").strip()
