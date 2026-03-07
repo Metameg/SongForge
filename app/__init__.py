@@ -1,5 +1,5 @@
 from flask import Flask
-from .config import DevelopmentConfig
+from .config import DevelopmentConfig, ProductionConfig
 import redis
 from .extensions import socketio
 import threading
@@ -11,7 +11,9 @@ from flask_session import Session
 
 def create_app():
     app = Flask(__name__, static_folder="static")
-    app.config.from_object(DevelopmentConfig)
+
+    config = ProductionConfig if os.getenv("FLASK_ENV") == "production" else DevelopmentConfig
+    app.config.from_object(config)
 
     # File logging — always written regardless of how the server was started
     log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
@@ -32,20 +34,17 @@ def create_app():
     # Also write Werkzeug request logs to the same file
     logging.getLogger("werkzeug").addHandler(handler)
 
-    # Redis client
-    app.extensions["redis"] = redis.Redis(
-        host=app.config["REDIS_HOST"],
-        port=app.config["REDIS_PORT"],
-        db=app.config["REDIS_DB"],
-        decode_responses=True,
+    # Redis client — prefers REDIS_URL (Railway/production), falls back to localhost
+    redis_url = os.getenv(
+        "REDIS_URL",
+        f"redis://{app.config['REDIS_HOST']}:{app.config['REDIS_PORT']}/{app.config['REDIS_DB']}",
     )
+    app.extensions["redis"] = redis.from_url(redis_url, decode_responses=True)
 
     app.config.update(
-        SECRET_KEY="supersecret",
+        SECRET_KEY=os.getenv("SECRET_KEY", "supersecret"),
         SESSION_TYPE="redis",
-        SESSION_REDIS=redis.from_url(
-            f"redis://{app.config['REDIS_HOST']}:{app.config['REDIS_PORT']}"
-        ),
+        SESSION_REDIS=redis.from_url(redis_url),
         SESSION_PERMANENT=False,
     )
     Session(app)

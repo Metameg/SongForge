@@ -33,7 +33,7 @@ document.getElementById("submitBtn").onclick = async () => {
       body: JSON.stringify({
         lyrics,
         prompt,
-        "cf-turnstile-response": document.querySelector('[name="cf-turnstile-response"]')?.value || "",
+        // "cf-turnstile-response": document.querySelector('[name="cf-turnstile-response"]')?.value || "",
       }),
     });
 

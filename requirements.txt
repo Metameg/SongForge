@@ -1,0 +1,10 @@
+flask
+flask-socketio
+flask-session
+redis
+requests
+python-dotenv
+mutagen
+eventlet
+gunicorn
+openai
