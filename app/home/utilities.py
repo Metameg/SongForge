@@ -62,6 +62,7 @@ def emit_queue_position_to_client(socketio, client_id, to=None):
                 return
 
     queue_info = get_queue_info_by_client(client_id)
+    queue_length = queue_info["queue_length"]
 
     if queue_info["found"]:
         socketio.emit(
@@ -69,7 +70,7 @@ def emit_queue_position_to_client(socketio, client_id, to=None):
             {
                 "conversion_id": queue_info["conversion_id"],
                 "queue_position": queue_info["queue_position"],
-                "queue_length": queue_info["queue_length"],
+                "queue_length": queue_length,
                 "in_queue": True,
             },
             to=target,
@@ -81,6 +82,7 @@ def emit_queue_position_to_client(socketio, client_id, to=None):
             {
                 "in_queue": False,
                 "has_active_job": has_active_job,
+                "queue_length": queue_length,
                 "message": "You currently have no songs in queue.",
             },
             to=target,

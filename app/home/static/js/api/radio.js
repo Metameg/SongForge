@@ -25,7 +25,7 @@ export class RadioPlayer {
     this._bindUI();
     this._bindSocket();
     this._bindAudio();
-    
+    this.updateQueuePosition();
   }
 
   /* ---------------- UI ---------------- */
@@ -79,7 +79,8 @@ export class RadioPlayer {
       this._onQueuePositionUpdate(data);
     });
 
-    socket.on("queue_changed", () => {
+    socket.on("queue_changed", (data) => {
+      if (data?.queue_length !== undefined) this._updateQueueCount(data.queue_length);
       this.updateQueuePosition();
     });
   }
@@ -123,6 +124,7 @@ export class RadioPlayer {
     console.log("queue status update", data);
     this.userQueueEntry = data;
     this._renderQueueStatus();
+    if (data.queue_length !== undefined) this._updateQueueCount(data.queue_length);
   }
 
   // Enhanced queue status rendering
@@ -182,9 +184,8 @@ export class RadioPlayer {
       return;
     }
     
-    const { queue_position, queue_length } = this.userQueueEntry;
-    const percentage = ((queue_length - queue_position + 1) / queue_length) * 100;
-    
+    const { queue_position } = this.userQueueEntry;
+
     this.queueStatusEl.innerHTML = `
       <div class="queue-active">
         <div class="queue-position-badge">
@@ -192,10 +193,7 @@ export class RadioPlayer {
         </div>
         <div class="queue-info">
           <p class="queue-info-title">Your song is in the queue</p>
-          <p class="queue-info-detail">Position ${queue_position} of ${queue_length}</p>
-          <div class="queue-progress-bar">
-            <div class="queue-progress-fill" style="width: ${percentage}%"></div>
-          </div>
+          <p class="queue-info-detail">Position #${queue_position}</p>
         </div>
       </div>
     `;
@@ -215,7 +213,7 @@ export class RadioPlayer {
   }
     
 
-   async updateQueuePosition() {
+  async updateQueuePosition() {
     const seq = ++this._queueFetchSeq;
     try {
       const res = await fetch("/api/my-queue-position");
@@ -226,9 +224,16 @@ export class RadioPlayer {
 
       this.userQueueEntry = data;
       this._renderQueueStatus();
+      if (data.queue_length !== undefined) this._updateQueueCount(data.queue_length);
     } catch (error) {
       console.error("Error fetching queue position:", error);
     }
+  }
+
+  _updateQueueCount(count) {
+    const el = document.getElementById("queueCount");
+    if (!el) return;
+    el.textContent = count;
   }
 
 

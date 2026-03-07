@@ -4,6 +4,7 @@ import os
 class Config:
     OPEN_AI_KEY = os.getenv("OPEN_AI_KEY")
     MUSICGPT_KEY = os.getenv("MUSICGPT_KEY")
+    TURNSTILE_SECRET_KEY = os.getenv("TURNSTILE_SECRET_KEY")
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
     REDIS_DB = 0
@@ -18,7 +19,7 @@ class Config:
 class DevelopmentConfig(Config):
     PUBLIC_BASE_URL = "https://trees-shark-presenting-benjamin.trycloudflare.com"
     WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook"
-    DEV_SIMULATE_WEBHOOK = True  # Skip MusicGPT API; simulate webhook locally after a delay
+    DEV_SIMULATE_WEBHOOK = False  # Skip MusicGPT API; simulate webhook locally after a delay
 
 
 class ProductionConfig(Config):

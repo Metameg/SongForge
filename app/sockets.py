@@ -30,3 +30,12 @@ def register_socket_handlers(socketio):
                     return
 
         emit_queue_position_to_client(socketio, client_id, to=request.sid)
+
+        # Restore modal timeline state on page reload
+        active_job_key = f"client:{client_id}:active_job"
+        job_key_val = r.get(active_job_key)
+        if job_key_val:
+            job = r.hgetall(job_key_val)
+            job_status = job.get("status")
+            if job_status in ("processing", "queued"):
+                socketio.emit("job_status_update", {"status": job_status, "restore": True}, to=request.sid)

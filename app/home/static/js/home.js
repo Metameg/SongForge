@@ -27,11 +27,14 @@ document.addEventListener("DOMContentLoaded", () => {
       const data = await res.json();
       const submitBtn = document.getElementById("submitBtn");
 
-      if (data.has_active_job) {
+      if (data.now_playing) {
+        submitBtn.disabled = true;
+        document.getElementById("submitError").textContent = "Your song is currently playing. You can create another once it finishes.";
+      } else if (data.has_active_job) {
         submitBtn.disabled = true;
         const msg = data.in_queue
           ? "You already have a song in the queue. Wait for it to play before submitting another."
-          : "Your song is currently playing. You can create another once it finishes.";
+          : "Your song is still being created. You can submit another once it finishes playing.";
         document.getElementById("submitError").textContent = msg;
       } else {
         submitBtn.disabled = false;

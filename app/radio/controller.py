@@ -28,17 +28,16 @@ def select_next_track(r):
 def advance_radio():
     r = current_app.extensions["redis"]
 
-    # If the outgoing track was a dynamic song, clean up the owner's active_job
-    # server-side so they're not locked out if they closed their browser during playback
+    # Capture the outgoing dynamic track's owner before popping the next track
     prev = r.hgetall("radio:now_playing")
+    prev_client_id = None
     if prev.get("source") == "dynamic":
         prev_job = r.hgetall(prev.get("job_key", "")) if prev.get("job_key") else {}
         if prev_job.get("status") != "played":
             r.hset(prev["job_key"], "status", "played")
-            client_id = prev_job.get("client_id")
-            if client_id:
-                r.delete(f"client:{client_id}:active_job")
-                socketio.emit("queue_position_update", {"in_queue": False}, to=client_id)
+            prev_client_id = prev_job.get("client_id")
+            if prev_client_id:
+                r.delete(f"client:{prev_client_id}:active_job")
 
     cid, source = select_next_track(r)
     if not cid:
@@ -82,45 +81,51 @@ def advance_radio():
         ),
     )
 
-    # 🔁 Update remaining queue positions (per-user)
-    emit_queue_positions(r)
+    # Update all queued/processing clients with their new positions and queue_length
+    queue_length = emit_queue_positions(r)
     current_app.logger.debug(f"advance_radio: source={source}, cid={cid}")
+
+    # Notify the outgoing dynamic track's owner — song is done, send updated count
+    if prev_client_id:
+        socketio.emit(
+            "queue_position_update",
+            {"in_queue": False, "has_active_job": False, "queue_length": queue_length},
+            to=prev_client_id,
+        )
+
+    # Notify the incoming dynamic track's owner — song is now playing
     if source == "dynamic":
-        client_id = r.hget(job_key, "client_id")
-        if client_id:
-            if isinstance(client_id, bytes):
-                client_id = client_id.decode()
+        incoming_client_id = r.hget(job_key, "client_id")
+        if incoming_client_id:
+            if isinstance(incoming_client_id, bytes):
+                incoming_client_id = incoming_client_id.decode()
             socketio.emit(
                 "queue_position_update",
-                {
-                    "conversion_id": cid,
-                    "now_playing": True,
-                },
-                to=client_id,
+                {"conversion_id": cid, "now_playing": True, "queue_length": queue_length},
+                to=incoming_client_id,
             )
+
+    # Broadcast to all connected clients (spectators, non-queued) so their counter stays in sync
+    r.publish("queue_events", json.dumps({"queue_length": queue_length}))
 
 
 def emit_queue_positions(r):
-    queue_key = current_app.config["PLAYLIST_DYNAMIC_KEY"]
+    dynamic_items = r.lrange(current_app.config["PLAYLIST_DYNAMIC_KEY"], 0, -1)
+    processing_items = r.lrange(current_app.config["PLAYLIST_PROCESSING_KEY"], 0, -1)
+    queue_length = len(dynamic_items)
 
-    raw_items = r.lrange(queue_key, 0, -1)
-    queue_length = len(raw_items)
-
-    for idx, raw in enumerate(raw_items):
+    for idx, raw in enumerate(dynamic_items):
         try:
-            # Decode bytes if needed
             item = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
         except Exception:
             continue
 
-        # Use client_id stored in the job, not Flask session
-        client_id = item.get("client_id")  # 🔑 previously session_id
+        client_id = item.get("client_id")
         conversion_id = item.get("conversion_id")
 
         if not client_id or not conversion_id:
             continue
 
-        # Emit only to the specific client who owns this job
         socketio.emit(
             "queue_position_update",
             {
@@ -129,5 +134,28 @@ def emit_queue_positions(r):
                 "queue_length": queue_length,
                 "in_queue": True,
             },
-            to=client_id,  # use client_id from job
+            to=client_id,
         )
+
+    # Also notify clients whose songs are still being generated
+    for raw in processing_items:
+        try:
+            item = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        except Exception:
+            continue
+
+        client_id = item.get("client_id")
+        if not client_id:
+            continue
+
+        socketio.emit(
+            "queue_position_update",
+            {
+                "in_queue": False,
+                "has_active_job": True,
+                "queue_length": queue_length,
+            },
+            to=client_id,
+        )
+
+    return queue_length
