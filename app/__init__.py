@@ -15,24 +15,32 @@ def create_app():
     config = ProductionConfig if os.getenv("FLASK_ENV") == "production" else DevelopmentConfig
     app.config.from_object(config)
 
-    # File logging — always written regardless of how the server was started
-    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    handler = RotatingFileHandler(
-        os.path.join(log_dir, "app.log"),
-        maxBytes=2 * 1024 * 1024,  # 2 MB per file
-        backupCount=3,
-    )
-    handler.setFormatter(logging.Formatter(
+    log_fmt = logging.Formatter(
         "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    handler.setLevel(logging.INFO)
-    app.logger.addHandler(handler)
-    app.logger.setLevel(logging.INFO)
+    )
 
-    # Also write Werkzeug request logs to the same file
-    logging.getLogger("werkzeug").addHandler(handler)
+    # stdout — visible in Railway console
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(log_fmt)
+    stream_handler.setLevel(logging.INFO)
+    app.logger.addHandler(stream_handler)
+    logging.getLogger("werkzeug").addHandler(stream_handler)
+
+    # File logging — for local dev
+    log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        os.path.join(log_dir, "app.log"),
+        maxBytes=2 * 1024 * 1024,
+        backupCount=3,
+    )
+    file_handler.setFormatter(log_fmt)
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    logging.getLogger("werkzeug").addHandler(file_handler)
+
+    app.logger.setLevel(logging.INFO)
 
     # Redis client — prefers REDIS_URL (Railway/production), falls back to localhost
     redis_url = os.getenv(
