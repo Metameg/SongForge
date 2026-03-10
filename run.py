@@ -66,8 +66,6 @@ def _persist_cloudflared_url(app, public_url):
         app.config["PUBLIC_BASE_URL"] = public_url
         app.config["WEBHOOK_URL"] = webhook_url
         app.extensions["redis"].set("config:webhook_url", webhook_url)
-    print(f"Cloudflare tunnel active: {public_url}", flush=True)
-    print(f"Webhook URL:              {webhook_url}", flush=True)
 
 
 def start_cloudflared(app):

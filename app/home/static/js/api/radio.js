@@ -121,7 +121,6 @@ export class RadioPlayer {
   }
 
   _onQueuePositionUpdate(data) {
-    console.log("queue status update", data);
     this.userQueueEntry = data;
     this._renderQueueStatus();
     if (data.queue_length !== undefined) this._updateQueueCount(data.queue_length);
@@ -148,7 +147,6 @@ export class RadioPlayer {
     }
 
     // if (!this.queueStatusEl) return;
-    console.log(this.userQueueEntry);
     if (!this.userQueueEntry || !this.userQueueEntry['in_queue']) {
       if (this.userQueueEntry?.has_active_job) {
         // Song is still being created — don't reset the UI

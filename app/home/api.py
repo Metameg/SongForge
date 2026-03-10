@@ -172,7 +172,6 @@ def create_song():
             conversion_id = str(uuid.uuid4())
         else:
             webhook_url = r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
-            current_app.logger.info(f"CREATE_SONG webhook_url={webhook_url!r} client={client_id}")
             api_client = MusicAPIClient(
                 open_ai_key=current_app.config["OPEN_AI_KEY"],
                 musicgpt_key=current_app.config["MUSICGPT_KEY"],
@@ -243,8 +242,7 @@ def webhook():
     subtype = data.get("subtype", "")
     conversion_id = data.get("conversion_id")
 
-    import json as _json
-    current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r} payload={_json.dumps(data, indent=2)}")
+    current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r}")
 
     # Album cover arrives in a separate webhook before music_ai — attach it to the job early
     if subtype == "album_cover_generation":
