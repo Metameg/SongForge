@@ -317,6 +317,42 @@ p {
   opacity: 0.9;
 }
 
+/* ---------- How It Works ---------- */
+.how-it-works {
+  display: flex;
+  gap: 16px;
+  margin-top: 40px;
+  width: 100%;
+}
+
+.how-step {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 12px;
+  padding: 24px 20px;
+  text-align: center;
+}
+
+.how-icon {
+  font-size: 28px;
+}
+
+.how-title {
+  font-family: 'Poppins', sans-serif;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+  margin: 12px 0 6px;
+}
+
+.how-desc {
+  color: #7a9bb0;
+  font-size: 13px;
+  margin: 0;
+  line-height: 1.5;
+}
+
 /* ---------- Modal ---------- */
 .request-modal {
   position: fixed;
@@ -459,6 +495,12 @@ p {
   font-size: 0.9rem;
 }
 
+
+@media (max-width: 640px) {
+  .how-it-works {
+    flex-direction: column;
+  }
+}
 
 @media (max-width: 480px) {
   .request-box {
