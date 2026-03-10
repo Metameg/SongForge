@@ -208,6 +208,7 @@ def create_song():
         r.rpush(current_app.config["PLAYLIST_PROCESSING_KEY"], json.dumps(payload))
         for k, v in payload.items():
             r.hset(job_key, k, v)
+        r.expire(job_key, 900)  # 15min safety TTL — hard cleanup if watchdog fails
 
         r.set(active_job_key, job_key, ex=14400)
 
