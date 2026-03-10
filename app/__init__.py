@@ -59,9 +59,7 @@ def create_app():
     threading.Thread(target=start_radio_watchdog, args=(app,), daemon=True).start()
 
     from .home import home_bp
-    from .bulktool import bulktool_bp
 
     app.register_blueprint(home_bp)
-    app.register_blueprint(bulktool_bp)
 
     return app
