@@ -172,6 +172,7 @@ def create_song():
             conversion_id = str(uuid.uuid4())
         else:
             webhook_url = r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
+            current_app.logger.info(f"CREATE_SONG webhook_url={webhook_url!r} client={client_id}")
             api_client = MusicAPIClient(
                 open_ai_key=current_app.config["OPEN_AI_KEY"],
                 musicgpt_key=current_app.config["MUSICGPT_KEY"],
