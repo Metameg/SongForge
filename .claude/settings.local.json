@@ -4,7 +4,8 @@
       "Bash(pip list:*)",
       "Bash(ls:*)",
       "Bash(pip install:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "WebFetch(domain:docs.musicgpt.com)"
     ]
   }
 }

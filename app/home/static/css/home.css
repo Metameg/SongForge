@@ -317,6 +317,70 @@ p {
   opacity: 0.9;
 }
 
+/* ---------- How It Works ---------- */
+.how-it-works {
+  width: 100%;
+  margin-bottom: 36px;
+}
+
+.how-heading {
+  color: #50c4ff;
+  font-size: 11px;
+  font-family: 'Poppins', sans-serif;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0 0 16px;
+}
+
+.how-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.how-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.how-num {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(80, 196, 255, 0.35);
+  color: #50c4ff;
+  font-family: 'Poppins', sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+
+.how-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.how-title {
+  font-family: 'Poppins', sans-serif;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.how-desc {
+  font-family: 'Poppins-Regular', sans-serif;
+  color: #7a9bb0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* ---------- Modal ---------- */
 .request-modal {
   position: fixed;

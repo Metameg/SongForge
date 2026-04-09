@@ -21,6 +21,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     requestBtn.addEventListener("click", async () => {
       modal.classList.add("active");
+      if (window.turnstile) window.turnstile.execute('#turnstileWidget');
       document.getElementById("submitError").textContent = "";
 
       const res = await fetch("/api/my-queue-position");

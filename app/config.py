@@ -23,4 +23,5 @@ class DevelopmentConfig(Config):
 
 
 class ProductionConfig(Config):
-    PUBLIC_BASE_URL = "https://yourapp.com"
+    PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
+    WEBHOOK_URL = PUBLIC_BASE_URL + "/webhook" if PUBLIC_BASE_URL else ""

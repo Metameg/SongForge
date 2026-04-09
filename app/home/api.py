@@ -208,6 +208,7 @@ def create_song():
         r.rpush(current_app.config["PLAYLIST_PROCESSING_KEY"], json.dumps(payload))
         for k, v in payload.items():
             r.hset(job_key, k, v)
+        r.expire(job_key, 900)  # 15min safety TTL — hard cleanup if watchdog fails
 
         r.set(active_job_key, job_key, ex=14400)
 
@@ -242,8 +243,7 @@ def webhook():
     subtype = data.get("subtype", "")
     conversion_id = data.get("conversion_id")
 
-    import json as _json
-    current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r} payload={_json.dumps(data, indent=2)}")
+    current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r}")
 
     # Album cover arrives in a separate webhook before music_ai — attach it to the job early
     if subtype == "album_cover_generation":
