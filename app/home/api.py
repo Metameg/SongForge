@@ -1,5 +1,4 @@
 from flask import session, request, jsonify, current_app
-import requests
 import os
 import json
 import time
@@ -43,7 +42,12 @@ def _run_simulated_webhook(app, job_key, conversion_id, client_id):
         r.hset(job_key, "status", "queued")
         r.hset(job_key, "source", "dynamic")
 
-        emit_job_status(socketio, client_id, status="queued", message="Song created and added to queue!")
+        emit_job_status(
+            socketio,
+            client_id,
+            status="queued",
+            message="Song created and added to queue!",
+        )
 
         remove_from_processing(r, app.config["PLAYLIST_PROCESSING_KEY"], job_key)
         queue_payload = {"conversion_id": conversion_id, "client_id": client_id}
@@ -58,12 +62,17 @@ def _run_simulated_webhook(app, job_key, conversion_id, client_id):
 def debug_status():
     """Dev-only: check tunnel URL, active generations, and Redis health."""
     r = current_app.extensions["redis"]
-    return jsonify({
-        "webhook_url": r.get("config:webhook_url") or current_app.config.get("WEBHOOK_URL"),
-        "active_generations": int(r.get("musicgpt:active_generations") or 0),
-        "dynamic_queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
-        "processing_queue_length": r.llen(current_app.config["PLAYLIST_PROCESSING_KEY"]),
-    })
+    return jsonify(
+        {
+            "webhook_url": r.get("config:webhook_url")
+            or current_app.config.get("WEBHOOK_URL"),
+            "active_generations": int(r.get("musicgpt:active_generations") or 0),
+            "dynamic_queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"]),
+            "processing_queue_length": r.llen(
+                current_app.config["PLAYLIST_PROCESSING_KEY"]
+            ),
+        }
+    )
 
 
 @home_bp.route("/api/radio/now-playing", methods=["GET"])
@@ -98,15 +107,22 @@ def create_song():
 
     client_id = session.get("client_id")
     if not client_id:
-        return jsonify({"status": "failed", "message": "No client session. Please refresh the page."}), 401
+        return jsonify(
+            {
+                "status": "failed",
+                "message": "No client session. Please refresh the page.",
+            }
+        ), 401
 
     # Gate 1: one song at a time — must wait until current song finishes playing
     active_job_key = f"client:{client_id}:active_job"
     if r.exists(active_job_key):
-        return jsonify({
-            "status": "failed",
-            "message": "You already have a song in progress. Please wait for it to finish playing before creating another.",
-        }), 409
+        return jsonify(
+            {
+                "status": "failed",
+                "message": "You already have a song in progress. Please wait for it to finish playing before creating another.",
+            }
+        ), 409
 
     # Gate 2: daily limit of 5 songs per user (resets at midnight UTC)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -114,54 +130,54 @@ def create_song():
     daily_count = int(r.get(daily_key) or 0)
     if daily_count >= DAILY_SONG_LIMIT:
         now = datetime.now(timezone.utc)
-        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         reset_seconds = int((midnight - now).total_seconds())
         hours = reset_seconds // 3600
         minutes = (reset_seconds % 3600) // 60
-        return jsonify({
-            "status": "failed",
-            "message": (
-                f"You've reached your daily limit of {DAILY_SONG_LIMIT} songs. "
-                f"You can create more songs in {hours}h {minutes}m."
-            ),
-        }), 429
+        return jsonify(
+            {
+                "status": "failed",
+                "message": (
+                    f"You've reached your daily limit of {DAILY_SONG_LIMIT} songs. "
+                    f"You can create more songs in {hours}h {minutes}m."
+                ),
+            }
+        ), 429
 
     # Gate 3: platform-wide parallel generation cap (API subscription limit)
     active_generations = int(r.get("musicgpt:active_generations") or 0)
     if active_generations >= PARALLEL_GENERATION_LIMIT:
-        return jsonify({
-            "status": "failed",
-            "message": "There are too many songs being generated right now. Please try again later.",
-        }), 503
+        return jsonify(
+            {
+                "status": "failed",
+                "message": "There are too many songs being generated right now. Please try again later.",
+            }
+        ), 503
 
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"status": "failed", "message": "Invalid request payload."}), 400
 
-    # Turnstile verification
-    turnstile_secret = current_app.config.get("TURNSTILE_SECRET_KEY")
-    if turnstile_secret:
-        token = data.get("cf-turnstile-response", "")
-        verify = requests.post(
-            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
-            data={"secret": turnstile_secret, "response": token},
-            timeout=5,
-        )
-        if not verify.json().get("success"):
-            return jsonify({"status": "failed", "message": "Human verification failed. Please try again."}), 403
-
     lyrics = data.get("lyrics", "").strip()
     prompt = data.get("prompt", "").strip()
 
     if not prompt:
-        return jsonify({"status": "failed", "message": "A prompt is required to create a song."}), 400
+        return jsonify(
+            {"status": "failed", "message": "A prompt is required to create a song."}
+        ), 400
 
     if len(prompt) > 280:
-        return jsonify({"status": "failed", "message": "Prompt must be 280 characters or fewer."}), 400
+        return jsonify(
+            {"status": "failed", "message": "Prompt must be 280 characters or fewer."}
+        ), 400
 
     job_key = None
     try:
-        emit_job_status(socketio, client_id, status="processing", message="Creating Song")
+        emit_job_status(
+            socketio, client_id, status="processing", message="Creating Song"
+        )
 
         r.incr("musicgpt:active_generations")
         r.incr(daily_key)
@@ -169,9 +185,12 @@ def create_song():
 
         if current_app.config.get("DEV_SIMULATE_WEBHOOK"):
             import uuid
+
             conversion_id = str(uuid.uuid4())
         else:
-            webhook_url = r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
+            webhook_url = (
+                r.get("config:webhook_url") or current_app.config["WEBHOOK_URL"]
+            )
             api_client = MusicAPIClient(
                 open_ai_key=current_app.config["OPEN_AI_KEY"],
                 musicgpt_key=current_app.config["MUSICGPT_KEY"],
@@ -189,7 +208,9 @@ def create_song():
                     msg = "The music generation service is temporarily unavailable. Please try again later."
                 else:
                     msg = "Song generation failed. Please try again later."
-                current_app.logger.error(f"MusicGPT error for client {client_id}: {error}")
+                current_app.logger.error(
+                    f"MusicGPT error for client {client_id}: {error}"
+                )
                 return jsonify({"status": "failed", "message": msg}), 503
             conversion_id = conversion_ids[0]
 
@@ -227,9 +248,16 @@ def create_song():
         r.delete(active_job_key)
         r.decr(daily_key)
         if job_key:
-            remove_from_processing(r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key)
+            remove_from_processing(
+                r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key
+            )
         current_app.logger.exception(e)
-        return jsonify({"status": "failed", "message": "An unexpected error occurred. Please try again."}), 500
+        return jsonify(
+            {
+                "status": "failed",
+                "message": "An unexpected error occurred. Please try again.",
+            }
+        ), 500
 
 
 @home_bp.route("/webhook", methods=["POST"])
@@ -243,7 +271,15 @@ def webhook():
     subtype = data.get("subtype", "")
     conversion_id = data.get("conversion_id")
 
+<<<<<<< HEAD
     current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r}")
+=======
+    import json as _json
+
+    current_app.logger.info(
+        f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r} payload={_json.dumps(data, indent=2)}"
+    )
+>>>>>>> c2bf50a (switched code to development mode with no 3rd party API interaction)
 
     # Album cover arrives in a separate webhook before music_ai — attach it to the job early
     if subtype == "album_cover_generation":
@@ -298,7 +334,12 @@ def webhook():
     r.hset(job_key, "source", "dynamic")
 
     if client_id:
-        emit_job_status(socketio, client_id, status="queued", message="Song created and added to queue!")
+        emit_job_status(
+            socketio,
+            client_id,
+            status="queued",
+            message="Song created and added to queue!",
+        )
 
     # Move from processing → dynamic playback queue
     remove_from_processing(r, current_app.config["PLAYLIST_PROCESSING_KEY"], job_key)
@@ -328,7 +369,11 @@ def my_queue_position():
 
     client_id = session.get("client_id")
     if not client_id:
-        return {"in_queue": False, "has_active_job": False, "queue_length": queue_length}
+        return {
+            "in_queue": False,
+            "has_active_job": False,
+            "queue_length": queue_length,
+        }
 
     has_active_job = bool(r.exists(f"client:{client_id}:active_job"))
 
@@ -339,7 +384,13 @@ def my_queue_position():
         if job_key:
             job = r.hgetall(job_key)
             if job.get("client_id") == client_id:
-                return jsonify({"now_playing": True, "conversion_id": now_playing.get("conversion_id"), "queue_length": queue_length})
+                return jsonify(
+                    {
+                        "now_playing": True,
+                        "conversion_id": now_playing.get("conversion_id"),
+                        "queue_length": queue_length,
+                    }
+                )
 
     for idx, item in enumerate(raw_items):
         item = json.loads(item)
@@ -352,7 +403,11 @@ def my_queue_position():
                 "conversion_id": item.get("conversion_id"),
             }
 
-    return {"in_queue": False, "has_active_job": has_active_job, "queue_length": queue_length}
+    return {
+        "in_queue": False,
+        "has_active_job": has_active_job,
+        "queue_length": queue_length,
+    }
 
 
 @home_bp.route("/api/mark-played", methods=["POST"])

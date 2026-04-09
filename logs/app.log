@@ -5397,3 +5397,50 @@ openai.AuthenticationError: Error code: 401 - {'error': {'message': 'Incorrect A
 }
 [2026-03-07 17:12:26] INFO werkzeug:  * Detected change in 'D:\\SongForge\\app\\__init__.py', reloading
 [2026-03-07 17:12:27] INFO werkzeug:  * Restarting with stat
+[2026-04-09 10:03:35] WARNING werkzeug: Werkzeug appears to be used in a production deployment. Consider switching to a production web server instead.
+[2026-04-09 10:03:35] INFO werkzeug: [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+[2026-04-09 10:03:35] INFO werkzeug: [33mPress CTRL+C to quit[0m
+[2026-04-09 10:03:35] INFO werkzeug:  * Restarting with stat
+[2026-04-09 10:03:36] WARNING werkzeug: Werkzeug appears to be used in a production deployment. Consider switching to a production web server instead.
+[2026-04-09 10:03:36] WARNING werkzeug:  * Debugger is active!
+[2026-04-09 10:03:36] INFO werkzeug:  * Debugger PIN: 449-387-039
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET / HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /home/static/css/home.css HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /home/static/js/api/create_song.js HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /home/static/js/home.js HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /home/static/js/api/socket.js HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /home/static/js/api/radio.js HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /static/fonts/Poppins-Black.ttf HTTP/1.1" 200 -
+[2026-04-09 10:03:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:48] "GET /static/fonts/Poppins-Regular.ttf HTTP/1.1" 200 -
+[2026-04-09 10:03:49] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:49] "GET /socket.io/?EIO=4&transport=polling&t=PronLY9 HTTP/1.1" 200 -
+[2026-04-09 10:03:49] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:49] "GET /api/my-queue-position HTTP/1.1" 200 -
+[2026-04-09 10:03:49] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:49] "GET /socket.io/?EIO=4&transport=polling&t=PronLYF&sid=HinkASm3wS3FEwt4AAAA HTTP/1.1" 200 -
+[2026-04-09 10:03:49] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:49] "POST /socket.io/?EIO=4&transport=polling&t=PronLYE&sid=HinkASm3wS3FEwt4AAAA HTTP/1.1" 200 -
+[2026-04-09 10:03:49] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:49] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+[2026-04-09 10:03:51] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:03:51] "GET /api/my-queue-position HTTP/1.1" 200 -
+[2026-04-09 10:47:30] INFO werkzeug: [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5000
+[2026-04-09 10:47:30] INFO werkzeug: [33mPress CTRL+C to quit[0m
+[2026-04-09 10:47:30] INFO werkzeug:  * Restarting with stat
+[2026-04-09 10:47:31] WARNING werkzeug:  * Debugger is active!
+[2026-04-09 10:47:31] INFO werkzeug:  * Debugger PIN: 895-946-049
+[2026-04-09 10:47:39] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:39] "[31m[1mGET /webhook HTTP/1.1[0m" 405 -
+[2026-04-09 10:47:40] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:40] "[33mGET /favicon.ico HTTP/1.1[0m" 404 -
+[2026-04-09 10:47:46] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:46] "GET / HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /home/static/js/home.js HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /home/static/css/home.css HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /home/static/js/api/create_song.js HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /home/static/js/api/socket.js HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /home/static/js/api/radio.js HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /static/fonts/Poppins-Black.ttf HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /static/fonts/Poppins-Regular.ttf HTTP/1.1" 200 -
+[2026-04-09 10:47:47] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:47] "GET /api/my-queue-position HTTP/1.1" 200 -
+[2026-04-09 10:47:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:48] "GET /socket.io/?EIO=4&transport=polling&t=ProxPj_ HTTP/1.1" 200 -
+[2026-04-09 10:47:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:48] "GET /socket.io/?EIO=4&transport=polling&t=ProxPrf&sid=twxiiSefHuJSO5PSAAAA HTTP/1.1" 200 -
+[2026-04-09 10:47:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:48] "POST /socket.io/?EIO=4&transport=polling&t=ProxPre&sid=twxiiSefHuJSO5PSAAAA HTTP/1.1" 200 -
+[2026-04-09 10:47:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:48] "GET /socket.io/?EIO=4&transport=polling&t=ProxPvi&sid=twxiiSefHuJSO5PSAAAA HTTP/1.1" 200 -
+[2026-04-09 10:47:48] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:47:48] "GET /socket.io/?EIO=4&transport=polling&t=ProxPxo&sid=twxiiSefHuJSO5PSAAAA HTTP/1.1" 200 -
+[2026-04-09 10:48:07] INFO werkzeug: 127.0.0.1 - - [09/Apr/2026 10:48:07] "GET /api/my-queue-position HTTP/1.1" 200 -
+[2026-04-09 10:49:31] INFO werkzeug:  * Detected change in '/home/metameg/Work/SongForge/app/home/api.py', reloading
+[2026-04-09 10:49:31] INFO werkzeug:  * Restarting with stat
