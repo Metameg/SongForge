@@ -271,15 +271,11 @@ def webhook():
     subtype = data.get("subtype", "")
     conversion_id = data.get("conversion_id")
 
-<<<<<<< HEAD
-    current_app.logger.info(f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r}")
-=======
     import json as _json
 
     current_app.logger.info(
         f"WEBHOOK subtype={subtype!r} conversion_id={conversion_id!r} payload={_json.dumps(data, indent=2)}"
     )
->>>>>>> c2bf50a (switched code to development mode with no 3rd party API interaction)
 
     # Album cover arrives in a separate webhook before music_ai — attach it to the job early
     if subtype == "album_cover_generation":
