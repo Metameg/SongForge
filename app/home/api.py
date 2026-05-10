@@ -1,6 +1,5 @@
 from flask import session, request, jsonify, current_app
 import requests
-import os
 import json
 import time
 import threading

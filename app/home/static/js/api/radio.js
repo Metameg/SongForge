@@ -13,6 +13,8 @@ export class RadioPlayer {
     this.nowPlaying = nowPlayingEl;
     this.queueStatusEl = queueStatusEl;
     this.thumbnailEl = thumbnailEl;
+    this.downloadBtn = document.getElementById("downloadSongBtn");
+    this.currentTrackPath = "";
     
     // State
     this.cid = null;
@@ -40,6 +42,13 @@ export class RadioPlayer {
         this.audio.pause();
       }
     });
+
+    if (this.downloadBtn) {
+      this.downloadBtn.addEventListener("click", async (event) => {
+        event.preventDefault();
+        await this._downloadCurrentTrack();
+      });
+    }
   }
 
   _updatePlayButton() {
@@ -64,6 +73,66 @@ export class RadioPlayer {
     } else {
       this.thumbnailEl.style.backgroundImage = "";
       this.thumbnailEl.classList.remove("has-cover");
+    }
+  }
+
+  _setDownloadVisibility(canDownload) {
+    if (!this.downloadBtn) return;
+    this.downloadBtn.classList.toggle("hidden", !canDownload);
+  }
+
+  _setDownloadLink(url) {
+    if (!this.downloadBtn) return;
+    this.currentTrackPath = url || "";
+    this.downloadBtn.href = this.currentTrackPath || "#";
+  }
+
+  _filenameFromHeaders(contentDisposition, fallbackPath) {
+    if (contentDisposition) {
+      const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+      if (utf8Match?.[1]) {
+        return decodeURIComponent(utf8Match[1]);
+      }
+
+      const filenameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+      if (filenameMatch?.[1]) {
+        return filenameMatch[1];
+      }
+    }
+
+    try {
+      const parsed = new URL(fallbackPath);
+      const name = parsed.pathname.split("/").filter(Boolean).pop();
+      return name || "song.mp3";
+    } catch (_error) {
+      return "song.mp3";
+    }
+  }
+
+  async _downloadCurrentTrack() {
+    if (!this.currentTrackPath) return;
+
+    try {
+      const response = await fetch(this.currentTrackPath, { mode: "cors" });
+      if (!response.ok) throw new Error(`Download failed with ${response.status}`);
+
+      const fileBlob = await response.blob();
+      const objectUrl = URL.createObjectURL(fileBlob);
+      const filename = this._filenameFromHeaders(
+        response.headers.get("content-disposition"),
+        this.currentTrackPath
+      );
+
+      const tempLink = document.createElement("a");
+      tempLink.href = objectUrl;
+      tempLink.download = filename;
+      document.body.appendChild(tempLink);
+      tempLink.click();
+      tempLink.remove();
+
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (error) {
+      window.location.href = this.currentTrackPath;
     }
   }
 
@@ -101,6 +170,7 @@ export class RadioPlayer {
     
     // Update UI
     this._setNowPlayingTitle(data.title, data.source);
+    this._setDownloadLink(data.conversion_path);
     if (data.source !== "static" && data.album_cover) {
       this._setAlbumCover(data.album_cover);
     } else {
@@ -130,6 +200,7 @@ export class RadioPlayer {
   // Enhanced queue status rendering
   _renderQueueStatus() {
     if (this.userQueueEntry?.now_playing) {
+        this._setDownloadVisibility(true);
         this.queueStatusEl.innerHTML = `
             <div class="queue-now-playing">
                 <div class="queue-now-playing-icon">🎵</div>
@@ -150,6 +221,7 @@ export class RadioPlayer {
     // if (!this.queueStatusEl) return;
     console.log(this.userQueueEntry);
     if (!this.userQueueEntry || !this.userQueueEntry['in_queue']) {
+      this._setDownloadVisibility(false);
       if (this.userQueueEntry?.has_active_job) {
         // Song is still being created — don't reset the UI
         this.queueStatusEl.innerHTML = `
@@ -183,6 +255,7 @@ export class RadioPlayer {
 
       return;
     }
+    this._setDownloadVisibility(false);
     
     const { queue_position } = this.userQueueEntry;
 
@@ -329,6 +402,7 @@ export class RadioPlayer {
       
       if (needsSync) {
         this.cid = data.cid;
+        this._setDownloadLink(data.conversion_path);
         await this._loadTrack(data.conversion_path, data.started_at);
 
         this._setNowPlayingTitle(data.title, data.source);
@@ -374,5 +448,3 @@ export function initializeRadioPlayer(options) {
   radioPlayerInstance = new RadioPlayer(options);
   return radioPlayerInstance;
 }
-
-
