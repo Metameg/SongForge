@@ -8,7 +8,7 @@ def select_next_track(r):
     raw = r.lpop(current_app.config["PLAYLIST_DYNAMIC_KEY"])
     if raw:
         item = json.loads(raw)
-        return item["conversion_id"], "dynamic"
+        return item["conversion_id"], "dynamic", item.get("client_id")
 
     # 2️⃣ Static fallback (circular)
     static_key = current_app.config["PLAYLIST_STATIC_KEY"]
@@ -16,13 +16,13 @@ def select_next_track(r):
 
     static_len = r.llen(static_key)
     if static_len == 0:
-        return None, None
+        return None, None, None
 
     index = int(r.get(index_key) or 0)
     cid = r.lindex(static_key, index % static_len)
     r.set(index_key, index + 1)
 
-    return cid, "static"
+    return cid, "static", None
 
 
 def advance_radio():
@@ -39,7 +39,7 @@ def advance_radio():
             if prev_client_id:
                 r.delete(f"client:{prev_client_id}:active_job")
 
-    cid, source = select_next_track(r)
+    cid, source, owner_client_id = select_next_track(r)
     if not cid:
         return
 
@@ -54,6 +54,19 @@ def advance_radio():
     now = int(time.time() * 1000)
 
     if not path:
+        # Job hash expired or is broken — the queue entry is already consumed,
+        # so unlock its owner instead of leaving their active_job stuck
+        if source == "dynamic" and owner_client_id:
+            r.delete(f"client:{owner_client_id}:active_job")
+            current_app.logger.warning(
+                f"advance_radio: dropped dead queue entry cid={cid}, unlocked client {owner_client_id}"
+            )
+            socketio.emit(
+                "queue_position_update",
+                {"in_queue": False, "has_active_job": False,
+                 "queue_length": r.llen(current_app.config["PLAYLIST_DYNAMIC_KEY"])},
+                to=owner_client_id,
+            )
         return
 
     r.hset("radio:now_playing", "job_key", job_key)

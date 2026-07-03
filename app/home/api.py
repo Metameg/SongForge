@@ -297,6 +297,10 @@ def webhook():
     r.hset(job_key, "status", "queued")
     r.hset(job_key, "source", "dynamic")
 
+    # Song is queued and may wait well past the 15min creation TTL —
+    # extend to match the active_job TTL so it survives until played
+    r.expire(job_key, 14400)
+
     if client_id:
         emit_job_status(socketio, client_id, status="queued", message="Song created and added to queue!")
 
