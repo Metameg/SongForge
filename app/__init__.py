@@ -47,12 +47,12 @@ def create_app():
         "REDIS_URL",
         f"redis://{app.config['REDIS_HOST']}:{app.config['REDIS_PORT']}/{app.config['REDIS_DB']}",
     )
-    app.extensions["redis"] = redis.from_url(redis_url, decode_responses=True)
+    app.extensions["redis"] = redis.from_url(redis_url, decode_responses=True, max_connections=10)
 
     app.config.update(
         SECRET_KEY=os.getenv("SECRET_KEY", "supersecret"),
         SESSION_TYPE="redis",
-        SESSION_REDIS=redis.from_url(redis_url),
+        SESSION_REDIS=redis.from_url(redis_url, max_connections=5),
         SESSION_PERMANENT=False,
     )
     Session(app)

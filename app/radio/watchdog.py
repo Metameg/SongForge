@@ -62,8 +62,11 @@ def start_radio_watchdog(app):
     tick = 0
     with app.app_context():
         while True:
-            radio_watchdog()
-            if tick % 30 == 0:
-                check_processing_timeouts(app)
+            try:
+                radio_watchdog()
+                if tick % 30 == 0:
+                    check_processing_timeouts(app)
+            except Exception as e:
+                app.logger.error(f"radio watchdog error (will retry): {e}")
             tick += 1
             time.sleep(1)

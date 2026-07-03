@@ -43,20 +43,24 @@ def init_static_playlist(app, r):
 
 
 def redis_listener(r):
-    pubsub = r.pubsub()
-    pubsub.subscribe("radio_events", "queue_events")
-
-    for message in pubsub.listen():
-        if message["type"] != "message":
-            continue
-        channel = message["channel"]
-        if isinstance(channel, bytes):
-            channel = channel.decode()
-        data = json.loads(message["data"])
-        if channel == "radio_events":
-            socketio.emit("radio_events", data)
-        elif channel == "queue_events":
-            socketio.emit("queue_changed", data)
+    import time as _time
+    while True:
+        try:
+            pubsub = r.pubsub()
+            pubsub.subscribe("radio_events", "queue_events")
+            for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                channel = message["channel"]
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+                data = json.loads(message["data"])
+                if channel == "radio_events":
+                    socketio.emit("radio_events", data)
+                elif channel == "queue_events":
+                    socketio.emit("queue_changed", data)
+        except Exception:
+            _time.sleep(5)
 
 
 def _persist_cloudflared_url(app, public_url):
