@@ -6,5 +6,6 @@ requests
 python-dotenv
 mutagen
 eventlet
-gunicorn
+# gunicorn 26.0.0 removed the eventlet worker class (Procfile uses --worker-class eventlet)
+gunicorn==25.3.0
 openai
