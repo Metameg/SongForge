@@ -50,7 +50,7 @@ def redis_listener(r):
         if message["type"] != "message":
             continue
         channel = message["channel"]
-        if isinstance(channel, bytes):ssss
+        if isinstance(channel, bytes):
             channel = channel.decode()
         data = json.loads(message["data"])
         if channel == "radio_events":
