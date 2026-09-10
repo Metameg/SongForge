@@ -2,3 +2,19 @@
 Genesis
 genesis_mp4s
 /app/__pycache__/*
+
+# ── Greenfield scaffold ───────────────────────────────────────────────────────
+# Python
+**/__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+
+# Local data / dumps
+dump.rdb
