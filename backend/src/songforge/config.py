@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import os
+import threading
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -18,6 +19,10 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "staging", "prod"]
+
+# Serializes the environment swap in `Settings(_env=...)` so concurrent construction
+# (e.g. parallel test workers) cannot race on the process-wide os.environ.
+_env_swap_lock = threading.Lock()
 
 
 class Settings(BaseSettings):
@@ -85,15 +90,17 @@ class Settings(BaseSettings):
         # Load *exclusively* from the provided mapping (deterministic for tests):
         # swap the process environment for the duration of construction so the normal
         # env source reads only `_env`, then restore it. A truly missing required field
-        # therefore raises, rather than being satisfied by an ambient variable.
-        saved = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(_env)
-        try:
-            super().__init__(**data)
-        finally:
+        # therefore raises, rather than being satisfied by an ambient variable. The lock
+        # keeps this global swap safe under concurrent construction.
+        with _env_swap_lock:
+            saved = dict(os.environ)
             os.environ.clear()
-            os.environ.update(saved)
+            os.environ.update(_env)
+            try:
+                super().__init__(**data)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
 
     @property
     def sync_database_url(self) -> str:

@@ -70,10 +70,19 @@ class ObjectStorage:
         return f"{base}/{key}"
 
     def ensure_bucket(self) -> None:
-        """Create the bucket if it does not exist (idempotent; used at boot locally)."""
+        """Create the bucket only if it is genuinely absent (idempotent).
+
+        Only a 404 means "missing" → create. Any other error (e.g. a 403 where the
+        bucket exists but the R2 token lacks HeadBucket permission) is re-raised rather
+        than masked by a blind create_bucket, so a real auth problem surfaces instead of
+        the abstraction silently diverging between MinIO and R2.
+        """
         try:
             self._client.head_bucket(Bucket=self.bucket)
-        except ClientError:
+        except ClientError as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status != 404:
+                raise
             self._client.create_bucket(Bucket=self.bucket)
 
     def exists(self, key: str) -> bool:
