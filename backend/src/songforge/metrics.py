@@ -33,6 +33,12 @@ http_request_duration_seconds = Histogram(
     registry=REGISTRY,
 )
 
+radio_advances_total = Counter(
+    "songforge_radio_advances_total",
+    "Radio song advances applied by the coordinator (successful version-CAS only).",
+    registry=REGISTRY,
+)
+
 
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.

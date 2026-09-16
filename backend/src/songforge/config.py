@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     s3_region: str = "auto"
     # Public/CDN base URL audio is served from; falls back to the endpoint+bucket.
     s3_public_base_url: str | None = None
+    # Grant anonymous read on the audio bucket at boot so browsers/CDN can stream it
+    # (PRD: public bucket + CDN, spec #44/#48). Applied best-effort against MinIO's S3
+    # API; on R2 public access is configured out-of-band, so a failure is non-fatal.
+    # Set false to keep the bucket private (e.g. if serving via signed URLs instead).
+    s3_public_bucket: bool = True
 
     # ── Static library (seeded at boot; spec #76) ───────────────────────────
     # Directory of curated *.mp3 files uploaded + cataloged on boot. Bind-mounted
@@ -78,6 +83,18 @@ class Settings(BaseSettings):
     # ── Worker ──────────────────────────────────────────────────────────────
     worker_heartbeat_path: str = "/tmp/songforge-worker.heartbeat"  # noqa: S108
     worker_loop_interval_seconds: float = 5.0
+
+    # ── Radio (issue #8: static radio plays) ────────────────────────────────
+    # Redis capped-list anti-repeat window: how many recently-played static song ids
+    # to avoid when picking the next one.
+    radio_recent_history_size: int = 5
+    # Fixed pg_advisory_lock key the single-leader coordinator holds.
+    radio_advisory_lock_key: int = 927_341
+    # Fallback song duration when a Song row has no duration_seconds recorded.
+    radio_default_track_seconds: int = 180
+    # Backoff between coordinator retries when idle (no songs yet) or on a
+    # transient error, so a broken loop doesn't spin hot.
+    radio_coordinator_backoff_seconds: float = 5.0
 
     # ── Observability (always on, every environment; spec #77) ──────────────
     metrics_enabled: bool = True

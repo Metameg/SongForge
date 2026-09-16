@@ -72,3 +72,29 @@ def test_musicgpt_base_url_is_swappable() -> None:
     """Simulator swapped in by base-url config (spec #70)."""
     settings = Settings(_env={**_base_env(), "MUSICGPT_BASE_URL": "http://simulator:8080"})
     assert settings.musicgpt_base_url == "http://simulator:8080"
+
+
+def test_radio_tunables_have_documented_defaults() -> None:
+    """Issue #8: the coordinator's anti-repeat window, advisory-lock key, fallback
+    track length, and retry backoff all come from this one config surface."""
+    settings = Settings(_env=_base_env())
+    assert settings.radio_recent_history_size == 5
+    assert settings.radio_advisory_lock_key == 927_341
+    assert settings.radio_default_track_seconds == 180
+    assert settings.radio_coordinator_backoff_seconds == 5.0
+
+
+def test_radio_tunables_override_from_env() -> None:
+    settings = Settings(
+        _env={
+            **_base_env(),
+            "RADIO_RECENT_HISTORY_SIZE": "10",
+            "RADIO_ADVISORY_LOCK_KEY": "42",
+            "RADIO_DEFAULT_TRACK_SECONDS": "240",
+            "RADIO_COORDINATOR_BACKOFF_SECONDS": "2.5",
+        }
+    )
+    assert settings.radio_recent_history_size == 10
+    assert settings.radio_advisory_lock_key == 42
+    assert settings.radio_default_track_seconds == 240
+    assert settings.radio_coordinator_backoff_seconds == 2.5

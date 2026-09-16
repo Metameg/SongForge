@@ -9,12 +9,16 @@ the configured endpoint (spec #73).
 from __future__ import annotations
 
 import functools
+import json
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
 from songforge.config import Settings, get_settings
+from songforge.logging_setup import get_logger
+
+log = get_logger(__name__)
 
 # Immutable objects → tell the CDN it can cache them effectively forever.
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
@@ -38,10 +42,12 @@ class ObjectStorage:
         bucket: str,
         region: str = "auto",
         public_base_url: str | None = None,
+        public_read: bool = True,
     ) -> None:
         self.bucket = bucket
         self.endpoint_url = endpoint_url.rstrip("/")
         self._public_base_url = public_base_url.rstrip("/") if public_base_url else None
+        self._public_read = public_read
         self._client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
@@ -62,6 +68,7 @@ class ObjectStorage:
             bucket=settings.s3_bucket,
             region=settings.s3_region,
             public_base_url=settings.s3_public_base_url,
+            public_read=settings.s3_public_bucket,
         )
 
     def public_url(self, key: str) -> str:
@@ -84,6 +91,36 @@ class ObjectStorage:
             if status != 404:
                 raise
             self._client.create_bucket(Bucket=self.bucket)
+        if self._public_read:
+            self._ensure_public_read()
+
+    def _ensure_public_read(self) -> None:
+        """Grant anonymous ``s3:GetObject`` on the audio objects (PRD public bucket).
+
+        Audio is streamed straight to browsers and CDN edges, so objects must be
+        publicly readable (spec #44/#48). On MinIO this is a bucket policy set via the
+        S3 API; on Cloudflare R2 public access is configured out-of-band (dashboard /
+        custom domain) and this call may be unsupported — so it is **best-effort**: a
+        failure is logged, never fatal, and boot proceeds. Idempotent (overwrites).
+        """
+        policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "PublicReadAudio",
+                        "Effect": "Allow",
+                        "Principal": {"AWS": ["*"]},
+                        "Action": ["s3:GetObject"],
+                        "Resource": [f"arn:aws:s3:::{self.bucket}/*"],
+                    }
+                ],
+            }
+        )
+        try:
+            self._client.put_bucket_policy(Bucket=self.bucket, Policy=policy)
+        except Exception as exc:  # noqa: BLE001 - public policy is best-effort (see docstring)
+            log.warning("bucket_public_policy_unset", bucket=self.bucket, error=str(exc))
 
     def exists(self, key: str) -> bool:
         try:
