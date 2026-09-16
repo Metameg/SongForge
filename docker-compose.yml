@@ -15,7 +15,13 @@ x-backend-env: &backend-env
   S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-songforge-secret}
   S3_BUCKET: ${S3_BUCKET:-songforge-audio}
   S3_REGION: ${S3_REGION:-auto}
-  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+  # Browser-reachable audio base URL. Blank/unset here would fall back (in the app) to
+  # the internal S3_ENDPOINT_URL (http://minio:9000), which the SERVER can reach but a
+  # BROWSER cannot (ERR_NAME_NOT_RESOLVED on <audio> playback). So default it to the
+  # MinIO port published on the host, mirroring prod's browser→CDN direct-serve model.
+  # Points at the same MINIO_HOST_PORT/S3_BUCKET the rest of the stack uses, so it stays
+  # correct even when those are overridden (e.g. a second worktree on different ports).
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-http://localhost:${MINIO_HOST_PORT:-59000}/${S3_BUCKET:-songforge-audio}}
   STATIC_LIBRARY_DIR: /app/static-library
   MUSICGPT_BASE_URL: ${MUSICGPT_BASE_URL:-http://simulator:8080}
   MUSICGPT_API_KEY: ${MUSICGPT_API_KEY:-}
