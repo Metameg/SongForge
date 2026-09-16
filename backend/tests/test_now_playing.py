@@ -124,9 +124,93 @@ async def test_now_playing_includes_server_time_for_clock_skew_correction(
     assert before <= server_time <= after
 
 
+async def test_now_playing_timestamps_are_tz_aware_utc(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """`started_at`/`ends_at`/`server_time` must carry a UTC offset in the wire format.
+
+    The frontend (`frontend/lib/sync.ts`) parses these with JS `Date.parse`, which
+    treats an offset-less ISO string as *local time*, not UTC — silently corrupting the
+    playback-sync math by the client's timezone offset. `started_at`/`ends_at` are
+    written tz-aware (`datetime.now(timezone.utc)`) but round-trip through this test's
+    SQLite session, which (unlike Postgres/asyncpg) drops `tzinfo` on read-back; this
+    pins that the response still carries an explicit UTC offset regardless.
+    """
+    await _seed_pointer(sessionmaker, started_delta_seconds=-30)
+
+    resp = app_client.get("/now-playing")
+
+    body = resp.json()
+    for field in ("started_at", "ends_at", "server_time"):
+        raw = body[field]
+        assert raw.endswith("+00:00") or raw.endswith("Z"), (
+            f"{field}={raw!r} has no UTC offset — a bare Date.parse() on the frontend "
+            "would interpret it as local time, not UTC"
+        )
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timedelta(0)
+
+
 async def test_now_playing_idle_when_no_pointer_exists(app_client: TestClient) -> None:
     """No `radio_state` row yet (never initialized) -> a clear not-playing signal."""
     resp = app_client.get("/now-playing")
 
     assert resp.status_code == 503
     assert resp.json() == {"status": "idle"}
+
+
+async def test_now_playing_idle_when_pointer_song_id_does_not_resolve(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A pointer referencing a song id no longer in the catalog is idle, not a 500."""
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    async with sessionmaker() as session:
+        session.add(
+            RadioState(
+                id=1,
+                song_id="missing-song",
+                playback_id="pb-1",
+                source="static",
+                started_at=started_at,
+                ends_at=started_at + timedelta(seconds=180),
+                version=1,
+            )
+        )
+        await session.commit()
+
+    resp = app_client.get("/now-playing")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "idle"}
+
+
+async def test_now_playing_idle_when_pointer_has_no_song_id(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """A pointer row exists (e.g. inserted but never populated by the coordinator) with
+    every field still unset -> idle, not a crash on the None fields."""
+    async with sessionmaker() as session:
+        session.add(RadioState(id=1, version=0))
+        await session.commit()
+
+    resp = app_client.get("/now-playing")
+
+    assert resp.status_code == 503
+    assert resp.json() == {"status": "idle"}
+
+
+async def test_now_playing_server_time_does_not_go_backwards_between_calls(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    """`server_time` reflects the server's live clock, not a cached/static value."""
+    await _seed_pointer(sessionmaker, started_delta_seconds=-10)
+
+    first = datetime.fromisoformat(
+        app_client.get("/now-playing").json()["server_time"].replace("Z", "+00:00")
+    )
+    second = datetime.fromisoformat(
+        app_client.get("/now-playing").json()["server_time"].replace("Z", "+00:00")
+    )
+
+    assert second >= first

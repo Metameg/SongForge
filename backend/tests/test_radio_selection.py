@@ -43,3 +43,17 @@ def test_raises_on_an_empty_candidate_set() -> None:
     idle case before calling this function."""
     with pytest.raises(ValueError):
         pick_static([], recent_ids=set())
+
+
+def test_current_id_in_recent_does_not_block_a_non_recent_pick() -> None:
+    """Recycling ``current_id`` is the LAST resort: a non-recent option always wins
+    first, even when ``current_id`` itself happens to be in ``recent_ids``."""
+    chosen = pick_static(["a", "b"], recent_ids={"a"}, current_id="a")
+    assert chosen == "b"
+
+
+def test_ignores_recent_ids_that_are_not_in_the_candidate_set() -> None:
+    """A stale id in the recent set (e.g. a song since removed from the catalog) must
+    not starve selection when unaffected candidates remain."""
+    chosen = pick_static(["a", "b"], recent_ids={"not-a-candidate"})
+    assert chosen in {"a", "b"}

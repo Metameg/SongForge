@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 import pytest
 
+from songforge.metrics import REGISTRY
 from songforge.models import Base, RadioState, Song
 from songforge.radio.coordinator import advance, initialize_if_absent
 
@@ -157,3 +158,107 @@ async def test_advance_with_stale_version_updates_zero_rows(
         assert unchanged is not None
         assert unchanged.version == current_version
         assert unchanged.song_id == current_song_id
+
+
+async def test_advance_with_stale_version_does_not_record_history(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A lost CAS race must not push anything into recent-history — nothing advanced,
+    so nothing was "just played"."""
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        before = await session.get(RadioState, 1)
+        assert before is not None
+        current_version = before.version
+
+    stale_version = current_version + 999
+    history = _StubHistory()
+    async with sessionmaker() as session:
+        applied = await advance(session, history, expected_version=stale_version)
+        assert applied is False
+        assert history.recorded == []
+
+
+async def test_advance_with_no_songs_in_catalog_is_a_safe_noop(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """``advance`` on an empty catalog (no songs at all) returns False and never
+    raises — the idle case, same as ``initialize_if_absent``."""
+    async with sessionmaker() as session:
+        applied = await advance(session, _StubHistory(), expected_version=0)
+        assert applied is False
+        assert await session.get(RadioState, 1) is None
+
+
+async def test_advance_moves_the_window_forward_by_the_song_duration(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A successful CAS mints a fresh window: it starts no earlier than the old one and
+    spans exactly the chosen song's duration (criterion #5 — the client re-anchors to
+    this new window)."""
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        before = await session.get(RadioState, 1)
+        assert before is not None
+        current_version = before.version
+        before_started_at = before.started_at
+        assert before_started_at is not None
+
+    async with sessionmaker() as session:
+        applied = await advance(session, _StubHistory(), expected_version=current_version)
+        assert applied is True
+        after = await session.get(RadioState, 1)
+        assert after is not None
+        assert after.started_at is not None
+        assert after.ends_at is not None
+        assert after.started_at >= before_started_at
+        assert (after.ends_at - after.started_at).total_seconds() == 180
+
+
+async def test_initialize_uses_default_track_seconds_when_song_has_no_duration(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A song with no recorded ``duration_seconds`` falls back to the configured
+    ``radio_default_track_seconds`` window, not a zero-length or unbounded one."""
+    async with sessionmaker() as session:
+        session.add(
+            Song(
+                id="undated",
+                title="Undated",
+                source="static",
+                object_key="audio/undated.mp3",
+                duration_seconds=None,
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        created = await initialize_if_absent(session, _StubHistory())
+        assert created is True
+        state = await session.get(RadioState, 1)
+        assert state is not None
+        assert state.started_at is not None
+        assert state.ends_at is not None
+        assert (state.ends_at - state.started_at).total_seconds() == 180
+
+
+async def test_advance_increments_the_radio_advances_metric_on_success(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The ``songforge_radio_advances_total`` counter only counts *applied* CAS
+    advances, never lost-race attempts."""
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        before = await session.get(RadioState, 1)
+        assert before is not None
+        current_version = before.version
+
+    before_count = REGISTRY.get_sample_value("songforge_radio_advances_total") or 0.0
+    async with sessionmaker() as session:
+        applied = await advance(session, _StubHistory(), expected_version=current_version)
+        assert applied is True
+    after_count = REGISTRY.get_sample_value("songforge_radio_advances_total") or 0.0
+    assert after_count == before_count + 1
