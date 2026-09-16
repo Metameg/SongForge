@@ -9,17 +9,27 @@
  * calling `.play()` (criterion #4).
  *
  * Without SSE (a later issue — see `.orchestrator/CONTEXT.md` DEFERRED list), the song
- * change at a boundary (criterion #5) is driven by two triggers that both re-fetch
- * `/now-playing` and re-anchor when `playback_id` changes: a `setTimeout` scheduled to the
- * pointer's `ends_at`, and the `<audio>` element's `ended` event (PRD story #11 — playback
- * reaching the end of the current track with no next-song anchor yet).
+ * change at a boundary (criterion #5) is driven by a self-rescheduling poll of
+ * `/now-playing` (armed to each pointer's `ends_at`) plus the `<audio>` element's `ended`
+ * event (PRD story #11 — playback reaching the end of the current track with no next-song
+ * anchor yet). When the pointer's `playback_id` changes, a `useEffect` re-anchors the
+ * (by-then freshly-`src`'d) audio element to the live offset — see the effect below for
+ * why re-anchoring must happen after React commits the new `src`, not inside a setState
+ * updater.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
 import { computeOffsetSeconds, computeSkewMs, correctedServerNowMs } from "../lib/sync";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+
+// A stale/past `ends_at` (or an idle station) must not spin a per-client `setTimeout(0)`
+// tight refetch loop against `/now-playing` — floor every reschedule to this.
+const MIN_REFETCH_DELAY_MS = 1000;
+// After a transient fetch failure (or while idle), retry on this cadence so one failed
+// poll never permanently stops the song-change updates.
+const RETRY_DELAY_MS = 5000;
 
 /** Seek `audio` to where the server timeline says this song should be right now. */
 function seekToLiveOffset(audio: HTMLAudioElement, playing: NowPlaying): void {
@@ -34,49 +44,67 @@ export default function Player() {
   const [state, setState] = useState<NowPlayingState | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const boundaryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set by the poll effect; lets the `<audio>` `ended` handler force an immediate
+  // re-fetch (PRD story #11) without waiting for the scheduled boundary tick.
+  const pollNowRef = useRef<() => void>(() => {});
 
-  const refresh = useCallback(async () => {
-    const next = await fetchNowPlaying(BACKEND_URL);
-    setState((previous) => {
-      const previousPlaybackId = previous && previous.status === "playing" ? previous.playback_id : null;
-      const nextPlaybackId = next.status === "playing" ? next.playback_id : null;
-      // A new song started (playback_id changed) while we were already playing —
-      // re-anchor without waiting for another button press (criterion #5).
-      if (hasStarted && next.status === "playing" && nextPlaybackId !== previousPlaybackId) {
-        const audio = audioRef.current;
-        if (audio) {
-          seekToLiveOffset(audio, next);
-          void audio.play();
-        }
-      }
-      return next;
-    });
-    return next;
-  }, [hasStarted]);
-
-  const scheduleBoundaryRefresh = useCallback(
-    (playing: NowPlaying) => {
-      if (boundaryTimer.current) clearTimeout(boundaryTimer.current);
-      const delayMs = Math.max(Date.parse(playing.ends_at) - Date.now(), 0);
-      boundaryTimer.current = setTimeout(() => {
-        void refresh().then((next) => {
-          if (next.status === "playing") scheduleBoundaryRefresh(next);
-        });
-      }, delayMs);
-    },
-    [refresh],
-  );
-
+  // Poll `/now-playing` and reschedule to the next boundary. Resilient (a transient
+  // failure retries rather than killing the reschedule chain) and floored (a stale
+  // `ends_at` can't tight-loop). Owns its own timer + cancellation.
   useEffect(() => {
-    void refresh().then((next) => {
-      if (next.status === "playing") scheduleBoundaryRefresh(next);
-    });
-    return () => {
-      if (boundaryTimer.current) clearTimeout(boundaryTimer.current);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (delayMs: number): void => {
+      if (cancelled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(poll, Math.max(delayMs, MIN_REFETCH_DELAY_MS));
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
+    const poll = (): void => {
+      fetchNowPlaying(BACKEND_URL)
+        .then((next) => {
+          if (cancelled) return;
+          setState(next);
+          schedule(
+            next.status === "playing"
+              ? Date.parse(next.ends_at) - Date.now()
+              : RETRY_DELAY_MS,
+          );
+        })
+        .catch(() => {
+          // Network blip / non-JSON body — keep the reschedule chain alive.
+          schedule(RETRY_DELAY_MS);
+        });
+    };
+
+    pollNowRef.current = poll;
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      pollNowRef.current = () => {};
+    };
   }, []);
+
+  // Re-anchor on song change: once the listener has pressed Play, every new pointer
+  // (`playback_id` change) seeks the freshly-loaded `<audio>` to the live server-timeline
+  // offset and resumes. Keyed on `playback_id` so it runs AFTER React commits the new
+  // `src` — changing an `<audio>` element's `src` reloads it and resets `currentTime` to
+  // 0, so a seek performed before that commit is silently discarded (criterion #5). The
+  // FIRST play stays in the click handler: browsers only allow `play()` from the user
+  // gesture, and the element is unlocked for subsequent programmatic seeks once that
+  // gesture has played it.
+  const playbackId = state?.status === "playing" ? state.playback_id : null;
+  useEffect(() => {
+    if (!hasStarted || playbackId === null) return;
+    const audio = audioRef.current;
+    if (!audio || !state || state.status !== "playing") return;
+    seekToLiveOffset(audio, state);
+    void audio.play();
+    // Fires on playback_id / hasStarted change; `state` is read fresh from that render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playbackId, hasStarted]);
 
   const handlePlay = () => {
     const audio = audioRef.current;
@@ -88,10 +116,8 @@ export default function Player() {
 
   const handleEnded = () => {
     // The current track finished with no next-song anchor yet — re-fetch immediately
-    // (PRD story #11) rather than waiting for the scheduled boundary timer.
-    void refresh().then((next) => {
-      if (next.status === "playing") scheduleBoundaryRefresh(next);
-    });
+    // (PRD story #11) rather than waiting for the scheduled boundary tick.
+    pollNowRef.current();
   };
 
   const isPlaying = state?.status === "playing";
