@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     worker_heartbeat_path: str = "/tmp/songforge-worker.heartbeat"  # noqa: S108
     worker_loop_interval_seconds: float = 5.0
 
+    # ── Radio (issue #8: static radio plays) ────────────────────────────────
+    # Redis capped-list anti-repeat window: how many recently-played static song ids
+    # to avoid when picking the next one.
+    radio_recent_history_size: int = 5
+    # Fixed pg_advisory_lock key the single-leader coordinator holds.
+    radio_advisory_lock_key: int = 927_341
+    # Fallback song duration when a Song row has no duration_seconds recorded.
+    radio_default_track_seconds: int = 180
+    # Backoff between coordinator retries when idle (no songs yet) or on a
+    # transient error, so a broken loop doesn't spin hot.
+    radio_coordinator_backoff_seconds: float = 5.0
+
     # ── Observability (always on, every environment; spec #77) ──────────────
     metrics_enabled: bool = True
     correlation_id_header: str = "X-Correlation-ID"
