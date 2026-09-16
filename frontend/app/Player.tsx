@@ -22,7 +22,10 @@ import { useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
 import { computeOffsetSeconds, computeSkewMs, correctedServerNowMs } from "../lib/sync";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+// Same-origin base: the browser fetches "/now-playing" on its own origin and the Next
+// server proxies it to the backend (see `next.config.js` rewrites). This avoids CORS and
+// keeps the internal backend hostname out of the browser.
+const NOW_PLAYING_BASE = "";
 
 // A stale/past `ends_at` (or an idle station) must not spin a per-client `setTimeout(0)`
 // tight refetch loop against `/now-playing` — floor every reschedule to this.
@@ -62,7 +65,7 @@ export default function Player() {
     };
 
     const poll = (): void => {
-      fetchNowPlaying(BACKEND_URL)
+      fetchNowPlaying(NOW_PLAYING_BASE)
         .then((next) => {
           if (cancelled) return;
           setState(next);
