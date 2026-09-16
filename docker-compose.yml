@@ -33,7 +33,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-songforge}
       POSTGRES_DB: ${POSTGRES_DB:-songforge}
     ports:
-      - "5432:5432"
+      # Host port is overridable to avoid collisions with a local/other Postgres;
+      # the stack itself always talks to postgres:5432 over the compose network.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -45,7 +47,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -63,8 +65,8 @@ services:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-songforge}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-songforge-secret}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
       - miniodata:/data
     healthcheck:
@@ -94,7 +96,7 @@ services:
       <<: *backend-env
     command: ["songforge-web"]
     ports:
-      - "8000:8000"
+      - "${WEB_HOST_PORT:-8000}:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -139,7 +141,7 @@ services:
       BACKEND_URL: http://web:8000
       NODE_ENV: production
     ports:
-      - "3000:3000"
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
     depends_on:
       web:
         condition: service_healthy
