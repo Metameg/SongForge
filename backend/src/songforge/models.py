@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Whether a song came from the curated static library or was user-generated. Stored as a
@@ -63,6 +63,10 @@ class RadioState(Base):
     """
 
     __tablename__ = "radio_state"
+    # Enforce the single-pointer-of-record invariant at the DB, not just by convention:
+    # the coordinator only ever touches ``RADIO_STATE_SINGLETON_ID``, so any other row
+    # would be silently ignored while corrupting "one pointer" (see the model docstring).
+    __table_args__ = (CheckConstraint("id = 1", name="ck_radio_state_singleton"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     song_id: Mapped[str | None] = mapped_column(

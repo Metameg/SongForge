@@ -32,6 +32,8 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("ends_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("version", sa.Integer(), nullable=False, server_default="0"),
+        # Single-pointer-of-record invariant: only id=1 is a valid row.
+        sa.CheckConstraint("id = 1", name="ck_radio_state_singleton"),
     )
 
 
