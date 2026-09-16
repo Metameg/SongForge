@@ -14,20 +14,13 @@ import signal
 from songforge.config import Settings, get_settings
 from songforge.logging_setup import configure_logging, get_logger
 from songforge.worker.health import touch_heartbeat
+from songforge.worker.radio_coordinator import run_radio_coordinator
 
 log = get_logger(__name__)
 
 
-async def run(settings: Settings, *, stop: asyncio.Event) -> None:
-    """Supervise the worker loops until ``stop`` is set.
-
-    Later tickets add, concurrently supervised here:
-      * dispatch  — claim QUEUED jobs (FOR UPDATE SKIP LOCKED) + Redis semaphore
-      * ingest    — download finished audio, upload to R2, enqueue the song
-      * watchdog  — leaderless recovery sweep; every side-effect is row-claimed first
-      * radio     — single-leader coordinator (pg advisory lock) owning the advance timer
-    """
-    log.info("worker_started", environment=settings.environment)
+async def _heartbeat_loop(settings: Settings, stop: asyncio.Event) -> None:
+    """Touch the liveness heartbeat file on every tick until ``stop`` is set."""
     while not stop.is_set():
         touch_heartbeat(settings.worker_heartbeat_path)
         log.debug("worker_heartbeat")
@@ -37,6 +30,26 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
             )
         except asyncio.TimeoutError:
             pass  # normal loop tick
+
+
+async def run(settings: Settings, *, stop: asyncio.Event) -> None:
+    """Supervise the worker loops until ``stop`` is set.
+
+    Concurrently supervised here:
+      * heartbeat — liveness file the compose healthcheck reads.
+      * radio     — single-leader coordinator (pg advisory lock) owning the advance
+        timer (issue #8, criterion #2).
+
+    Later tickets add, concurrently supervised alongside these:
+      * dispatch  — claim QUEUED jobs (FOR UPDATE SKIP LOCKED) + Redis semaphore
+      * ingest    — download finished audio, upload to R2, enqueue the song
+      * watchdog  — leaderless recovery sweep; every side-effect is row-claimed first
+    """
+    log.info("worker_started", environment=settings.environment)
+    await asyncio.gather(
+        _heartbeat_loop(settings, stop),
+        run_radio_coordinator(settings, stop),
+    )
     log.info("worker_stopped")
 
 
