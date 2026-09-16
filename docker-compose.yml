@@ -1,0 +1,162 @@
+# SongForge local stack: FastAPI web, Python worker, Next.js frontend against
+# Postgres, Redis, and MinIO. `docker compose up` brings the whole thing up healthy.
+#
+# Ordering guarantee (acceptance criterion #2): the one-shot `migrate` service runs the
+# boot sequence (migrations + static-library seed) to completion; `web` and `worker` wait
+# for it via `service_completed_successfully` before they start.
+
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+  REDIS_URL: redis://redis:6379/0
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-songforge}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-songforge-secret}
+  S3_BUCKET: ${S3_BUCKET:-songforge-audio}
+  S3_REGION: ${S3_REGION:-auto}
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-}
+  STATIC_LIBRARY_DIR: /app/static-library
+  MUSICGPT_BASE_URL: ${MUSICGPT_BASE_URL:-http://simulator:8080}
+  MUSICGPT_API_KEY: ${MUSICGPT_API_KEY:-}
+  ENFORCE_RATE_LIMITS: ${ENFORCE_RATE_LIMITS:-true}
+
+x-backend-build: &backend-build
+  build:
+    context: ./backend
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-songforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-songforge}
+      POSTGRES_DB: ${POSTGRES_DB:-songforge}
+    ports:
+      # Host port is overridable to avoid collisions with a local/other Postgres;
+      # the stack itself always talks to postgres:5432 over the compose network.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-songforge} -d ${POSTGRES_DB:-songforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # Pinned for a reproducible one-command environment (this release ships curl,
+    # which the healthcheck below uses).
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-songforge}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-songforge-secret}
+    ports:
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot boot: migrate schema + seed static library, then exit 0.
+  migrate:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+    command: ["songforge-boot"]
+    volumes:
+      - ./app/static/audios:/app/static-library:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+    command: ["songforge-web"]
+    ports:
+      - "${WEB_HOST_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  worker:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+    command: ["songforge-worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "songforge.worker.health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      BACKEND_URL: http://web:8000
+      NODE_ENV: production
+    ports:
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

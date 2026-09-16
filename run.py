@@ -74,7 +74,7 @@ def start_cloudflared(app):
     import urllib.request as _req
 
     proc = subprocess.Popen(
-        [r"C:\Program Files (x86)\cloudflared\cloudflared.exe", "tunnel", "--url", "http://localhost:5000"],
+        ["cloudflared", "tunnel", "--url", "http://localhost:5000"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -121,4 +121,4 @@ if __name__ == "__main__":
     # Only start cloudflared in the parent process, not the reloader child
     if not os.environ.get("WERKZEUG_RUN_MAIN"):
         threading.Thread(target=start_cloudflared, args=(app,), daemon=True).start()
-    socketio.run(app, debug=True)
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True)
