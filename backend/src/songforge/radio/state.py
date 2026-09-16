@@ -13,13 +13,30 @@ Issue #8, phase 3 (green) implementation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState, Song, Source
 from songforge.storage import get_storage
+
+
+def _isoformat_utc(value: datetime) -> str:
+    """Serialize a timestamp as an ISO-8601 string that always carries a UTC offset.
+
+    The frontend (`frontend/lib/sync.ts` / `nowPlaying.ts`) parses these fields with
+    JS `Date.parse`, which treats an offset-less ISO string as **local time**, not UTC
+    — silently corrupting the playback-sync math by the client's timezone offset. The
+    coordinator always writes timezone-aware UTC datetimes (`datetime.now(timezone.utc)`
+    in `songforge.radio.coordinator`), so Postgres round-trips them tz-aware via asyncpg
+    — but SQLite (used by this project's unit tests, and any future portable-DB use)
+    silently drops `tzinfo` on read-back. Normalizing here, rather than trusting every
+    caller/dialect to preserve `tzinfo`, keeps the wire contract correct regardless.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 @dataclass(frozen=True)
@@ -50,12 +67,12 @@ class NowPlayingView:
             "source": self.source,
             "object_key": self.object_key,
             "audio_url": self.audio_url,
-            "started_at": self.started_at.isoformat(),
-            "ends_at": self.ends_at.isoformat(),
+            "started_at": _isoformat_utc(self.started_at),
+            "ends_at": _isoformat_utc(self.ends_at),
             "duration": self.duration_seconds,
             "playback_id": self.playback_id,
             "version": self.version,
-            "server_time": server_time.isoformat(),
+            "server_time": _isoformat_utc(server_time),
         }
 
 
