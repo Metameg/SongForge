@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     s3_region: str = "auto"
     # Public/CDN base URL audio is served from; falls back to the endpoint+bucket.
     s3_public_base_url: str | None = None
+    # Grant anonymous read on the audio bucket at boot so browsers/CDN can stream it
+    # (PRD: public bucket + CDN, spec #44/#48). Applied best-effort against MinIO's S3
+    # API; on R2 public access is configured out-of-band, so a failure is non-fatal.
+    # Set false to keep the bucket private (e.g. if serving via signed URLs instead).
+    s3_public_bucket: bool = True
 
     # ── Static library (seeded at boot; spec #76) ───────────────────────────
     # Directory of curated *.mp3 files uploaded + cataloged on boot. Bind-mounted

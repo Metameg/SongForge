@@ -8,6 +8,7 @@ exercised against an in-process S3 fake (moto).
 from __future__ import annotations
 
 import importlib.util
+import json
 
 import pytest
 from botocore.exceptions import ClientError
@@ -59,9 +60,11 @@ def test_public_url_falls_back_to_endpoint_and_bucket() -> None:
 class _FakeS3:
     """Minimal S3 client stub for exercising ensure_bucket's error handling."""
 
-    def __init__(self, head_status: int | None) -> None:
+    def __init__(self, head_status: int | None, policy_error: bool = False) -> None:
         self.head_status = head_status  # None => bucket exists (no error)
         self.created = False
+        self.policy: str | None = None
+        self.policy_error = policy_error  # True => put_bucket_policy raises (e.g. R2)
 
     def head_bucket(self, Bucket: str) -> None:  # noqa: N803 - boto3 kwarg name
         if self.head_status is not None:
@@ -73,6 +76,11 @@ class _FakeS3:
 
     def create_bucket(self, Bucket: str) -> None:  # noqa: N803
         self.created = True
+
+    def put_bucket_policy(self, Bucket: str, Policy: str) -> None:  # noqa: N803
+        if self.policy_error:
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "PutBucketPolicy")
+        self.policy = Policy
 
 
 def test_ensure_bucket_creates_when_missing() -> None:
@@ -99,6 +107,44 @@ def test_ensure_bucket_noop_when_present() -> None:
     storage._client = fake  # type: ignore[assignment]
     storage.ensure_bucket()
     assert fake.created is False
+
+
+def test_ensure_bucket_sets_public_read_policy() -> None:
+    """Audio must be anonymously GET-able so browsers/CDN can stream it (PRD public bucket)."""
+    storage = _storage()
+    fake = _FakeS3(head_status=None)
+    storage._client = fake  # type: ignore[assignment]
+    storage.ensure_bucket()
+    assert fake.policy is not None
+    statement = json.loads(fake.policy)["Statement"][0]
+    assert statement["Effect"] == "Allow"
+    assert statement["Action"] == ["s3:GetObject"]
+    assert statement["Principal"] == {"AWS": ["*"]}
+    assert statement["Resource"] == ["arn:aws:s3:::songforge-audio/*"]
+
+
+def test_ensure_bucket_public_policy_is_best_effort() -> None:
+    """A provider that rejects put_bucket_policy (e.g. R2) must not break boot."""
+    storage = _storage()
+    fake = _FakeS3(head_status=None, policy_error=True)
+    storage._client = fake  # type: ignore[assignment]
+    storage.ensure_bucket()  # must not raise
+
+
+def test_ensure_bucket_skips_policy_when_public_read_disabled() -> None:
+    storage = ObjectStorage(
+        endpoint_url="http://minio:9000",
+        access_key_id="test",
+        secret_access_key="test-secret",
+        bucket="songforge-audio",
+        region="auto",
+        public_base_url=None,
+        public_read=False,
+    )
+    fake = _FakeS3(head_status=None)
+    storage._client = fake  # type: ignore[assignment]
+    storage.ensure_bucket()
+    assert fake.policy is None
 
 
 @pytest.mark.integration
