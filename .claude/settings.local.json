@@ -7,5 +7,8 @@
       "Bash(python:*)",
       "WebFetch(domain:docs.musicgpt.com)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "claude-flow"
+  ]
 }
