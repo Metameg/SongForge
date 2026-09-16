@@ -19,6 +19,7 @@ from songforge.web.app import create_app
 from songforge.web.routes.now_playing import get_session
 
 EXPECTED_BODY_KEYS = {
+    "status",
     "song_id",
     "title",
     "source",
@@ -101,6 +102,10 @@ async def test_now_playing_returns_full_pointer_shape(
     assert resp.status_code == 200
     body = resp.json()
     assert EXPECTED_BODY_KEYS.issubset(body.keys())
+    # The playing path must carry a "playing" discriminator, symmetric with the idle
+    # body's {"status": "idle"} — the frontend's discriminated union and Player.tsx
+    # branch on status === "playing" (issue #8, criteria #4/#5).
+    assert body["status"] == "playing"
     assert body["song_id"] == "song-1"
     assert body["title"] == "Song One"
     assert body["source"] == "static"

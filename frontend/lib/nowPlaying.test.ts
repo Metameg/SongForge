@@ -16,6 +16,7 @@ import { fetchNowPlaying, type NowPlaying } from "./nowPlaying";
 // in `backend/tests/test_now_playing.py`) — including the UTC-offset timestamp format the
 // backend guarantees via `_isoformat_utc`.
 const BACKEND_SHAPED_PAYLOAD = {
+  status: "playing",
   song_id: "song-1",
   title: "Song One",
   source: "static",
@@ -49,23 +50,15 @@ describe("fetchNowPlaying", () => {
     }
   });
 
-  // KNOWN CONTRACT BUG (reported, not fixed here — see .orchestrator/phase4-contract-report.md):
-  // `NowPlayingView.to_response` (backend/src/songforge/radio/state.py) never emits a
-  // "status" key on the 200 (playing) path — only the 503 idle body is
-  // `{"status": "idle"}` (see `web/routes/now_playing.py` and
-  // `test_now_playing_returns_full_pointer_shape`, whose EXPECTED_BODY_KEYS omits
-  // "status"). `NowPlaying.status` is typed as the literal `"playing"`, and
-  // `Player.tsx`/`fetchNowPlaying`'s discriminated union branches on
-  // `next.status === "playing"` throughout — but the real payload's `.status` is
-  // `undefined`, not `"playing"`. Every `status === "playing"` check in the app is
-  // therefore always false against the real backend: the Play button stays disabled,
-  // the title always reads "the station is quiet", and the boundary/`ended` re-anchor
-  // logic never fires, even while the radio is genuinely playing. `it.fails` pins this
-  // as a known-red assertion so the suite stays green until someone fixes it (either
-  // the backend adds `status: "playing"`, or the frontend discriminates some other way,
-  // e.g. off the HTTP status code or the presence of `song_id`) — when it's fixed, this
-  // `it.fails` will itself start failing, signaling it should become a normal `it`.
-  it.fails("discriminates as 'playing' on the real 200 response, which carries no status field", async () => {
+  // Regression guard for the contract gap found in Phase 4 (see
+  // .orchestrator/phase4-contract-report.md): the backend's 200 (playing) body must
+  // carry `status: "playing"`, symmetric with the 503 idle body's `{"status": "idle"}`.
+  // `NowPlaying.status` is typed as the literal `"playing"`, and `Player.tsx` /
+  // `fetchNowPlaying`'s discriminated union branch on `next.status === "playing"`
+  // throughout — if the payload ever stops carrying it, the Play button stays disabled
+  // and the boundary/`ended` re-anchor never fires. `NowPlayingView.to_response` now
+  // emits it (backend/src/songforge/radio/state.py).
+  it("discriminates as 'playing' on the real 200 response, which carries the status field", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({

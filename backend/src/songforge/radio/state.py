@@ -60,8 +60,15 @@ class NowPlayingView:
         Body per the PRD: ``song_id, title, source, object_key, audio_url, started_at,
         ends_at, duration, playback_id, version, server_time`` — timestamps as ISO-8601
         UTC strings.
+
+        Carries an explicit ``status: "playing"`` discriminator, symmetric with the idle
+        body's ``{"status": "idle"}`` (see ``web/routes/now_playing.py``). The frontend's
+        ``NowPlayingState`` union and ``Player.tsx`` branch on ``status === "playing"``
+        to enable the Play button and drive the boundary/``ended`` re-anchor (criteria
+        #4/#5); without it every such check is false and the player never starts.
         """
         return {
+            "status": "playing",
             "song_id": self.song_id,
             "title": self.title,
             "source": self.source,
