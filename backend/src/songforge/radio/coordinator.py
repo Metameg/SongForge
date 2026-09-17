@@ -55,24 +55,26 @@ async def _write_pointer_best_effort(
     Builds the same denormalized shape the web tier serves (`PointerRecord`, design
     D1) so a cold web instance can answer `/now-playing` with zero Postgres reads. Any
     failure is logged and swallowed — Postgres has already committed by the time this
-    runs, so a Redis outage must never fail the caller's init/advance.
+    runs, so a Redis outage must never fail the caller's init/advance. The try/except
+    spans record construction too (not just `redis.set`), so even an unexpected error
+    building the view can never turn a committed advance into a failed one.
     """
     settings = get_settings()
-    record = PointerRecord.from_view(
-        NowPlayingView(
-            song_id=song.id,
-            title=song.title,
-            source=song.source,
-            object_key=song.object_key,
-            audio_url=get_storage().public_url(song.object_key),
-            started_at=started_at,
-            ends_at=ends_at,
-            duration_seconds=song.duration_seconds,
-            playback_id=playback_id,
-            version=version,
-        )
-    )
     try:
+        record = PointerRecord.from_view(
+            NowPlayingView(
+                song_id=song.id,
+                title=song.title,
+                source=song.source,
+                object_key=song.object_key,
+                audio_url=get_storage().public_url(song.object_key),
+                started_at=started_at,
+                ends_at=ends_at,
+                duration_seconds=song.duration_seconds,
+                playback_id=playback_id,
+                version=version,
+            )
+        )
         await redis.set(settings.radio_pointer_redis_key, record.to_json())
     except Exception:
         log.warning("radio_pointer_write_failed", song_id=song.id, exc_info=True)

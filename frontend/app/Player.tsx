@@ -18,12 +18,15 @@
  * updater.
  *
  * Issue #9 (design D6) closes criterion #1's continuous-sync gap: the `<audio>`
- * `timeupdate` event runs a free local drift check (deadband < 1s, hard-seek ≥ 1s via
- * `decideDrift`) against the server timeline, and a ~30s heartbeat re-fetches
- * `/now-playing` so a drifting clock skew or a missed boundary self-corrects (PRD
- * stories #9, #10). Clock skew is measured at each response's *receipt* and kept in a
- * ref, so the per-tick drift math uses a skew sampled at a known moment rather than
- * recomputing it from an increasingly stale `server_time`.
+ * `timeupdate` event (which fires several times a second during playback) runs a free
+ * local drift check (deadband < 1s, hard-seek ≥ 1s via `decideDrift`) against the
+ * server timeline, and — on that same event — a ~30s heartbeat (`shouldRefetchOnHeartbeat`
+ * against the elapsed-since-last-fetch) re-fetches `/now-playing` so a drifting clock
+ * skew or a missed boundary self-corrects (PRD stories #9, #10). Driving the heartbeat
+ * off elapsed time (rather than a raw `setInterval`) means it self-corrects the moment a
+ * backgrounded/throttled tab resumes playback. Clock skew is measured at each response's
+ * *receipt* and kept in a ref, so the per-tick drift math uses a skew sampled at a known
+ * moment rather than recomputing it from an increasingly stale `server_time`.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -34,7 +37,7 @@ import {
   computeSkewMs,
   correctedServerNowMs,
   decideDrift,
-  HEARTBEAT_INTERVAL_MS,
+  shouldRefetchOnHeartbeat,
 } from "../lib/sync";
 
 // Same-origin base: the browser fetches "/now-playing" on its own origin and the Next
@@ -69,6 +72,9 @@ export default function Player() {
   // `timeupdate` drift check reads this rather than recomputing from `server_time`,
   // which grows stale between fetches (issue #9, design D6).
   const skewMsRef = useRef<number>(0);
+  // Wall-clock time of the last `/now-playing` receipt (ms). The `timeupdate` handler
+  // uses it to fire the ~30s heartbeat via `shouldRefetchOnHeartbeat` (issue #9, D6).
+  const lastFetchAtMsRef = useRef<number>(0);
 
   // Poll `/now-playing` and reschedule to the next boundary. Resilient (a transient
   // failure retries rather than killing the reschedule chain) and floored (a stale
@@ -87,6 +93,7 @@ export default function Player() {
       fetchNowPlaying(NOW_PLAYING_BASE)
         .then((next) => {
           if (cancelled) return;
+          lastFetchAtMsRef.current = Date.now();
           if (next.status === "playing") {
             // Sample skew NOW, at receipt — this is the one moment `server_time` and
             // the client clock line up, so the `timeupdate` handler can trust it later.
@@ -112,15 +119,6 @@ export default function Player() {
       if (timer) clearTimeout(timer);
       pollNowRef.current = () => {};
     };
-  }, []);
-
-  // Heartbeat (issue #9, design D6; PRD stories #9/#10): re-fetch `/now-playing` on a
-  // ~30s cadence so a slowly drifting clock skew is re-sampled and a boundary/change
-  // that the boundary-armed poll somehow missed is picked up within ~30s. Reuses the
-  // poll path (which also re-arms the boundary timer and refreshes `skewMsRef`).
-  useEffect(() => {
-    const id = setInterval(() => pollNowRef.current(), HEARTBEAT_INTERVAL_MS);
-    return () => clearInterval(id);
   }, []);
 
   // Re-anchor on song change: once the listener has pressed Play, every new pointer
@@ -172,6 +170,14 @@ export default function Player() {
     );
     if (decideDrift(audio.currentTime - expected) === "seek") {
       audio.currentTime = Math.max(expected, 0);
+    }
+    // ~30s heartbeat (issue #9, D6): once enough time has passed since the last fetch,
+    // re-fetch to re-sample skew / catch a missed change. Bump `lastFetchAtMsRef` up
+    // front so the several-per-second `timeupdate` events during the in-flight fetch
+    // don't each trigger a duplicate request (the poll's own receipt resets it again).
+    if (shouldRefetchOnHeartbeat(Date.now() - lastFetchAtMsRef.current)) {
+      lastFetchAtMsRef.current = Date.now();
+      pollNowRef.current();
     }
   };
 
