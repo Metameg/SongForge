@@ -17,13 +17,14 @@ dependencies = [
     "prometheus-client>=0.21",
     "structlog>=24.4",
     "mutagen>=1.47",
+    # Runtime HTTP client — the simulator POSTs completion webhooks with it (issue #11).
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "httpx>=0.27",
     "aiosqlite>=0.20",
     "mypy>=1.13",
     "moto[s3]>=5.0",
@@ -33,6 +34,8 @@ dev = [
 songforge-web = "songforge.web.__main__:main"
 songforge-worker = "songforge.worker.__main__:main"
 songforge-boot = "songforge.boot:main"
+# Dev/test-only fault-injectable MusicGPT simulator (issue #11); never run in prod.
+songforge-simulator = "songforge.simulator.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

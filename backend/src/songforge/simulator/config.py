@@ -40,9 +40,16 @@ class SimulatorSettings(BaseSettings):
     # Default completion-webhook delay when a request doesn't override it via the
     # X-Sim-Delay-Seconds header (issue #11 acceptance: "delay configurable, default ~5s").
     webhook_delay_seconds: float = 5.0
+    # Webhook delay applied to the `delayed-webhook` fault (deliberately longer than the
+    # happy-path default so the "overdue" waiting window is exercised).
+    delayed_webhook_delay_seconds: float = 30.0
     # How long a freshly (re)issued audio URL stays valid before it "expires". The
     # url-expires-before-ingest fault serves an already-expired URL until /byId refreshes it.
     url_expiry_seconds: float = 300.0
+    # Base URL the simulator advertises for served audio (the `conversion_path` /byId
+    # `audio_url`). Matches the create client's ``MUSICGPT_BASE_URL`` so a server-side
+    # consumer (ingest worker) can download it; overridable via ``SIM_PUBLIC_BASE_URL``.
+    public_base_url: str = "http://simulator:8080"
     # Local royalty-free pool the simulator serves fake `conversion_path` audio from.
     audio_pool_dir: str = "app/static/audios"
     log_level: str = "INFO"

@@ -22,6 +22,7 @@ from songforge.logging_setup import configure_logging, get_logger
 from songforge.simulator.clock import SleepFn, real_sleep
 from songforge.simulator.config import SimulatorSettings, get_settings
 from songforge.simulator.routes import audio, by_id, create
+from songforge.simulator.store import TaskStore
 
 
 def create_app(
@@ -48,6 +49,9 @@ def create_app(
     app.state.settings = settings
     app.state.http_client = http_client or httpx.AsyncClient()
     app.state.sleep_fn = sleep_fn or real_sleep
+    # In-memory task registry (per app, so each create_app() is isolated) — the seam create,
+    # the delayed webhook, /byId, and audio serving all share.
+    app.state.store = TaskStore()
     # Completion webhooks are delivered by fire-and-forget asyncio tasks scheduled from the
     # create endpoint (never blocking the synchronous create response). Tracked here so
     # tests can await delivery to finish deterministically via `wait_for_pending_webhooks`.

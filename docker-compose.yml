@@ -140,6 +140,36 @@ services:
       retries: 5
       start_period: 15s
 
+  # Dev/test-only fault-injectable MusicGPT simulator (issue #11). NEVER deployed to prod —
+  # prod points MUSICGPT_BASE_URL at the real MusicGPT API, so this service is simply absent
+  # there. The rest of the stack reaches it purely via MUSICGPT_BASE_URL=http://simulator:8080
+  # (already the default in x-backend-env), so swapping real<->fake is a base-URL change only.
+  simulator:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+      # SIM_-prefixed knobs are read by SimulatorSettings; the shared backend env is ignored.
+      SIM_PUBLIC_BASE_URL: http://simulator:8080
+      SIM_AUDIO_POOL_DIR: /app/static-library
+      SIM_WEBHOOK_DELAY_SECONDS: ${SIM_WEBHOOK_DELAY_SECONDS:-5}
+    command: ["songforge-simulator"]
+    ports:
+      - "${SIMULATOR_HOST_PORT:-8080}:8080"
+    volumes:
+      # The same royalty-free pool the boot step seeds from, so served audio is real & playable.
+      - ./app/static/audios:/app/static-library:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('localhost',8080))==0 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   frontend:
     build:
       context: ./frontend

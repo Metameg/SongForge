@@ -21,9 +21,12 @@ async def test_create_app_returns_a_standalone_fastapi_app_with_its_own_routes()
 
     # Externally observable route wiring, not FastAPI's internal route objects: a 404 would
     # mean the route isn't registered at all, distinct from "registered but not implemented".
+    # NB: /byId is probed with a *real* task id — an unknown id legitimately 404s (that's its
+    # own contract, see test_simulator_by_id.py), so it can't double as the route-exists probe.
     async with make_sim_client(app) as client:
         create_resp = await client.post(CREATE_PATH, json=DEFAULT_BODY)
-        by_id_resp = await client.get("/byId", params={"task_id": "x"})
+        task_id = create_resp.json()["task_id"]
+        by_id_resp = await client.get("/byId", params={"task_id": task_id})
     assert create_resp.status_code != 404
     assert by_id_resp.status_code != 404
 
