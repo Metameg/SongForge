@@ -13,6 +13,8 @@ on import errors or 404s.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
@@ -41,10 +43,23 @@ def create_app(
     settings = settings or get_settings()
     configure_logging(level=settings.log_level)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Drain in-flight webhook deliveries and close the HTTP client we own on shutdown.
+        # (Runs only under an ASGI server; httpx.ASGITransport in tests doesn't fire it, and
+        # tests inject + close their own client, so there's no double-close.)
+        yield
+        await wait_for_pending_webhooks(app)
+        if owns_http_client:
+            await app.state.http_client.aclose()
+
+    owns_http_client = http_client is None
+
     app = FastAPI(
         title="MusicGPT Simulator",
         version=__version__,
         summary="Fault-injectable fake of the MusicGPT generation API (dev/test only).",
+        lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.http_client = http_client or httpx.AsyncClient()
