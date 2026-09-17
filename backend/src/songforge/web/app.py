@@ -13,6 +13,7 @@ from songforge import __version__
 from songforge.config import Settings, get_settings
 from songforge.logging_setup import configure_logging, get_logger
 from songforge.metrics import render_latest
+from songforge.radio.pointer_cache import PointerCache
 from songforge.web.middleware import CorrelationIdMiddleware, MetricsMiddleware
 from songforge.web.routes import health, now_playing
 
@@ -31,6 +32,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(MetricsMiddleware)
     app.add_middleware(
         CorrelationIdMiddleware, header_name=settings.correlation_id_header
+    )
+
+    # Issue #9, design D3: one process-local pointer cache per app instance, warmed
+    # from Redis and read by `GET /now-playing` (`web/routes/now_playing.py`).
+    app.state.pointer_cache = PointerCache(
+        ttl_seconds=settings.radio_pointer_cache_ttl_seconds
     )
 
     app.include_router(health.router)

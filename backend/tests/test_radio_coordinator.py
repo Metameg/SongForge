@@ -9,6 +9,8 @@ kept off this fast unit path (see PRD testing decisions).
 
 from __future__ import annotations
 
+import json
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import pytest
@@ -262,3 +264,160 @@ async def test_advance_increments_the_radio_advances_metric_on_success(
         assert applied is True
     after_count = REGISTRY.get_sample_value("songforge_radio_advances_total") or 0.0
     assert after_count == before_count + 1
+
+
+# ── Coordinator writes the Redis pointer key (issue #9, design D2) ──────────
+#
+# Contract (not yet implemented -- RED phase): `initialize_if_absent` and `advance`
+# gain an optional `redis: Redis | None = None` keyword parameter (backward-compatible
+# with every test above, which omits it). When a `redis` is given, a SUCCESSFUL
+# init/CAS best-effort writes the resolved view to the configured pointer key -- D5's
+# stated default "radio:pointer" -- as a JSON string; a lost CAS race or a no-op
+# initialize must NOT write. A Redis failure must be caught and logged, never raise
+# out of `advance`/`initialize_if_absent` (Postgres remains the source of truth).
+
+RADIO_POINTER_REDIS_KEY = "radio:pointer"
+
+
+class _FakeRedis:
+    """Minimal in-memory async Redis double. The coordinator is a pointer WRITER
+    (design D2), so only `set` is needed here -- read-path fakes live in
+    `test_pointer_cache.py` / `test_now_playing.py`."""
+
+    def __init__(self, *, raise_on_set: Exception | None = None) -> None:
+        self._store: dict[str, str] = {}
+        self._raise_on_set = raise_on_set
+        self.set_calls = 0
+
+    async def set(self, key: str, value: str) -> None:
+        self.set_calls += 1
+        if self._raise_on_set is not None:
+            raise self._raise_on_set
+        self._store[key] = value
+
+
+async def test_initialize_writes_the_resolved_view_to_the_redis_pointer_key(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    redis = _FakeRedis()
+
+    async with sessionmaker() as session:
+        created = await initialize_if_absent(session, _StubHistory(), redis=redis)
+        assert created is True
+        state = await session.get(RadioState, 1)
+        assert state is not None
+
+    assert RADIO_POINTER_REDIS_KEY in redis._store
+    payload = json.loads(redis._store[RADIO_POINTER_REDIS_KEY])
+    assert payload["song_id"] == state.song_id
+    assert payload["version"] == 0
+    assert payload["playback_id"] == state.playback_id
+
+
+async def test_initialize_noop_does_not_write_to_redis(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pointer that already exists -> `initialize_if_absent` is a no-op and must
+    not touch Redis (nothing changed to publish)."""
+    await _add_songs(sessionmaker, "song-1")
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        assert await initialize_if_absent(session, _StubHistory(), redis=redis) is True
+    redis.set_calls = 0
+
+    async with sessionmaker() as session:
+        assert await initialize_if_absent(session, _StubHistory(), redis=redis) is False
+    assert redis.set_calls == 0
+
+
+async def test_initialize_redis_write_failure_does_not_fail_initialization(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Best-effort (design D2): a Redis error must not prevent (or raise out of) a
+    successful initialize."""
+    await _add_songs(sessionmaker, "song-1")
+    redis = _FakeRedis(raise_on_set=ConnectionError("redis down"))
+
+    async with sessionmaker() as session:
+        created = await initialize_if_absent(session, _StubHistory(), redis=redis)
+        assert created is True
+        assert await session.get(RadioState, 1) is not None
+
+
+async def test_advance_writes_the_updated_view_to_redis_on_a_successful_cas(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        before = await session.get(RadioState, 1)
+        assert before is not None
+        current_version = before.version
+
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        applied = await advance(
+            session, _StubHistory(), expected_version=current_version, redis=redis
+        )
+        assert applied is True
+        after = await session.get(RadioState, 1)
+        assert after is not None
+
+    payload = json.loads(redis._store[RADIO_POINTER_REDIS_KEY])
+    assert payload["song_id"] == after.song_id
+    assert payload["version"] == current_version + 1
+    assert payload["playback_id"] == after.playback_id
+
+
+async def test_advance_does_not_write_to_redis_on_a_lost_cas_race(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        before = await session.get(RadioState, 1)
+        assert before is not None
+        current_version = before.version
+
+    stale_version = current_version + 999
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        applied = await advance(
+            session, _StubHistory(), expected_version=stale_version, redis=redis
+        )
+        assert applied is False
+
+    assert redis.set_calls == 0
+
+
+async def test_advance_redis_write_failure_does_not_fail_the_advance(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Best-effort (design D2): a Redis error on the write-back must not fail (or
+    raise out of) a successful CAS advance -- Postgres remains authoritative."""
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        before = await session.get(RadioState, 1)
+        assert before is not None
+        current_version = before.version
+        current_song_id = before.song_id
+
+    redis = _FakeRedis(raise_on_set=ConnectionError("redis down"))
+    async with sessionmaker() as session:
+        # Mark the current song as recently played so `pick_static` deterministically
+        # advances to the *other* song (matching the `_StubHistory(recent=...)` pattern
+        # used elsewhere in this file); otherwise the two-song `random.choice` makes the
+        # `after.song_id != current_song_id` assertion a coin flip.
+        applied = await advance(
+            session,
+            _StubHistory(recent={current_song_id} if current_song_id else set()),
+            expected_version=current_version,
+            redis=redis,
+        )
+        assert applied is True
+        after = await session.get(RadioState, 1)
+        assert after is not None
+        assert after.version == current_version + 1
+        assert after.song_id != current_song_id

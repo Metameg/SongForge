@@ -7,10 +7,13 @@
 import { describe, expect, it } from "vitest";
 import {
   DEADBAND_SECONDS,
+  HEARTBEAT_INTERVAL_MS,
   computeSkewMs,
   correctedServerNowMs,
   computeOffsetSeconds,
+  computeExpectedOffsetSeconds,
   decideDrift,
+  shouldRefetchOnHeartbeat,
 } from "./sync";
 
 describe("computeSkewMs", () => {
@@ -74,5 +77,62 @@ describe("decideDrift", () => {
   it("honors a custom threshold", () => {
     expect(decideDrift(1.4, 2)).toBe("none");
     expect(decideDrift(2, 2)).toBe("seek");
+  });
+});
+
+/**
+ * Issue #9 (design D6): the continuous-drift + heartbeat gap. `decideDrift` above is
+ * already wired for Play/song-change; these cover the two NEW pure decisions Player.tsx
+ * needs to close criterion #1's gap -- a ~30s heartbeat re-fetch trigger, and a single
+ * call point combining clock-skew correction with the started_at offset for the
+ * `timeupdate` handler (composes the existing `correctedServerNowMs` +
+ * `computeOffsetSeconds`, so `Player.tsx` needn't inline both on every tick).
+ *
+ * Neither symbol exists yet in `./sync` -- this is the RED phase for #9's client gap.
+ */
+describe("HEARTBEAT_INTERVAL_MS", () => {
+  it("defaults to 30 seconds (PRD stories #9, #10)", () => {
+    expect(HEARTBEAT_INTERVAL_MS).toBe(30_000);
+  });
+});
+
+describe("shouldRefetchOnHeartbeat", () => {
+  it("is false before the heartbeat interval has elapsed", () => {
+    expect(shouldRefetchOnHeartbeat(29_999)).toBe(false);
+  });
+
+  it("is true once the heartbeat interval has elapsed", () => {
+    expect(shouldRefetchOnHeartbeat(30_000)).toBe(true);
+  });
+
+  it("is true well past the interval (e.g. after a backgrounded tab)", () => {
+    expect(shouldRefetchOnHeartbeat(120_000)).toBe(true);
+  });
+
+  it("honors a custom interval", () => {
+    expect(shouldRefetchOnHeartbeat(4_999, 5_000)).toBe(false);
+    expect(shouldRefetchOnHeartbeat(5_000, 5_000)).toBe(true);
+  });
+});
+
+describe("computeExpectedOffsetSeconds", () => {
+  it("composes clock-skew correction with the started_at offset", () => {
+    const startedAtMs = 1_700_000_000_000;
+    const clientNowMs = startedAtMs + 45_300; // 45.3s of client wall-clock elapsed
+    const skewMs = 300; // client clock reads 300ms ahead of the server
+    // correctedServerNowMs = clientNowMs - skewMs = startedAtMs + 45_000
+    // offset = 45_000ms / 1000 = 45s
+    expect(computeExpectedOffsetSeconds(startedAtMs, clientNowMs, skewMs)).toBe(45);
+  });
+
+  it("matches manual correctedServerNowMs + computeOffsetSeconds composition", () => {
+    const startedAtMs = 1_700_000_000_000;
+    const clientNowMs = startedAtMs + 10_000;
+    const skewMs = -200;
+    const expected = computeOffsetSeconds(
+      correctedServerNowMs(clientNowMs, skewMs),
+      startedAtMs,
+    );
+    expect(computeExpectedOffsetSeconds(startedAtMs, clientNowMs, skewMs)).toBe(expected);
   });
 });

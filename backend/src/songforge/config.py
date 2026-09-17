@@ -96,6 +96,16 @@ class Settings(BaseSettings):
     # transient error, so a broken loop doesn't spin hot.
     radio_coordinator_backoff_seconds: float = 5.0
 
+    # ── Radio pointer cache (issue #9: Redis pointer cache + cold-start warming) ────
+    # Redis string key the coordinator writes the resolved `/now-playing` view to
+    # after every successful init/advance, and the web tier reads to serve requests
+    # without touching Postgres (design D1/D2).
+    radio_pointer_redis_key: str = "radio:pointer"
+    # TTL of each web instance's process-local pointer cache entry (design D3):
+    # short enough that a song boundary is reflected promptly, long enough that a
+    # request storm within the window costs 0 datastore reads.
+    radio_pointer_cache_ttl_seconds: float = 1.0
+
     # ── Observability (always on, every environment; spec #77) ──────────────
     metrics_enabled: bool = True
     correlation_id_header: str = "X-Correlation-ID"
