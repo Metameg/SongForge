@@ -35,6 +35,8 @@ from songforge.radio.pointer_cache import (
     PointerCache,
     PointerRecord,
     get_now_playing_cached,
+    read_pointer_from_redis,
+    write_pointer_to_redis,
 )
 from songforge.radio.state import NowPlayingView
 
@@ -157,6 +159,35 @@ def test_pointer_cache_still_fresh_just_under_ttl() -> None:
     assert cache.get() is not None
 
 
+def test_pointer_cache_expires_exactly_at_the_ttl_boundary() -> None:
+    """The freshness check is `>=`, not `>`: a lookup at exactly the TTL age is a
+    miss, not a hit. Pins the boundary so a future `>`-vs-`>=` slip is caught."""
+    clock = _FakeClock()
+    cache = PointerCache(ttl_seconds=1.0, clock=clock)
+    cache.set(PointerRecord.from_view(_make_view()))
+
+    clock.advance(1.0)
+
+    assert cache.get() is None
+
+
+def test_pointer_cache_set_after_expiry_resets_the_ttl_clock() -> None:
+    """A fresh `.set()` on an expired cache must re-arm the TTL from the new set
+    time, not the original one (regression guard for a clock-reuse bug)."""
+    clock = _FakeClock()
+    cache = PointerCache(ttl_seconds=1.0, clock=clock)
+    cache.set(PointerRecord.from_view(_make_view(song_id="stale")))
+    clock.advance(2.0)
+    assert cache.get() is None  # expired
+
+    cache.set(PointerRecord.from_view(_make_view(song_id="fresh")))
+    clock.advance(0.5)  # within the TTL of the NEW set, not the old one
+
+    result = cache.get()
+    assert result is not None
+    assert result.song_id == "fresh"
+
+
 def test_pointer_cache_invalidate_forces_a_miss() -> None:
     cache = PointerCache(ttl_seconds=10.0, clock=_FakeClock())
     cache.set(PointerRecord.from_view(_make_view()))
@@ -188,6 +219,119 @@ def test_pointer_record_storage_excludes_server_time_but_response_adds_it() -> N
     assert body["status"] == "playing"
     assert body["song_id"] == record.song_id
     assert body["server_time"] is not None
+
+
+def test_pointer_record_round_trip_with_none_duration_and_generated_source() -> None:
+    """A user-generated song with no known duration (`duration_seconds=None`,
+    `source="generated"`) must round-trip through JSON without special-casing —
+    these are real, expected values (spec #48: generated songs are playable objects
+    indistinguishable from static ones), not just the `"static"`/180s happy path the
+    other fixtures exercise."""
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    view = NowPlayingView(
+        song_id="song-gen",
+        title="A Generated Song",
+        source="generated",
+        object_key="audio/song-gen.mp3",
+        audio_url="http://cdn.test/audio/song-gen.mp3",
+        started_at=started_at,
+        ends_at=started_at + timedelta(seconds=200),
+        duration_seconds=None,
+        playback_id="pb-gen",
+        version=1,
+    )
+    record = PointerRecord.from_view(view)
+
+    restored = PointerRecord.from_json(record.to_json())
+
+    assert restored == record
+    assert restored.source == "generated"
+    assert restored.duration_seconds is None
+
+    body = record.to_response(server_time=datetime.now(timezone.utc))
+    assert body["source"] == "generated"
+    assert body["duration"] is None
+
+
+def test_to_response_matches_now_playing_view_to_response_wire_shape() -> None:
+    """Guards `PointerRecord.to_response` from drifting out of sync with
+    `NowPlayingView.to_response`: the `/now-playing` body must be byte-for-byte
+    identical regardless of which layer (local cache / Redis / Postgres) resolved
+    the read, since the frontend's parsing doesn't know which layer answered."""
+    view = _make_view(song_id="song-parity", version=5)
+    record = PointerRecord.from_view(view)
+    server_time = datetime.now(timezone.utc)
+
+    view_body = view.to_response(server_time=server_time)
+    record_body = record.to_response(server_time=server_time)
+
+    assert set(record_body.keys()) == set(view_body.keys())
+    assert record_body == view_body
+
+
+# ── read_pointer_from_redis / write_pointer_to_redis (raw I/O helpers) ──────
+#
+# `get_now_playing_cached` exercises these indirectly, but they are separately
+# exported (phase 1 contract) so it's worth pinning their own behavior directly:
+# absent-key -> None, a round trip through a real GET/SET pair, and the
+# `decode_responses=False` edge case (a raw client would hand back `bytes`).
+
+
+class _BytesFakeRedis:
+    """Like `_FakeRedis`, but `get` returns `bytes` — the shape a Redis client
+    configured *without* `decode_responses=True` would hand back. Pins the
+    `raw.decode()` fallback in `read_pointer_from_redis`."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        return self._store.get(key)
+
+    async def set(self, key: str, value: str) -> None:
+        self._store[key] = value.encode()
+
+
+async def test_read_pointer_from_redis_returns_none_when_key_absent() -> None:
+    redis = _FakeRedis()
+
+    result = await read_pointer_from_redis(redis, key=TEST_REDIS_KEY)  # type: ignore[arg-type]
+
+    assert result is None
+    assert redis.get_calls == 1
+
+
+async def test_read_pointer_from_redis_deserializes_the_stored_record() -> None:
+    redis = _FakeRedis()
+    record = PointerRecord.from_view(_make_view(song_id="song-roundtrip"))
+    await redis.set(TEST_REDIS_KEY, record.to_json())
+
+    result = await read_pointer_from_redis(redis, key=TEST_REDIS_KEY)  # type: ignore[arg-type]
+
+    assert result == record
+
+
+async def test_read_pointer_from_redis_decodes_bytes_when_client_does_not_decode() -> None:
+    """`decode_responses=True` is the shared client's convention, but the helper
+    must not assume every caller/double honors it (see the module's own note on
+    normalizing `bytes | str` explicitly)."""
+    redis = _BytesFakeRedis()
+    record = PointerRecord.from_view(_make_view(song_id="song-bytes"))
+    await redis.set(TEST_REDIS_KEY, record.to_json())
+
+    result = await read_pointer_from_redis(redis, key=TEST_REDIS_KEY)  # type: ignore[arg-type]
+
+    assert result == record
+
+
+async def test_write_pointer_to_redis_stores_the_record_as_json_under_the_key() -> None:
+    redis = _FakeRedis()
+    record = PointerRecord.from_view(_make_view(song_id="song-write"))
+
+    await write_pointer_to_redis(redis, record, key=TEST_REDIS_KEY)  # type: ignore[arg-type]
+
+    assert redis.set_calls == 1
+    assert PointerRecord.from_json(redis._store[TEST_REDIS_KEY]) == record
 
 
 # ── get_now_playing_cached: D4 warm/fallback order ──────────────────────────
@@ -340,3 +484,25 @@ async def test_postgres_also_empty_returns_none_idle() -> None:
     )
 
     assert result is None
+
+
+async def test_idle_result_is_not_cached_or_written_back_to_redis() -> None:
+    """A `None` (idle) result from Postgres must NOT be cached locally or written to
+    Redis — there is nothing to warm the herd with, and caching `None` would mask a
+    song becoming available a moment later until the TTL happened to expire."""
+    cache = PointerCache(ttl_seconds=5.0, clock=_FakeClock())
+    redis = _FakeRedis()
+    pg_loader = _SpyPgLoader(None)
+
+    result = await get_now_playing_cached(
+        cache=cache,
+        redis=redis,
+        session=_FAKE_SESSION,
+        pg_loader=pg_loader,
+        redis_key=TEST_REDIS_KEY,
+    )
+
+    assert result is None
+    assert cache.get() is None
+    assert redis.set_calls == 0
+    assert redis._store == {}
