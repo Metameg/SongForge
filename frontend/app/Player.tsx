@@ -16,11 +16,29 @@
  * (by-then freshly-`src`'d) audio element to the live offset — see the effect below for
  * why re-anchoring must happen after React commits the new `src`, not inside a setState
  * updater.
+ *
+ * Issue #9 (design D6) closes criterion #1's continuous-sync gap: the `<audio>`
+ * `timeupdate` event (which fires several times a second during playback) runs a free
+ * local drift check (deadband < 1s, hard-seek ≥ 1s via `decideDrift`) against the
+ * server timeline, and — on that same event — a ~30s heartbeat (`shouldRefetchOnHeartbeat`
+ * against the elapsed-since-last-fetch) re-fetches `/now-playing` so a drifting clock
+ * skew or a missed boundary self-corrects (PRD stories #9, #10). Driving the heartbeat
+ * off elapsed time (rather than a raw `setInterval`) means it self-corrects the moment a
+ * backgrounded/throttled tab resumes playback. Clock skew is measured at each response's
+ * *receipt* and kept in a ref, so the per-tick drift math uses a skew sampled at a known
+ * moment rather than recomputing it from an increasingly stale `server_time`.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
-import { computeOffsetSeconds, computeSkewMs, correctedServerNowMs } from "../lib/sync";
+import {
+  computeExpectedOffsetSeconds,
+  computeOffsetSeconds,
+  computeSkewMs,
+  correctedServerNowMs,
+  decideDrift,
+  shouldRefetchOnHeartbeat,
+} from "../lib/sync";
 
 // Same-origin base: the browser fetches "/now-playing" on its own origin and the Next
 // server proxies it to the backend (see `next.config.js` rewrites). This avoids CORS and
@@ -50,6 +68,13 @@ export default function Player() {
   // Set by the poll effect; lets the `<audio>` `ended` handler force an immediate
   // re-fetch (PRD story #11) without waiting for the scheduled boundary tick.
   const pollNowRef = useRef<() => void>(() => {});
+  // Clock skew (client − server, ms) sampled at each `/now-playing` receipt. The
+  // `timeupdate` drift check reads this rather than recomputing from `server_time`,
+  // which grows stale between fetches (issue #9, design D6).
+  const skewMsRef = useRef<number>(0);
+  // Wall-clock time of the last `/now-playing` receipt (ms). The `timeupdate` handler
+  // uses it to fire the ~30s heartbeat via `shouldRefetchOnHeartbeat` (issue #9, D6).
+  const lastFetchAtMsRef = useRef<number>(0);
 
   // Poll `/now-playing` and reschedule to the next boundary. Resilient (a transient
   // failure retries rather than killing the reschedule chain) and floored (a stale
@@ -68,6 +93,12 @@ export default function Player() {
       fetchNowPlaying(NOW_PLAYING_BASE)
         .then((next) => {
           if (cancelled) return;
+          lastFetchAtMsRef.current = Date.now();
+          if (next.status === "playing") {
+            // Sample skew NOW, at receipt — this is the one moment `server_time` and
+            // the client clock line up, so the `timeupdate` handler can trust it later.
+            skewMsRef.current = computeSkewMs(Date.parse(next.server_time), Date.now());
+          }
           setState(next);
           schedule(
             next.status === "playing"
@@ -123,6 +154,33 @@ export default function Player() {
     pollNowRef.current();
   };
 
+  // Continuous drift correction (issue #9, criterion #1 / design D6): on every
+  // `timeupdate`, compare where we ARE (`audio.currentTime`) to where the server
+  // timeline says we should be, and hard-seek only when the drift crosses the 1s
+  // deadband (`decideDrift`) — a sub-second gap is left alone so imperceptible jitter
+  // never nudges playback. Runs only after the listener has started playback.
+  const handleTimeUpdate = () => {
+    if (!hasStarted || !state || state.status !== "playing") return;
+    const audio = audioRef.current;
+    if (!audio) return;
+    const expected = computeExpectedOffsetSeconds(
+      Date.parse(state.started_at),
+      Date.now(),
+      skewMsRef.current,
+    );
+    if (decideDrift(audio.currentTime - expected) === "seek") {
+      audio.currentTime = Math.max(expected, 0);
+    }
+    // ~30s heartbeat (issue #9, D6): once enough time has passed since the last fetch,
+    // re-fetch to re-sample skew / catch a missed change. Bump `lastFetchAtMsRef` up
+    // front so the several-per-second `timeupdate` events during the in-flight fetch
+    // don't each trigger a duplicate request (the poll's own receipt resets it again).
+    if (shouldRefetchOnHeartbeat(Date.now() - lastFetchAtMsRef.current)) {
+      lastFetchAtMsRef.current = Date.now();
+      pollNowRef.current();
+    }
+  };
+
   const isPlaying = state?.status === "playing";
 
   return (
@@ -161,6 +219,7 @@ export default function Player() {
         ref={audioRef}
         src={isPlaying ? (state as NowPlaying).audio_url : undefined}
         onEnded={handleEnded}
+        onTimeUpdate={handleTimeUpdate}
       />
     </main>
   );

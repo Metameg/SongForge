@@ -39,6 +39,13 @@ radio_advances_total = Counter(
     registry=REGISTRY,
 )
 
+radio_now_playing_source_total = Counter(
+    "songforge_radio_now_playing_source_total",
+    "now-playing reads served, by data source (local process cache / redis / postgres).",
+    labelnames=("source",),
+    registry=REGISTRY,
+)
+
 
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.

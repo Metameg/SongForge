@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+from redis.asyncio import Redis
 from sqlalchemy import text
 
 from songforge.config import Settings
@@ -33,18 +34,22 @@ from songforge.redis_client import get_redis
 log = get_logger(__name__)
 
 
-async def _tick(settings: Settings, history: RecentHistoryStore) -> float:
+async def _tick(settings: Settings, history: RecentHistoryStore, redis: Redis) -> float:
     """One coordinator decision: initialize, catch up past the boundary, or wait.
 
     Returns the number of seconds to sleep before the next tick (0 if there is more
     catch-up work to do immediately, e.g. after a long outage).
+
+    ``redis`` is threaded into ``initialize_if_absent``/``advance`` (issue #9, design
+    D2) so a genuine init/advance best-effort populates the Redis pointer key the web
+    tier reads from.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         pointer = await session.get(RadioState, RADIO_STATE_SINGLETON_ID)
 
         if pointer is None:
-            created = await initialize_if_absent(session, history)
+            created = await initialize_if_absent(session, history, redis=redis)
             if not created:
                 log.info("radio_library_empty", retry_in=settings.radio_coordinator_backoff_seconds)
                 return settings.radio_coordinator_backoff_seconds
@@ -57,7 +62,7 @@ async def _tick(settings: Settings, history: RecentHistoryStore) -> float:
 
         now = datetime.now(timezone.utc)
         if pointer.ends_at <= now:
-            await advance(session, history, expected_version=pointer.version)
+            await advance(session, history, expected_version=pointer.version, redis=redis)
             # Re-read: either this call advanced it, or another leader already did.
             # Either way the caller loops immediately (return 0) to re-check the new
             # boundary rather than assuming a single advance caught up a long outage.
@@ -73,8 +78,9 @@ async def run_radio_coordinator(settings: Settings, stop: asyncio.Event) -> None
     than raised, so a broken radio coordinator never takes down the worker's other
     supervised loops (dispatch/ingest/watchdog, added by later tickets).
     """
+    redis = get_redis()
     history = RedisRecentHistoryStore(
-        get_redis(), max_len=settings.radio_recent_history_size
+        redis, max_len=settings.radio_recent_history_size
     )
 
     while not stop.is_set():
@@ -88,7 +94,7 @@ async def run_radio_coordinator(settings: Settings, stop: asyncio.Event) -> None
                 log.info("radio_leader_acquired", key=settings.radio_advisory_lock_key)
                 try:
                     while not stop.is_set():
-                        sleep_for = await _tick(settings, history)
+                        sleep_for = await _tick(settings, history, redis)
                         try:
                             await asyncio.wait_for(stop.wait(), timeout=sleep_for)
                         except asyncio.TimeoutError:

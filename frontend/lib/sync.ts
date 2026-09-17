@@ -64,3 +64,39 @@ export function decideDrift(
 ): DriftAction {
   return Math.abs(driftSeconds) >= thresholdSeconds ? "seek" : "none";
 }
+
+/**
+ * Issue #9 (design D6): continuous drift correction + a periodic skew-refresh
+ * heartbeat, closing criterion #1's gap (`decideDrift` above was wired for Play/
+ * song-change only). Kept as pure functions here so `Player.tsx` only wires DOM
+ * events/timers to them, per the PRD testing decision to keep sync math unit-testable.
+ */
+
+/** How often the player re-fetches `/now-playing` to refresh clock skew, in ms, so a
+ * missed boundary or drifting skew self-corrects (PRD stories #9, #10). */
+export const HEARTBEAT_INTERVAL_MS = 30_000;
+
+/**
+ * Whether enough wall-clock time has passed since the last `/now-playing` fetch to
+ * trigger a heartbeat refetch.
+ */
+export function shouldRefetchOnHeartbeat(
+  elapsedSinceLastFetchMs: number,
+  intervalMs: number = HEARTBEAT_INTERVAL_MS,
+): boolean {
+  return elapsedSinceLastFetchMs >= intervalMs;
+}
+
+/**
+ * Seconds into the current song "now" on the shared server timeline, given the
+ * client's own clock and its measured skew — composes {@link correctedServerNowMs}
+ * with {@link computeOffsetSeconds} so callers (the `timeupdate` handler) don't need
+ * to inline both on every tick.
+ */
+export function computeExpectedOffsetSeconds(
+  startedAtMs: number,
+  clientNowMs: number,
+  skewMs: number,
+): number {
+  return computeOffsetSeconds(correctedServerNowMs(clientNowMs, skewMs), startedAtMs);
+}

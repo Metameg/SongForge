@@ -8,7 +8,14 @@ holds only the pointer-mutation *logic*, kept pure enough of Redis to unit-test 
 in-memory SQLite (``sqlite+aiosqlite``) with a stubbed ``RecentHistoryStore``, per the PRD
 testing decision to keep the coordinator's decision logic on the fast unit path.
 
-Issue #8, phase 3 (green) implementation.
+Issue #9 adds one more responsibility: after a *genuine* success (a real initialize or
+an applied CAS, never a lost race or a no-op), best-effort write the fully-resolved
+pointer view to the Redis pointer key (design D2) so the web tier can serve
+``/now-playing`` from Redis instead of Postgres (criteria #2/#4 of issue #9). The write
+is wrapped in its own try/except: Postgres has already committed by that point, so a
+Redis outage must never turn a successful advance into a failed one.
+
+Issue #8, phase 3 (green) implementation. Issue #9 pointer-write addition.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, cast
 from uuid import uuid4
 
+from redis.asyncio import Redis
 from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,9 +33,51 @@ from songforge.config import get_settings
 from songforge.logging_setup import get_logger
 from songforge.metrics import radio_advances_total
 from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState, Song, SOURCE_STATIC
+from songforge.radio.pointer_cache import PointerRecord
 from songforge.radio.selection import pick_static
+from songforge.radio.state import NowPlayingView
+from songforge.storage import get_storage
 
 log = get_logger(__name__)
+
+
+async def _write_pointer_best_effort(
+    redis: Redis,
+    *,
+    song: Song,
+    playback_id: str,
+    started_at: datetime,
+    ends_at: datetime,
+    version: int,
+) -> None:
+    """Best-effort write of the resolved pointer view to the Redis pointer key.
+
+    Builds the same denormalized shape the web tier serves (`PointerRecord`, design
+    D1) so a cold web instance can answer `/now-playing` with zero Postgres reads. Any
+    failure is logged and swallowed — Postgres has already committed by the time this
+    runs, so a Redis outage must never fail the caller's init/advance. The try/except
+    spans record construction too (not just `redis.set`), so even an unexpected error
+    building the view can never turn a committed advance into a failed one.
+    """
+    settings = get_settings()
+    try:
+        record = PointerRecord.from_view(
+            NowPlayingView(
+                song_id=song.id,
+                title=song.title,
+                source=song.source,
+                object_key=song.object_key,
+                audio_url=get_storage().public_url(song.object_key),
+                started_at=started_at,
+                ends_at=ends_at,
+                duration_seconds=song.duration_seconds,
+                playback_id=playback_id,
+                version=version,
+            )
+        )
+        await redis.set(settings.radio_pointer_redis_key, record.to_json())
+    except Exception:
+        log.warning("radio_pointer_write_failed", song_id=song.id, exc_info=True)
 
 
 class RecentHistoryStore(Protocol):
@@ -49,7 +99,7 @@ class RecentHistoryStore(Protocol):
 
 
 async def initialize_if_absent(
-    session: AsyncSession, history: RecentHistoryStore
+    session: AsyncSession, history: RecentHistoryStore, redis: Redis | None = None
 ) -> bool:
     """Create the ``radio_state`` pointer (``version=0``) if none exists yet.
 
@@ -59,6 +109,10 @@ async def initialize_if_absent(
       False. The caller (worker) logs and retries later rather than erroring.
     - A pointer already exists -> no-op; return False. Cold-start resume (recomputing
       remaining time from ``ends_at``, or advancing if already past) is the caller's job.
+
+    ``redis`` is optional and backward-compatible (issue #9, design D2): when given, a
+    genuine initialize (not the already-exists no-op) best-effort writes the resolved
+    pointer view to the Redis pointer key after the Postgres commit.
     """
     existing = await session.get(RadioState, RADIO_STATE_SINGLETON_ID)
     if existing is not None:
@@ -76,24 +130,39 @@ async def initialize_if_absent(
     duration = song_by_id[song_id].duration_seconds or settings.radio_default_track_seconds
 
     now = datetime.now(timezone.utc)
+    ends_at = now + timedelta(seconds=duration)
+    playback_id = str(uuid4())
     pointer = RadioState(
         id=RADIO_STATE_SINGLETON_ID,
         song_id=song_id,
-        playback_id=str(uuid4()),
+        playback_id=playback_id,
         source=SOURCE_STATIC,
         started_at=now,
-        ends_at=now + timedelta(seconds=duration),
+        ends_at=ends_at,
         version=0,
     )
     session.add(pointer)
     await session.commit()
     await history.record(song_id)
     log.info("radio_initialized", song_id=song_id, version=0)
+    if redis is not None:
+        await _write_pointer_best_effort(
+            redis,
+            song=song_by_id[song_id],
+            playback_id=playback_id,
+            started_at=now,
+            ends_at=ends_at,
+            version=0,
+        )
     return True
 
 
 async def advance(
-    session: AsyncSession, history: RecentHistoryStore, *, expected_version: int
+    session: AsyncSession,
+    history: RecentHistoryStore,
+    *,
+    expected_version: int,
+    redis: Redis | None = None,
 ) -> bool:
     """Advance the pointer to the next static song via version-CAS (criteria #2, #5).
 
@@ -109,6 +178,10 @@ async def advance(
     Returns True if the CAS applied (this call performed the advance and recorded the new
     song via ``history.record``); False if it matched 0 rows because another instance had
     already advanced first (lost the race) — the caller backs off without double-advancing.
+
+    ``redis`` is optional and backward-compatible, keyword-only (issue #9, design D2):
+    when given, an *applied* CAS (never a lost race) best-effort writes the resolved
+    pointer view to the Redis pointer key after the Postgres commit.
     """
     settings = get_settings()
     songs = list((await session.scalars(select(Song))).all())
@@ -157,4 +230,13 @@ async def advance(
         playback_id=new_playback_id,
         version=expected_version + 1,
     )
+    if redis is not None:
+        await _write_pointer_best_effort(
+            redis,
+            song=song_by_id[next_song_id],
+            playback_id=new_playback_id,
+            started_at=now,
+            ends_at=now + timedelta(seconds=duration),
+            version=expected_version + 1,
+        )
     return True
