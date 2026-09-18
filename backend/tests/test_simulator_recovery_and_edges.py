@@ -8,12 +8,21 @@ safe no-op (happy path). All observed through the HTTP surface, no internals.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
+import httpx
 import pytest
 
-from songforge.simulator.app import wait_for_pending_webhooks
+from songforge.simulator.app import create_app, wait_for_pending_webhooks
 from songforge.simulator.faults import FAULT_HEADER, Fault
-from tests.simulator_helpers import CREATE_PATH, DEFAULT_BODY, SimulatorRig, make_rig
+from tests.simulator_helpers import (
+    CREATE_PATH,
+    DEFAULT_BODY,
+    SimulatorRig,
+    make_gated_sleep,
+    make_rig,
+    make_sim_client,
+)
 
 
 @pytest.fixture()
@@ -21,6 +30,45 @@ async def rig() -> AsyncIterator[SimulatorRig]:
     r = make_rig()
     async with r.client:
         yield r
+
+
+class _RaisingClient:
+    """Stand-in webhook client whose POST always fails, like an unreachable receiver."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        self.calls += 1
+        raise httpx.ConnectError("simulated delivery failure")
+
+
+async def test_invalid_webhook_url_is_rejected_at_create_with_422() -> None:
+    async with make_sim_client(create_app()) as client:
+        resp = await client.post(
+            CREATE_PATH, json={**DEFAULT_BODY, "webhook_url": "string"}
+        )
+    assert resp.status_code == 422
+
+
+async def test_delivery_failure_never_escapes_the_background_task() -> None:
+    # A failing webhook client must be swallowed+logged, not left as an unretrieved-task
+    # exception. Gate the delay so the task is still pending when we snapshot it.
+    boom = _RaisingClient()
+    sleep_fn, gate = make_gated_sleep()
+    app = create_app(http_client=boom, sleep_fn=sleep_fn)  # type: ignore[arg-type]
+
+    async with make_sim_client(app) as client:
+        resp = await client.post(CREATE_PATH, json=DEFAULT_BODY)
+        assert resp.status_code == 200
+        tasks = set(app.state.pending_webhook_tasks)
+        assert tasks  # the delivery task is parked on the gate
+        gate.set()
+        await wait_for_pending_webhooks(app)
+
+    assert boom.calls == 1  # delivery was attempted
+    for task in tasks:
+        assert task.exception() is None  # ...and its failure did not escape
 
 
 async def test_webhook_never_arrives_is_still_recoverable_via_byid(

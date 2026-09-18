@@ -93,6 +93,18 @@ async def _deliver(app: FastAPI, record: TaskRecord, delay: float) -> None:
 
 
 async def _post(app: FastAPI, url: str, payload: WebhookPayload) -> None:
+    # Fire-and-forget delivery: a bad/unreachable webhook URL (or a receiver that's down) is
+    # logged as a warning and swallowed — it must never surface as an unretrieved-task
+    # traceback. (A never-delivered webhook is itself a modelled condition here.)
     client = app.state.http_client
-    await client.post(url, json=payload.model_dump())
+    try:
+        await client.post(url, json=payload.model_dump())
+    except Exception as exc:  # noqa: BLE001 - detached task must not crash on delivery failure
+        log.warning(
+            "sim_webhook_delivery_failed",
+            url=url,
+            task_id=payload.task_id,
+            error=str(exc),
+        )
+        return
     log.info("sim_webhook_delivered", url=url, task_id=payload.task_id, status=payload.status)

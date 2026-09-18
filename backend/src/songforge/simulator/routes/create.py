@@ -58,7 +58,7 @@ async def create_music(body: CreateRequest, request: Request) -> CreateResponse:
         conversion_id_1=conversion_id_1,
         conversion_id_2=conversion_id_2,
         prompt=body.prompt,
-        webhook_url=body.webhook_url,
+        webhook_url=str(body.webhook_url),
         fault=fault,
         duration=_SAMPLE_DURATION_SECONDS,
         title=f"[SIM] {body.prompt[:50]}",

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import enum
 
-from pydantic import BaseModel
+from pydantic import AnyHttpUrl, BaseModel
 
 
 class CreateRequest(BaseModel):
@@ -21,7 +21,10 @@ class CreateRequest(BaseModel):
     lyrics: str | None = None
     make_instrumental: bool = False
     vocal_only: bool = False
-    webhook_url: str
+    # Validated as an http(s) URL so an invalid/placeholder value (e.g. Swagger's "string"
+    # default) is rejected at create with a clear 422, rather than blowing up the detached
+    # webhook-delivery task later. Stored as a plain str on the task record.
+    webhook_url: AnyHttpUrl
 
 
 class CreateResponse(BaseModel):
