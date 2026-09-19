@@ -113,6 +113,36 @@ async def test_create_raises_transient_error_on_timeout() -> None:
             )
 
 
+async def test_create_raises_transient_error_on_malformed_json_body() -> None:
+    """Quality report HIGH finding: a malformed 200 body (invalid JSON) must be a
+    retriable transient condition, not an uncaught `JSONDecodeError` that escapes
+    `dispatch_claimed_job` and strands the job / leaks the semaphore slot."""
+    handler = httpx.MockTransport(lambda r: httpx.Response(200, text="not json"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.create(
+                prompt="p", lyrics=None, webhook_url="http://web:8000/webhook"
+            )
+
+
+async def test_create_raises_transient_error_on_200_missing_a_required_field() -> None:
+    """A 200 body that's valid JSON but missing an expected field (e.g. `task_id`)
+    must also be treated as transient/retriable, not an uncaught `KeyError`."""
+    handler = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={"conversion_id_1": "c1", "conversion_id_2": "c2", "eta": 60, "credit_estimate": 1.0},
+        )
+    )
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.create(
+                prompt="p", lyrics=None, webhook_url="http://web:8000/webhook"
+            )
+
+
 async def test_create_sends_empty_string_lyrics_when_none() -> None:
     captured: dict[str, object] = {}
 

@@ -77,6 +77,13 @@ async def _drain_ready_jobs(
             # contention immediately; stop this pass rather than hot-looping. The
             # next new-job or semaphore-release NOTIFY (or the poll backstop) wakes
             # another pass.
+            #
+            # Accepted v1 trade-off (PRD v1-FIFO, spec #61-63; quality report MED
+            # finding): because claiming is strict seq-order FIFO (criterion #2), a
+            # per-user-capped job at the head of the queue stops this whole drain
+            # pass -- even if a different, non-saturated user's job is next in line
+            # with spare global capacity. Deliberate, not a bug; a fairness/skip-
+            # ahead pass is a later issue's concern.
             return
 
 

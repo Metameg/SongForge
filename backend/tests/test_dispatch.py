@@ -373,3 +373,153 @@ async def test_notify_release_defaults_to_a_noop_when_not_supplied() -> None:
 
     assert handled is True
     assert job.state == JOB_STATE_FAILED
+
+
+# ── Catch-all: unmapped exceptions must never strand the job / leak the slot ──────
+#
+# Quality report HIGH finding: an exception from `client.create()` that isn't one of
+# the three typed exceptions (e.g. a malformed 200 body raising `KeyError`/
+# `JSONDecodeError` -- reproduced here with a stub that raises a plain `KeyError`,
+# bypassing `generation_client.py`'s own fix so this exercises dispatch's own
+# safety net) must still release the slot, requeue to QUEUED with backoff, and
+# notify -- not strand the job in SUBMITTING or leak the slot.
+
+
+class _RaisingReleaseSemaphore:
+    """File-local fake ``Semaphore`` whose ``release`` raises (simulating a
+    transient Redis error mid-release) -- proves the release is best-effort and
+    never aborts the surrounding state transition."""
+
+    def __init__(self, events: list[str], *, acquire_result: bool = True) -> None:
+        self._events = events
+        self._acquire_result = acquire_result
+        self.reconciled_with: int | None = None
+
+    async def acquire(self, user_id: str) -> bool:
+        self._events.append(f"semaphore.acquire:{user_id}")
+        return self._acquire_result
+
+    async def release(self, user_id: str) -> None:
+        self._events.append(f"semaphore.release:{user_id}")
+        raise ConnectionError("redis blip during release")
+
+    async def reconcile_from_active_count(self, count: int) -> None:
+        self._events.append(f"semaphore.reconcile:{count}")
+        self.reconciled_with = count
+
+
+async def test_unmapped_client_exception_requeues_releases_slot_and_notifies() -> None:
+    events: list[str] = []
+    semaphore = _RecordingSemaphore(events)
+    client = _StubGenerationClient(events, outcome=KeyError("task_id"))
+    job = _claimed_job(attempts=0)
+    settings = Settings(dispatch_requeue_backoff_seconds=20)
+    notified: list[str] = []
+
+    async def _notify(job_id: str) -> None:
+        notified.append(job_id)
+
+    before = datetime.now(timezone.utc)
+    handled = await dispatch_claimed_job(
+        job,
+        semaphore=semaphore,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        settings=settings,
+        count_active_jobs=_never_called_counter,
+        notify_release=_notify,
+    )
+
+    assert handled is True
+    assert job.state == JOB_STATE_QUEUED  # requeued, NOT stranded in SUBMITTING
+    assert job.attempts == 1
+    assert job.available_at >= before + timedelta(seconds=20)
+    assert events.count("semaphore.release:user-1") == 1  # slot released, not leaked
+    assert notified == ["job-1"]
+
+
+async def test_semaphore_release_raising_in_an_error_branch_does_not_escape() -> None:
+    """`GenerationRejected` branch: if `semaphore.release()` itself raises (a
+    transient Redis error), the exception must be swallowed (best-effort, per the
+    repo's "Redis blip never fails a committed Postgres transition" convention) --
+    the job must still end up FAILED, and notify must still fire."""
+    events: list[str] = []
+    semaphore = _RaisingReleaseSemaphore(events)
+    client = _StubGenerationClient(events, outcome=GenerationRejected(400, "bad prompt"))
+    job = _claimed_job()
+    settings = Settings()
+    notified: list[str] = []
+
+    async def _notify(job_id: str) -> None:
+        notified.append(job_id)
+
+    handled = await dispatch_claimed_job(
+        job,
+        semaphore=semaphore,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        settings=settings,
+        count_active_jobs=_never_called_counter,
+        notify_release=_notify,
+    )
+
+    assert handled is True
+    assert job.state == JOB_STATE_FAILED  # no exception escaped
+    assert notified == ["job-1"]
+
+
+async def test_semaphore_release_raising_on_transient_requeue_still_requeues() -> None:
+    """Same as above, for the 5xx/timeout requeue branch: a raising `release()`
+    must not prevent the requeue-with-backoff or the notify."""
+    events: list[str] = []
+    semaphore = _RaisingReleaseSemaphore(events)
+    client = _StubGenerationClient(events, outcome=GenerationTransientError("timeout"))
+    job = _claimed_job(attempts=1)
+    settings = Settings(dispatch_requeue_backoff_seconds=10)
+    notified: list[str] = []
+
+    async def _notify(job_id: str) -> None:
+        notified.append(job_id)
+
+    before = datetime.now(timezone.utc)
+    handled = await dispatch_claimed_job(
+        job,
+        semaphore=semaphore,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        settings=settings,
+        count_active_jobs=_never_called_counter,
+        notify_release=_notify,
+    )
+
+    assert handled is True
+    assert job.state == JOB_STATE_QUEUED
+    assert job.attempts == 2
+    assert job.available_at >= before + timedelta(seconds=10)
+    assert notified == ["job-1"]
+
+
+async def test_semaphore_release_raising_on_rate_limited_requeue_still_reconciles() -> None:
+    """429 branch: a raising `release()` must not prevent the reconcile-from-
+    Postgres-truth step or the requeue -- the reconcile still runs against a fresh
+    count, and the job is left QUEUED with backoff, not stranded."""
+    events: list[str] = []
+    semaphore = _RaisingReleaseSemaphore(events)
+    client = _StubGenerationClient(events, outcome=GenerationRateLimited("slow down"))
+    job = _claimed_job()
+    settings = Settings(dispatch_requeue_backoff_seconds=5)
+    notified: list[str] = []
+
+    async def _notify(job_id: str) -> None:
+        notified.append(job_id)
+
+    handled = await dispatch_claimed_job(
+        job,
+        semaphore=semaphore,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+        settings=settings,
+        count_active_jobs=lambda: _fixed_count(2),
+        notify_release=_notify,
+    )
+
+    assert handled is True
+    assert job.state == JOB_STATE_QUEUED
+    assert semaphore.reconciled_with == 2
+    assert notified == ["job-1"]

@@ -14,6 +14,7 @@ boundary from regressing.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -110,11 +111,21 @@ class HttpGenerationClient:
         if response.status_code >= 400:
             raise GenerationRejected(response.status_code, response.text)
 
-        data = response.json()
-        return GenerationHandles(
-            task_id=data["task_id"],
-            conversion_id_1=data["conversion_id_1"],
-            conversion_id_2=data["conversion_id_2"],
-            eta=data["eta"],
-            credit_estimate=data["credit_estimate"],
-        )
+        # A malformed/short-lived-API-bug 200 (invalid JSON, or valid JSON missing an
+        # expected field) is a retriable condition, not a crash: dispatch's catch-all
+        # would otherwise have to treat it as truly unexpected (quality report HIGH
+        # finding). Mapping it to the same typed exception the 5xx/timeout branch
+        # raises keeps this the single place that decides "malformed 200 == retry".
+        try:
+            data = response.json()
+            return GenerationHandles(
+                task_id=data["task_id"],
+                conversion_id_1=data["conversion_id_1"],
+                conversion_id_2=data["conversion_id_2"],
+                eta=data["eta"],
+                credit_estimate=data["credit_estimate"],
+            )
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise GenerationTransientError(
+                f"generation API returned a malformed 200 body: {exc}"
+            ) from exc

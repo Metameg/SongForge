@@ -70,6 +70,39 @@ async def _noop_notify_release(job_id: str) -> None:
     return None
 
 
+async def _safe_release(semaphore: Semaphore, user_id: str) -> None:
+    """Best-effort slot release: this repo's convention is that a Redis blip must
+    never abort an otherwise-committed Postgres state transition (see
+    ``radio/coordinator.py::_write_pointer_best_effort``). Logged and swallowed --
+    worst case the counter is corrected later by the 429 path's
+    ``reconcile_from_active_count`` (Postgres is the source of truth) or the
+    (out-of-scope, later) watchdog."""
+    try:
+        await semaphore.release(user_id)
+    except Exception:
+        log.exception("semaphore_release_failed", user_id=user_id)
+
+
+async def _safe_reconcile(
+    semaphore: Semaphore, count_active_jobs: ActiveCountProvider
+) -> None:
+    """Best-effort reconcile (429 path only) -- same convention as ``_safe_release``."""
+    try:
+        active_count = await count_active_jobs()
+        await semaphore.reconcile_from_active_count(active_count)
+    except Exception:
+        log.exception("semaphore_reconcile_failed")
+
+
+async def _safe_notify(notify: NotifyReleaseFn, job_id: str) -> None:
+    """Best-effort wake-up notify: a missed NOTIFY only costs the poll backstop's
+    latency, never correctness, so it must never abort a state transition either."""
+    try:
+        await notify(job_id)
+    except Exception:
+        log.exception("notify_release_failed", job_id=job_id)
+
+
 async def dispatch_claimed_job(
     job: Job,
     *,
@@ -93,6 +126,12 @@ async def dispatch_claimed_job(
     if not acquired:
         job.state = JOB_STATE_QUEUED
         log.info("dispatch_no_slot", job_id=job.job_id, user_id=job.user_id)
+        # Accepted v1 trade-off (PRD v1-FIFO, spec #61-63): strict seq-order FIFO
+        # claiming (criterion #2) means a per-user-capped job at the head of the
+        # queue can bounce here and stop this drain pass (see `_drain_ready_jobs`
+        # in `worker/dispatch.py`) before trying the next, non-saturated user's job
+        # -- even with spare global capacity. Deliberate, not a bug: a fairness/
+        # skip-ahead pass is a later issue's concern (quality report MED finding).
         return False
 
     try:
@@ -103,10 +142,9 @@ async def dispatch_claimed_job(
         )
     except GenerationRateLimited:
         _apply_backoff(job, settings)
-        await semaphore.release(job.user_id)
-        active_count = await count_active_jobs()
-        await semaphore.reconcile_from_active_count(active_count)
-        await notify(job.job_id)
+        await _safe_release(semaphore, job.user_id)
+        await _safe_reconcile(semaphore, count_active_jobs)
+        await _safe_notify(notify, job.job_id)
         jobs_requeued_total.labels(reason="rate_limited").inc()
         log.info(
             "dispatch_rate_limited_requeued", job_id=job.job_id, attempts=job.attempts
@@ -114,8 +152,8 @@ async def dispatch_claimed_job(
         return True
     except GenerationRejected as exc:
         job.state = JOB_STATE_FAILED
-        await semaphore.release(job.user_id)
-        await notify(job.job_id)
+        await _safe_release(semaphore, job.user_id)
+        await _safe_notify(notify, job.job_id)
         jobs_failed_total.inc()
         log.info(
             "dispatch_failed_terminal", job_id=job.job_id, status_code=exc.status_code
@@ -123,10 +161,26 @@ async def dispatch_claimed_job(
         return True
     except GenerationTransientError:
         _apply_backoff(job, settings)
-        await semaphore.release(job.user_id)
-        await notify(job.job_id)
+        await _safe_release(semaphore, job.user_id)
+        await _safe_notify(notify, job.job_id)
         jobs_requeued_total.labels(reason="transient").inc()
         log.info("dispatch_transient_requeued", job_id=job.job_id, attempts=job.attempts)
+        return True
+    except Exception:
+        # Catch-all (quality report HIGH finding): anything unmapped here -- a bug,
+        # or some other surprise `client.create()` didn't turn into one of the three
+        # typed exceptions above -- must be handled at least as safely as the
+        # 5xx/timeout branch: release the slot, requeue with backoff, notify. The
+        # job must never be left stranded in SUBMITTING, and the slot must never
+        # leak (a malformed-200 body specifically is now handled upstream in
+        # `generation_client.HttpGenerationClient.create`, which raises
+        # `GenerationTransientError` for that case -- this branch is the backstop
+        # for anything else).
+        log.exception("dispatch_unmapped_error", job_id=job.job_id)
+        _apply_backoff(job, settings)
+        await _safe_release(semaphore, job.user_id)
+        await _safe_notify(notify, job.job_id)
+        jobs_requeued_total.labels(reason="unmapped_error").inc()
         return True
 
     job.state = JOB_STATE_WAITING_FOR_WEBHOOK
