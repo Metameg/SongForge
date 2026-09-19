@@ -515,3 +515,140 @@ async def test_semaphore_release_notify_wakes_a_waiting_listener(
 
 async def _zero() -> int:
     return 0
+
+
+async def test_dispatch_429_against_the_real_simulator_requeues_releases_and_notifies(
+    conn: "asyncpg.Connection[asyncpg.Record]", sessionmaker
+) -> None:
+    """Prod-validation gap: composes the 429 path end to end -- real Postgres claim
+    + `count_active_jobs`, and a REAL simulator 429 (`X-Sim-Fault: rate-limit-429`,
+    `simulator/faults.py`) driven through the actual `HttpGenerationClient.create`
+    production code path, not a hand-rolled fake client standing in for the 429 --
+    through `dispatch_claimed_job`. Asserts the full reaction: requeued QUEUED with
+    backoff, slot released + reconciled from Postgres truth, and the release NOTIFY
+    fired for a real listener (mirrors what `test_semaphore_release_notify_wakes_a_
+    waiting_listener` above does for the terminal-4xx branch)."""
+    from datetime import datetime, timedelta, timezone
+
+    from songforge.config import Settings
+    from songforge.jobs.dispatch import claim_next_job, count_active_jobs, dispatch_claimed_job
+    from songforge.jobs.generation_client import HttpGenerationClient
+    from songforge.models import JOB_STATE_QUEUED
+    from songforge.simulator.faults import FAULT_HEADER, Fault
+    from tests.simulator_helpers import make_rig, make_sim_client
+
+    await _insert_queued(conn, "real-429")
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": _SETTINGS_DATABASE_URL,
+            "REDIS_URL": "redis://127.0.0.1:1/0",
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+            "DISPATCH_REQUEUE_BACKOFF_SECONDS": "30",
+        }
+    )
+
+    class _RecordingSemaphore:
+        """A fake semaphore (not real Redis -- that's exhaustively proven for real
+        in `test_semaphore_integration.py`) that records acquire/release/reconcile
+        calls, so this test's scope stays on composing the real simulator's 429 +
+        real Postgres's `count_active_jobs` + the release NOTIFY."""
+
+        def __init__(self) -> None:
+            self.released_for: list[str] = []
+            self.reconciled_with: int | None = None
+
+        async def acquire(self, user_id: str) -> bool:
+            return True
+
+        async def release(self, user_id: str) -> None:
+            self.released_for.append(user_id)
+
+        async def reconcile_from_active_count(self, count: int) -> None:
+            self.reconciled_with = count
+
+    semaphore = _RecordingSemaphore()
+
+    rig = make_rig()
+    async with rig.client:
+        faulty_client = make_sim_client(rig.app)
+        faulty_client.headers[FAULT_HEADER] = Fault.RATE_LIMIT_429.value
+        async with faulty_client:
+            client = HttpGenerationClient(settings, faulty_client)
+
+            notifier_conn = await asyncpg.connect(
+                _ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS
+            )
+            listener_conn = await asyncpg.connect(
+                _ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS
+            )
+            received: list[str] = []
+            woke = asyncio.Event()
+
+            def _on_notify(
+                connection: object, pid: int, channel: str, payload: str
+            ) -> None:
+                received.append(payload)
+                woke.set()
+
+            try:
+                await listener_conn.add_listener(
+                    settings.semaphore_release_channel, _on_notify
+                )
+
+                async def _notify_release(job_id: str) -> None:
+                    await notifier_conn.execute(
+                        "SELECT pg_notify($1, $2)",
+                        settings.semaphore_release_channel,
+                        job_id,
+                    )
+
+                before = datetime.now(timezone.utc)
+                async with sessionmaker() as session:
+                    job = await claim_next_job(session)
+                    assert job is not None
+
+                    async def _count_active() -> int:
+                        return await count_active_jobs(session)
+
+                    handled = await dispatch_claimed_job(
+                        job,
+                        semaphore=semaphore,  # type: ignore[arg-type]
+                        client=client,
+                        settings=settings,
+                        count_active_jobs=_count_active,
+                        notify_release=_notify_release,
+                    )
+                    await session.commit()
+
+                assert handled is True
+                assert job.state == JOB_STATE_QUEUED  # requeued, not FAILED
+                assert job.available_at >= before + timedelta(seconds=30)
+
+                # Committed for real -- a fresh read agrees.
+                row = await conn.fetchrow(
+                    "SELECT state FROM jobs WHERE job_id = $1",
+                    f"{_TEST_JOB_PREFIX}real-429",
+                )
+                assert row is not None
+                assert row["state"] == "QUEUED"
+
+                assert semaphore.released_for == [job.user_id]
+                # Postgres truth right after the requeue: this job (already QUEUED
+                # again) is the only row, so the active-state count is 0.
+                assert semaphore.reconciled_with == 0
+
+                try:
+                    await asyncio.wait_for(woke.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pytest.fail("listener did not wake within 5s of the release NOTIFY")
+                assert received == [f"{_TEST_JOB_PREFIX}real-429"]
+            finally:
+                await listener_conn.remove_listener(
+                    settings.semaphore_release_channel, _on_notify
+                )
+                await listener_conn.close()
+                await notifier_conn.close()
