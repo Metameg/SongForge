@@ -46,6 +46,38 @@ radio_now_playing_source_total = Counter(
     registry=REGISTRY,
 )
 
+# ── Generation job queue (issue #12) ─────────────────────────────────────────────
+jobs_created_total = Counter(
+    "songforge_jobs_created_total",
+    "Generation jobs persisted as QUEUED via POST /create.",
+    registry=REGISTRY,
+)
+
+jobs_dispatched_total = Counter(
+    "songforge_jobs_dispatched_total",
+    "Jobs successfully submitted to the generation API (state -> WAITING_FOR_WEBHOOK).",
+    registry=REGISTRY,
+)
+
+jobs_failed_total = Counter(
+    "songforge_jobs_failed_total",
+    "Jobs marked FAILED after a terminal (non-429) rejection from the generation API.",
+    registry=REGISTRY,
+)
+
+jobs_requeued_total = Counter(
+    "songforge_jobs_requeued_total",
+    "Jobs requeued to QUEUED after a 429 or a transient (5xx/timeout) failure.",
+    labelnames=("reason",),
+    registry=REGISTRY,
+)
+
+semaphore_acquire_denied_total = Counter(
+    "songforge_semaphore_acquire_denied_total",
+    "Generation semaphore acquires denied because the global or per-user cap was full.",
+    registry=REGISTRY,
+)
+
 
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.

@@ -26,6 +26,10 @@ x-backend-env: &backend-env
   MUSICGPT_BASE_URL: ${MUSICGPT_BASE_URL:-http://simulator:8080}
   MUSICGPT_API_KEY: ${MUSICGPT_API_KEY:-}
   ENFORCE_RATE_LIMITS: ${ENFORCE_RATE_LIMITS:-true}
+  # Issue #12: signed-cookie identity + job-queue dispatch. SESSION_SECRET MUST be
+  # overridden in prod (see .env.example) -- the dev-insecure default is fine locally.
+  SESSION_SECRET: ${SESSION_SECRET:-dev-insecure-change-me}
+  MUSICGPT_WEBHOOK_URL: ${MUSICGPT_WEBHOOK_URL:-http://web:8000/api/generation/webhook}
 
 x-backend-build: &backend-build
   build:

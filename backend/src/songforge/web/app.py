@@ -15,7 +15,7 @@ from songforge.logging_setup import configure_logging, get_logger
 from songforge.metrics import render_latest
 from songforge.radio.pointer_cache import PointerCache
 from songforge.web.middleware import CorrelationIdMiddleware, MetricsMiddleware
-from songforge.web.routes import health, now_playing
+from songforge.web.routes import create, health, now_playing
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -42,6 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(now_playing.router)
+    app.include_router(create.router)
     if settings.metrics_enabled:
         app.add_api_route(
             "/metrics", render_latest, include_in_schema=False, tags=["observability"]
