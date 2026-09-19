@@ -108,6 +108,22 @@ async def test_release_floors_at_zero() -> None:
     assert backend.get(user_key(settings, "user-with-no-prior-acquire")) == 0
 
 
+async def test_double_release_after_a_single_acquire_floors_at_zero_not_negative() -> None:
+    """A second release with no matching second acquire (e.g. a dispatch bug calling
+    release twice on one job) must never take a counter negative -- a negative counter
+    would silently raise effective capacity above the configured cap."""
+    settings = _settings(global_generation_concurrency=5, per_user_concurrent_jobs=5)
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")
+
+    await sem.release("user-a")
+    await sem.release("user-a")  # double release
+
+    assert backend.get(global_key(settings)) == 0
+    assert backend.get(user_key(settings, "user-a")) == 0
+
+
 async def test_reconcile_sets_the_global_counter_from_postgres_truth() -> None:
     settings = _settings(global_generation_concurrency=5, per_user_concurrent_jobs=5)
     backend = _InMemorySemaphoreBackend()
@@ -117,6 +133,23 @@ async def test_reconcile_sets_the_global_counter_from_postgres_truth() -> None:
     await sem.reconcile_from_active_count(3)
 
     assert backend.get(global_key(settings)) == 3
+
+
+async def test_reconcile_corrects_the_counter_both_upward_and_downward() -> None:
+    """The 429 path's reconcile must be able to correct drift in either direction --
+    Postgres truth (a fresh active-row count) might be higher OR lower than the Redis
+    counter, depending on what drifted (e.g. a crashed dispatcher that never released,
+    vs. a released slot that never got reflected)."""
+    settings = _settings(global_generation_concurrency=10, per_user_concurrent_jobs=10)
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")  # global counter now 1
+
+    await sem.reconcile_from_active_count(6)  # correct upward
+    assert backend.get(global_key(settings)) == 6
+
+    await sem.reconcile_from_active_count(2)  # correct downward
+    assert backend.get(global_key(settings)) == 2
 
 
 async def test_concurrent_acquires_never_exceed_the_global_cap() -> None:

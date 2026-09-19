@@ -108,3 +108,95 @@ async def test_release_then_reconcile_against_real_redis(redis) -> None:  # type
 
     await sem.reconcile_from_active_count(0)
     assert await redis.get(global_key(settings)) == "0"
+
+
+async def test_double_release_floors_at_zero_against_real_redis(redis) -> None:  # type: ignore[no-untyped-def]
+    """`tests/test_semaphore.py` proves this against the in-memory fake; this proves
+    the real Lua `_DECREMENT_LUA` script itself floors at zero -- a plain `DECR` would
+    happily go negative, silently raising effective capacity above the cap."""
+    from songforge.config import Settings
+    from songforge.jobs.semaphore import (
+        RedisSemaphore,
+        RedisSemaphoreBackend,
+        global_key,
+        user_key,
+    )
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1:1/songforge",
+            "REDIS_URL": _TEST_REDIS_URL,
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+            "GLOBAL_GENERATION_CONCURRENCY": "5",
+            "PER_USER_CONCURRENT_JOBS": "5",
+        }
+    )
+    sem = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
+    await sem.acquire("user-a")
+
+    await sem.release("user-a")
+    await sem.release("user-a")  # double release
+
+    assert await redis.get(global_key(settings)) == "0"
+    assert await redis.get(user_key(settings, "user-a")) == "0"
+
+
+async def test_reconcile_corrects_upward_and_downward_against_real_redis(redis) -> None:  # type: ignore[no-untyped-def]
+    from songforge.config import Settings
+    from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, global_key
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1:1/songforge",
+            "REDIS_URL": _TEST_REDIS_URL,
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+            "GLOBAL_GENERATION_CONCURRENCY": "10",
+            "PER_USER_CONCURRENT_JOBS": "10",
+        }
+    )
+    sem = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
+    await sem.acquire("user-a")  # counter now 1
+
+    await sem.reconcile_from_active_count(7)
+    assert await redis.get(global_key(settings)) == "7"
+
+    await sem.reconcile_from_active_count(3)
+    assert await redis.get(global_key(settings)) == "3"
+
+
+async def test_failed_per_user_acquire_does_not_leak_a_global_slot_against_real_redis(
+    redis,  # type: ignore[no-untyped-def]
+) -> None:
+    """`tests/test_semaphore.py` proves the pairing/rollback logic against the fake;
+    this proves the real Lua-scripted backend genuinely leaves the global counter
+    untouched (not just "eventually consistent") when the paired per-user leg is
+    denied."""
+    from songforge.config import Settings
+    from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, global_key
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1:1/songforge",
+            "REDIS_URL": _TEST_REDIS_URL,
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+            "GLOBAL_GENERATION_CONCURRENCY": "10",
+            "PER_USER_CONCURRENT_JOBS": "1",
+        }
+    )
+    sem = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
+    assert await sem.acquire("user-a") is True  # consumes user-a's only slot
+    global_after_first = await redis.get(global_key(settings))
+
+    blocked = await sem.acquire("user-a")  # per-user cap (1) denies this one
+
+    assert blocked is False
+    assert await redis.get(global_key(settings)) == global_after_first  # not leaked
