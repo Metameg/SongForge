@@ -100,3 +100,37 @@ export function computeExpectedOffsetSeconds(
 ): number {
   return computeOffsetSeconds(correctedServerNowMs(clientNowMs, skewMs), startedAtMs);
 }
+
+/**
+ * Issue #10 (SSE push + gapless transitions): two new pure decisions `Player.tsx` needs
+ * now that updates arrive by push instead of poll.
+ */
+
+/**
+ * Whether an incoming `/events` pointer is a genuine song change (re-anchor the
+ * `<audio>` element) rather than a heartbeat re-broadcast of the same song.
+ *
+ * Every `/events` frame — the ~30s heartbeat re-emit included — is `song-change`
+ * shaped; only a `playback_id` change means the station actually advanced. The very
+ * first pointer (no previous `playback_id` yet, `previous === null`) always counts as a
+ * change, since there is nothing to compare against.
+ */
+export function shouldReanchorOnPointer(
+  previousPlaybackId: string | null,
+  nextPlaybackId: string,
+): boolean {
+  return previousPlaybackId === null || previousPlaybackId !== nextPlaybackId;
+}
+
+/** Which of the two gapless `<audio>` buffers ("a"/"b") a preload slot names. */
+export type PreloadSlot = "a" | "b";
+
+/**
+ * The other buffer slot — a plain A/B toggle for the gapless dual-`<audio>` swap
+ * (criterion #3). Not a next-song lookahead: the SSE push itself carries the real
+ * next-song data at the boundary, this just tracks which DOM element is "current" vs.
+ * "preloading".
+ */
+export function nextPreloadSlot(current: PreloadSlot): PreloadSlot {
+  return current === "a" ? "b" : "a";
+}
