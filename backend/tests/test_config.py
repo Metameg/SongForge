@@ -68,6 +68,83 @@ def test_missing_required_field_raises() -> None:
         Settings(_env=env)
 
 
+def test_identity_and_job_queue_tunables_have_documented_defaults() -> None:
+    """Issue #12: single config source for the identity cookie, prompt validation,
+    semaphore keys, LISTEN/NOTIFY channel names, and the dispatch poll/backoff knobs
+    (`.orchestrator/CONTEXT.md` "New config tunables")."""
+    settings = Settings(_env=_base_env())
+    assert settings.session_secret == "dev-insecure-change-me"
+    assert settings.identity_cookie_name == "sf_uid"
+    assert settings.identity_cookie_max_age_seconds == 60 * 60 * 24 * 365
+    assert settings.prompt_max_length == 2000
+    assert settings.lyrics_max_length == 5000
+    assert settings.musicgpt_webhook_url == "http://web:8000/api/generation/webhook"
+    assert settings.semaphore_global_key == "sem:gen:global"
+    assert settings.semaphore_user_key_prefix == "sem:gen:user:"
+    assert settings.jobs_new_channel == "new_job"
+    assert settings.semaphore_release_channel == "sem_release"
+    assert settings.dispatch_poll_backstop_seconds == 5.0
+    assert settings.dispatch_requeue_backoff_seconds == 5.0
+
+
+def test_identity_and_job_queue_tunables_override_from_env() -> None:
+    settings = Settings(
+        _env={
+            **_base_env(),
+            "SESSION_SECRET": "prod-secret",
+            "IDENTITY_COOKIE_NAME": "uid",
+            "IDENTITY_COOKIE_MAX_AGE_SECONDS": "3600",
+            "PROMPT_MAX_LENGTH": "500",
+            "LYRICS_MAX_LENGTH": "1500",
+            "MUSICGPT_WEBHOOK_URL": "http://web:9000/hook",
+            "SEMAPHORE_GLOBAL_KEY": "sem:g",
+            "SEMAPHORE_USER_KEY_PREFIX": "sem:u:",
+            "JOBS_NEW_CHANNEL": "nj",
+            "SEMAPHORE_RELEASE_CHANNEL": "sr",
+            "DISPATCH_POLL_BACKSTOP_SECONDS": "1.5",
+            "DISPATCH_REQUEUE_BACKOFF_SECONDS": "10",
+        }
+    )
+    assert settings.session_secret == "prod-secret"
+    assert settings.identity_cookie_name == "uid"
+    assert settings.identity_cookie_max_age_seconds == 3600
+    assert settings.prompt_max_length == 500
+    assert settings.lyrics_max_length == 1500
+    assert settings.musicgpt_webhook_url == "http://web:9000/hook"
+    assert settings.semaphore_global_key == "sem:g"
+    assert settings.semaphore_user_key_prefix == "sem:u:"
+    assert settings.jobs_new_channel == "nj"
+    assert settings.semaphore_release_channel == "sr"
+    assert settings.dispatch_poll_backstop_seconds == 1.5
+    assert settings.dispatch_requeue_backoff_seconds == 10.0
+
+
+def test_prod_with_default_session_secret_raises() -> None:
+    """Security report MEDIUM finding: a forgotten SESSION_SECRET override in a prod
+    deploy leaves the identity HMAC key a public constant (anyone can forge any
+    user's cookie). Must fail closed at Settings construction, not silently boot."""
+    with pytest.raises(Exception, match="session_secret"):
+        Settings(_env={**_base_env(), "ENVIRONMENT": "prod"})
+
+
+def test_local_with_default_session_secret_is_fine() -> None:
+    """The documented dev default must keep working for local/staging/tests."""
+    settings = Settings(_env={**_base_env(), "ENVIRONMENT": "local"})
+    assert settings.session_secret == "dev-insecure-change-me"
+
+
+def test_staging_with_default_session_secret_is_fine() -> None:
+    settings = Settings(_env={**_base_env(), "ENVIRONMENT": "staging"})
+    assert settings.session_secret == "dev-insecure-change-me"
+
+
+def test_prod_with_a_real_session_secret_is_fine() -> None:
+    settings = Settings(
+        _env={**_base_env(), "ENVIRONMENT": "prod", "SESSION_SECRET": "a-real-prod-secret"}
+    )
+    assert settings.session_secret == "a-real-prod-secret"
+
+
 def test_musicgpt_base_url_is_swappable() -> None:
     """Simulator swapped in by base-url config (spec #70)."""
     settings = Settings(_env={**_base_env(), "MUSICGPT_BASE_URL": "http://simulator:8080"})

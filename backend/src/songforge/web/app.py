@@ -37,7 +37,8 @@ from songforge.radio.pointer_broadcaster import PointerBroadcaster
 from songforge.radio.pointer_cache import PointerCache
 from songforge.redis_client import get_redis
 from songforge.web.middleware import CorrelationIdMiddleware, MetricsMiddleware
-from songforge.web.routes import events, health, now_playing
+from songforge.web.routes import create, events, health, now_playing
+
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
 
     app.include_router(health.router)
     app.include_router(now_playing.router)
+    app.include_router(create.router)
     app.include_router(events.router)
     if settings.metrics_enabled:
         app.add_api_route(

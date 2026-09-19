@@ -15,10 +15,16 @@ import threading
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "staging", "prod"]
+
+# The documented dev-safe placeholder (see `session_secret` below). Fine for
+# local/staging/tests; must never reach a prod deploy (security report MEDIUM
+# finding: an unenforced default silently lets a client forge any identity's
+# cookie in prod).
+_DEFAULT_SESSION_SECRET = "dev-insecure-change-me"
 
 # Serializes the environment swap in `Settings(_env=...)` so concurrent construction
 # (e.g. parallel test workers) cannot race on the process-wide os.environ.
@@ -106,6 +112,40 @@ class Settings(BaseSettings):
     # request storm within the window costs 0 datastore reads.
     radio_pointer_cache_ttl_seconds: float = 1.0
 
+    # ── Identity (issue #12: signed-cookie anon identity, criterion #1) ─────
+    # HMAC key signing the identity cookie (stdlib hmac; see web/identity.py). MUST be
+    # overridden in prod -- a default/leaked secret lets a client forge another
+    # identity's cookie and, e.g., exhaust its rate-limit quota or read its jobs.
+    session_secret: str = _DEFAULT_SESSION_SECRET
+    identity_cookie_name: str = "sf_uid"
+    identity_cookie_max_age_seconds: int = 60 * 60 * 24 * 365  # ~1 year
+
+    # ── Prompt validation (issue #12, criterion #1) ──────────────────────────
+    prompt_max_length: int = 2000
+    # `lyrics` is the same attacker-controlled, unauthenticated-request field as
+    # `prompt` (security report MEDIUM finding) -- capped the same way so it can't
+    # be left as an unbounded resource-abuse vector (oversized DB rows / oversized
+    # outbound generation-API bodies) just because `prompt`'s cap doesn't cover it.
+    lyrics_max_length: int = 5000
+
+    # ── Generation job pipeline (issue #12) ───────────────────────────────────
+    # Callback base URL sent as `webhook_url` on the generation API's create call; the
+    # receiving handler is a later issue (see .orchestrator/CONTEXT.md scope) -- #12
+    # only sends a plausible, config-driven URL.
+    musicgpt_webhook_url: str = "http://web:8000/api/generation/webhook"
+    # Redis semaphore keys (criterion #3: global + per-user in-flight generation caps).
+    semaphore_global_key: str = "sem:gen:global"
+    semaphore_user_key_prefix: str = "sem:gen:user:"
+    # Postgres LISTEN/NOTIFY channel names (criterion #5): new-job wakes dispatch
+    # without polling; semaphore-release wakes a dispatcher waiting on a full cap.
+    jobs_new_channel: str = "new_job"
+    semaphore_release_channel: str = "sem_release"
+    # Slow-poll backstop for the dispatch loop, in case a NOTIFY is missed (e.g. a
+    # dispatcher was down when it fired).
+    dispatch_poll_backstop_seconds: float = 5.0
+    # Backoff applied to a job's `available_at` on a 429/5xx/timeout requeue, so
+    # dispatch doesn't hot-loop re-claiming the same job immediately.
+    dispatch_requeue_backoff_seconds: float = 5.0
     # ── SSE + pub/sub (issue #10: push + gapless transitions) ───────────────
     # Redis pub/sub channel the coordinator publishes the resolved pointer to on
     # every genuine init/advance, and that each app instance's `PointerBroadcaster`
@@ -138,6 +178,21 @@ class Settings(BaseSettings):
             finally:
                 os.environ.clear()
                 os.environ.update(saved)
+
+    @model_validator(mode="after")
+    def _reject_default_session_secret_in_prod(self) -> Settings:
+        """Fail-closed (security report MEDIUM finding): a default/placeholder
+        `session_secret` is fine for local/staging (and every test in this repo,
+        which never sets `ENVIRONMENT=prod`), but must never silently reach a prod
+        deploy -- it's a public constant, so anyone could forge any identity's
+        signed cookie. Raising here turns a forgotten override into a boot-time
+        failure instead of a silent vulnerability."""
+        if self.environment == "prod" and self.session_secret == _DEFAULT_SESSION_SECRET:
+            raise ValueError(
+                "session_secret is still the default placeholder in a prod "
+                "environment -- set a real SESSION_SECRET before deploying to prod"
+            )
+        return self
 
     @property
     def sync_database_url(self) -> str:

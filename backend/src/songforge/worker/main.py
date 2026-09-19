@@ -13,6 +13,7 @@ import signal
 
 from songforge.config import Settings, get_settings
 from songforge.logging_setup import configure_logging, get_logger
+from songforge.worker.dispatch import run_dispatch
 from songforge.worker.health import touch_heartbeat
 from songforge.worker.radio_coordinator import run_radio_coordinator
 
@@ -39,9 +40,11 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
       * heartbeat — liveness file the compose healthcheck reads.
       * radio     — single-leader coordinator (pg advisory lock) owning the advance
         timer (issue #8, criterion #2).
+      * dispatch  — claim QUEUED jobs (FOR UPDATE SKIP LOCKED) + Redis semaphore,
+        woken by LISTEN/NOTIFY on the new-job and semaphore-release channels
+        (issue #12, criteria #2/#3/#5).
 
     Later tickets add, concurrently supervised alongside these:
-      * dispatch  — claim QUEUED jobs (FOR UPDATE SKIP LOCKED) + Redis semaphore
       * ingest    — download finished audio, upload to R2, enqueue the song
       * watchdog  — leaderless recovery sweep; every side-effect is row-claimed first
     """
@@ -49,6 +52,7 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
     await asyncio.gather(
         _heartbeat_loop(settings, stop),
         run_radio_coordinator(settings, stop),
+        run_dispatch(settings, stop),
     )
     log.info("worker_stopped")
 
