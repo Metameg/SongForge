@@ -2,6 +2,17 @@
 `jobs/generation_client.HttpGenerationClient.create` against `httpx.MockTransport` --
 no real network, matching the repo's "all tests mock external services" convention.
 Field shape mirrors the issue #11 simulator's contract (`simulator/schemas.py`).
+
+The `httpx.MockTransport` tests above hand-craft the JSON response, so they can't
+catch drift between what `HttpGenerationClient.create` parses and what the simulator
+(the actual dispatch target, `simulator/routes/create.py` + `simulator/schemas.py`)
+really returns -- a hand-authored fixture can invent a shape the real endpoint would
+never produce and the test would stay green regardless (data-contract audit, issue
+#12 phase 4). The tests below drive the REAL simulator ASGI app (via
+`tests/simulator_helpers.make_rig`/`make_sim_client`, `httpx.ASGITransport` -- no real
+network) through the same `HttpGenerationClient.create` production code path,
+including the real 429 fault (`X-Sim-Fault: rate-limit-429`), so fixture drift on
+either side can't hide a break.
 """
 
 from __future__ import annotations
@@ -16,6 +27,8 @@ from songforge.jobs.generation_client import (
     GenerationTransientError,
     HttpGenerationClient,
 )
+from songforge.simulator.faults import FAULT_HEADER, Fault
+from tests.simulator_helpers import DEFAULT_BODY, make_rig, make_sim_client
 
 
 def _settings() -> Settings:
@@ -123,3 +136,52 @@ async def test_create_sends_empty_string_lyrics_when_none() -> None:
     assert captured["lyrics"] == ""
     assert captured["prompt"] == "p"
     assert captured["webhook_url"] == "http://web:8000/webhook"
+
+
+# ── Against the REAL simulator app (data-contract audit, issue #12 phase 4) ───────
+
+
+async def test_create_against_real_simulator_returns_handles_matching_the_contract() -> None:
+    """Drives the real `POST /api/public/v1/MusicAI` (simulator/routes/create.py),
+    not a hand-crafted MockTransport dict -- proves `HttpGenerationClient.create`'s
+    parsing (`data["task_id"]` etc., `jobs/generation_client.py`) actually matches
+    the real `CreateResponse` the simulator emits (`simulator/schemas.py`), including
+    types (`eta` int, `credit_estimate` float)."""
+    rig = make_rig()
+    async with rig.client:
+        client = HttpGenerationClient(_settings(), rig.client)
+
+        handles = await client.create(
+            prompt=str(DEFAULT_BODY["prompt"]),
+            lyrics=None,
+            webhook_url=str(DEFAULT_BODY["webhook_url"]),
+        )
+
+    assert handles.task_id
+    assert handles.conversion_id_1
+    assert handles.conversion_id_2
+    assert handles.conversion_id_1 != handles.conversion_id_2
+    assert isinstance(handles.eta, int)
+    assert isinstance(handles.credit_estimate, float)
+
+
+async def test_create_against_real_simulator_raises_rate_limited_on_real_429() -> None:
+    """The simulator's `X-Sim-Fault: rate-limit-429` (`simulator/faults.py`) is the
+    real 429 backstop (PRD #18) this client must map to `GenerationRateLimited` --
+    not a hand-crafted `httpx.Response(429, ...)` standing in for it."""
+    rig = make_rig()
+    async with rig.client:
+        # A fresh client bound to the same real simulator app, with the fault header
+        # set at the client level so it rides along on every request `create()`
+        # makes -- `HttpGenerationClient.create`'s signature has no headers param
+        # (nor should it; fault injection is a test-only concern of the simulator).
+        faulty_client = make_sim_client(rig.app)
+        faulty_client.headers[FAULT_HEADER] = Fault.RATE_LIMIT_429.value
+        async with faulty_client:
+            client = HttpGenerationClient(_settings(), faulty_client)
+            with pytest.raises(GenerationRateLimited):
+                await client.create(
+                    prompt=str(DEFAULT_BODY["prompt"]),
+                    lyrics=None,
+                    webhook_url=str(DEFAULT_BODY["webhook_url"]),
+                )
