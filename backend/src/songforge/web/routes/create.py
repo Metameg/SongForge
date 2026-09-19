@@ -91,7 +91,12 @@ def _read_identity(request: Request) -> str | None:
 
 
 def _set_identity_cookie(response: Response, user_id: str) -> None:
-    """Mint the signed cookie for a freshly-minted identity (criterion #1)."""
+    """Mint the signed cookie for a freshly-minted identity (criterion #1).
+
+    `secure` is config-driven off `environment` (security report MEDIUM finding):
+    this cookie is the sole identity/auth token, so outside local dev (where plain
+    HTTP is expected) it must never be sent over an unencrypted connection.
+    """
     settings = get_settings()
     response.set_cookie(
         settings.identity_cookie_name,
@@ -99,6 +104,7 @@ def _set_identity_cookie(response: Response, user_id: str) -> None:
         max_age=settings.identity_cookie_max_age_seconds,
         httponly=True,
         samesite="lax",
+        secure=settings.environment != "local",
     )
 
 

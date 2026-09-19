@@ -23,6 +23,7 @@ each test (autouse fixture) so it never leaks into other test modules -- in part
 from __future__ import annotations
 
 import itertools
+import os
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -31,11 +32,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from songforge.config import get_settings
+from songforge.config import Settings, get_settings
 from songforge.jobs import generation_client
 from songforge.models import JOB_STATE_QUEUED, Base, Job
 from songforge.web.app import create_app
 from songforge.web.identity import mint, sign, unsign
+from songforge.web.routes import create as create_route
 from songforge.web.routes.create import get_notify_dependency, get_session
 
 _seq_counter = itertools.count(1)
@@ -282,3 +284,49 @@ async def test_create_accepts_lyrics_at_the_max_length(
     rows = await _job_rows(sessionmaker)
     assert len(rows) == 1
     assert rows[0].lyrics == max_lyrics
+
+
+# ── Identity cookie `Secure` flag (security report MEDIUM finding) ────────────────
+#
+# The identity cookie is the sole identity/auth token; it must carry `Secure`
+# outside local dev (HTTP is expected/allowed only in local dev), config-driven off
+# `settings.environment`.
+
+
+async def test_identity_cookie_lacks_secure_flag_in_local(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+
+    resp = client.post("/create", json={"prompt": "a song"})
+
+    assert resp.status_code == 200
+    set_cookie_header = resp.headers.get("set-cookie", "")
+    assert "sf_uid" in set_cookie_header
+    assert "secure" not in set_cookie_header.lower()
+
+
+@pytest.mark.parametrize("environment", ["staging", "prod"])
+async def test_identity_cookie_has_secure_flag_outside_local(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+) -> None:
+    # A real (non-placeholder) secret so `environment == "prod"` doesn't trip the
+    # fail-closed guard added for the config MEDIUM finding -- unrelated to what
+    # this test is proving.
+    non_local_settings = Settings(
+        _env={**os.environ, "ENVIRONMENT": environment, "SESSION_SECRET": "a-real-secret"}
+    )
+    monkeypatch.setattr(create_route, "get_settings", lambda: non_local_settings)
+
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+
+    resp = client.post("/create", json={"prompt": "a song"})
+
+    assert resp.status_code == 200
+    set_cookie_header = resp.headers.get("set-cookie", "")
+    assert "sf_uid" in set_cookie_header
+    assert "secure" in set_cookie_header.lower()
