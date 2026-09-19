@@ -119,6 +119,32 @@ def test_identity_and_job_queue_tunables_override_from_env() -> None:
     assert settings.dispatch_requeue_backoff_seconds == 10.0
 
 
+def test_prod_with_default_session_secret_raises() -> None:
+    """Security report MEDIUM finding: a forgotten SESSION_SECRET override in a prod
+    deploy leaves the identity HMAC key a public constant (anyone can forge any
+    user's cookie). Must fail closed at Settings construction, not silently boot."""
+    with pytest.raises(Exception, match="session_secret"):
+        Settings(_env={**_base_env(), "ENVIRONMENT": "prod"})
+
+
+def test_local_with_default_session_secret_is_fine() -> None:
+    """The documented dev default must keep working for local/staging/tests."""
+    settings = Settings(_env={**_base_env(), "ENVIRONMENT": "local"})
+    assert settings.session_secret == "dev-insecure-change-me"
+
+
+def test_staging_with_default_session_secret_is_fine() -> None:
+    settings = Settings(_env={**_base_env(), "ENVIRONMENT": "staging"})
+    assert settings.session_secret == "dev-insecure-change-me"
+
+
+def test_prod_with_a_real_session_secret_is_fine() -> None:
+    settings = Settings(
+        _env={**_base_env(), "ENVIRONMENT": "prod", "SESSION_SECRET": "a-real-prod-secret"}
+    )
+    assert settings.session_secret == "a-real-prod-secret"
+
+
 def test_musicgpt_base_url_is_swappable() -> None:
     """Simulator swapped in by base-url config (spec #70)."""
     settings = Settings(_env={**_base_env(), "MUSICGPT_BASE_URL": "http://simulator:8080"})

@@ -15,10 +15,16 @@ import threading
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["local", "staging", "prod"]
+
+# The documented dev-safe placeholder (see `session_secret` below). Fine for
+# local/staging/tests; must never reach a prod deploy (security report MEDIUM
+# finding: an unenforced default silently lets a client forge any identity's
+# cookie in prod).
+_DEFAULT_SESSION_SECRET = "dev-insecure-change-me"
 
 # Serializes the environment swap in `Settings(_env=...)` so concurrent construction
 # (e.g. parallel test workers) cannot race on the process-wide os.environ.
@@ -110,7 +116,7 @@ class Settings(BaseSettings):
     # HMAC key signing the identity cookie (stdlib hmac; see web/identity.py). MUST be
     # overridden in prod -- a default/leaked secret lets a client forge another
     # identity's cookie and, e.g., exhaust its rate-limit quota or read its jobs.
-    session_secret: str = "dev-insecure-change-me"
+    session_secret: str = _DEFAULT_SESSION_SECRET
     identity_cookie_name: str = "sf_uid"
     identity_cookie_max_age_seconds: int = 60 * 60 * 24 * 365  # ~1 year
 
@@ -163,6 +169,21 @@ class Settings(BaseSettings):
             finally:
                 os.environ.clear()
                 os.environ.update(saved)
+
+    @model_validator(mode="after")
+    def _reject_default_session_secret_in_prod(self) -> Settings:
+        """Fail-closed (security report MEDIUM finding): a default/placeholder
+        `session_secret` is fine for local/staging (and every test in this repo,
+        which never sets `ENVIRONMENT=prod`), but must never silently reach a prod
+        deploy -- it's a public constant, so anyone could forge any identity's
+        signed cookie. Raising here turns a forgotten override into a boot-time
+        failure instead of a silent vulnerability."""
+        if self.environment == "prod" and self.session_secret == _DEFAULT_SESSION_SECRET:
+            raise ValueError(
+                "session_secret is still the default placeholder in a prod "
+                "environment -- set a real SESSION_SECRET before deploying to prod"
+            )
+        return self
 
     @property
     def sync_database_url(self) -> str:
