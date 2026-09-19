@@ -15,7 +15,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Identity,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Whether a song came from the curated static library or was user-generated. Stored as a
@@ -79,3 +90,101 @@ class RadioState(Base):
     )
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+# Generation job state machine (issue #12; PRD §Generation job pipeline):
+#
+#   QUEUED -> SUBMITTING -> WAITING_FOR_WEBHOOK -> INGEST_PENDING -> READY
+#                       \\_______________ FAILED ______________/
+#
+# Issue #12 only drives QUEUED -> SUBMITTING -> WAITING_FOR_WEBHOOK, plus requeue to
+# QUEUED (generation API 429 -- best-effort Redis semaphore backstopped by the API's
+# authoritative rate limit, see .orchestrator/CONTEXT.md "In-scope decision") and
+# straight to FAILED on a terminal 4xx. INGEST_PENDING/READY are later tickets; the
+# full enum is defined now for forward-compatibility so the column never needs a widen.
+JobState = Literal[
+    "QUEUED",
+    "SUBMITTING",
+    "WAITING_FOR_WEBHOOK",
+    "INGEST_PENDING",
+    "READY",
+    "FAILED",
+]
+JOB_STATE_QUEUED: JobState = "QUEUED"
+JOB_STATE_SUBMITTING: JobState = "SUBMITTING"
+JOB_STATE_WAITING_FOR_WEBHOOK: JobState = "WAITING_FOR_WEBHOOK"
+JOB_STATE_INGEST_PENDING: JobState = "INGEST_PENDING"
+JOB_STATE_READY: JobState = "READY"
+JOB_STATE_FAILED: JobState = "FAILED"
+
+# States that still hold a semaphore slot ("in-flight" against generation concurrency).
+# jobs/dispatch.py's 429 reconcile path counts exactly these rows to snap the Redis
+# global counter back to Postgres truth (see .orchestrator/CONTEXT.md "In-scope
+# decision"). QUEUED (not yet dispatched) and the terminal states (READY/FAILED) never
+# hold a slot.
+ACTIVE_JOB_STATES: tuple[JobState, ...] = (
+    JOB_STATE_SUBMITTING,
+    JOB_STATE_WAITING_FOR_WEBHOOK,
+    JOB_STATE_INGEST_PENDING,
+)
+
+
+class Job(Base):
+    """A generation job: one prompt submission through to a playable song (issue #12).
+
+    ``job_id`` is our own UUID hex string PK -- the row we can always find by handle.
+    ``seq`` is the separate FIFO ordering key dispatch claims by (``FOR UPDATE SKIP
+    LOCKED ORDER BY seq``, criterion #2): a Postgres ``Identity`` column so it is
+    populated server-side and strictly monotonic, backing the partial index
+    ``(seq) WHERE state='QUEUED'`` added in migration ``0003_jobs`` (an O(log n) claim
+    with no sort, rather than ``ORDER BY created_at``).
+
+    Unlike the rest of this module, ``seq`` is deliberately NOT portable to SQLite
+    ``create_all``: SQLite has no server-side generator for a non-PK identity column
+    (confirmed experimentally -- inserting a ``Job`` without an explicit ``seq`` raises
+    a NOT NULL violation on SQLite even though the identical insert works against real
+    Postgres). Edge tests that don't care about a genuine generated ``seq`` value
+    install a test-only ``before_insert`` shim (see ``tests/test_create_route.py``);
+    tests that must observe genuine Postgres-generated ordering
+    (``tests/test_jobs_queue_integration.py``) run against real Postgres, marked
+    ``@pytest.mark.integration``.
+    """
+
+    __tablename__ = "jobs"
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False, unique=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    lyrics: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[JobState] = mapped_column(
+        String(32), nullable=False, default=JOB_STATE_QUEUED
+    )
+
+    # External handles (nullable, filled after a successful submit -- criterion #4).
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    conversion_id_1: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    conversion_id_2: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    eta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    credit_estimate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Requeue/backoff bookkeeping: claim skips rows whose available_at is in the future
+    # (a 429/5xx/timeout requeue sets it ahead; see songforge.jobs.dispatch).
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    # The callback URL sent to the generation API at submit time (config-derived;
+    # the receiving webhook handler is a later issue -- see CONTEXT.md scope).
+    webhook_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
