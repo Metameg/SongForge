@@ -11,6 +11,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -75,6 +76,33 @@ jobs_requeued_total = Counter(
 semaphore_acquire_denied_total = Counter(
     "songforge_semaphore_acquire_denied_total",
     "Generation semaphore acquires denied because the global or per-user cap was full.",
+    registry=REGISTRY
+)
+# ── SSE + pub/sub (issue #10) — organized by load driver: listener count ────────
+#
+# The direct observable proof that listener count is decoupled from datastore load:
+# `sse_connected_listeners` grows with N connected clients while `radio_advances_total`
+# and the pointer-cache source counters above do not, because the fan-out happens
+# in-process against ONE Redis pub/sub subscription per app instance (see
+# `radio/pointer_broadcaster.py`).
+
+sse_connected_listeners = Gauge(
+    "songforge_sse_connected_listeners",
+    "SSE clients currently connected to this app instance's /events endpoint.",
+    registry=REGISTRY,
+)
+
+radio_pointer_events_published_total = Counter(
+    "songforge_radio_pointer_events_published_total",
+    "Pointer changes published to Redis pub/sub by the coordinator (successful publish only).",
+    registry=REGISTRY,
+)
+
+radio_pointer_events_relayed_total = Counter(
+    "songforge_radio_pointer_events_relayed_total",
+    "Pointer events relayed from the pub/sub subscription to a connected SSE client "
+    "(grows with listener count x pushes; the fan-out itself never touches Redis/Postgres "
+    "again per listener).",
     registry=REGISTRY,
 )
 

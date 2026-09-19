@@ -146,6 +146,15 @@ class Settings(BaseSettings):
     # Backoff applied to a job's `available_at` on a 429/5xx/timeout requeue, so
     # dispatch doesn't hot-loop re-claiming the same job immediately.
     dispatch_requeue_backoff_seconds: float = 5.0
+    # ── SSE + pub/sub (issue #10: push + gapless transitions) ───────────────
+    # Redis pub/sub channel the coordinator publishes the resolved pointer to on
+    # every genuine init/advance, and that each app instance's `PointerBroadcaster`
+    # subscribes to for its `/events` fan-out (criterion #2).
+    radio_pointer_channel: str = "radio:pointer:changed"
+    # How often `/events` re-emits the current pointer to each connected client with
+    # no new pub/sub message — covers a dropped pub/sub message where nobody
+    # disconnected, and gives a reconnecting client a bound on staleness (criterion #4).
+    sse_heartbeat_seconds: float = 30.0
 
     # ── Observability (always on, every environment; spec #77) ──────────────
     metrics_enabled: bool = True
