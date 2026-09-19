@@ -15,7 +15,15 @@ pointer view to the Redis pointer key (design D2) so the web tier can serve
 is wrapped in its own try/except: Postgres has already committed by that point, so a
 Redis outage must never turn a successful advance into a failed one.
 
-Issue #8, phase 3 (green) implementation. Issue #9 pointer-write addition.
+Issue #10 adds one more, in the same best-effort block: after the ``redis.set``, also
+``redis.publish`` the same resolved view to the pub/sub channel ``/events`` (the SSE
+endpoint) subscribes to (criterion #2), so a connected listener is pushed the change
+instead of waiting on a poll. Exactly mirrors the ``set`` contract -- a lost CAS race or
+a no-op initialize never publishes (nothing changed to announce), and a publish failure
+is caught and logged, never raised.
+
+Issue #8, phase 3 (green) implementation. Issue #9 pointer-write addition. Issue #10
+pub/sub publish addition.
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import get_settings
 from songforge.logging_setup import get_logger
-from songforge.metrics import radio_advances_total
+from songforge.metrics import radio_advances_total, radio_pointer_events_published_total
 from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState, Song, SOURCE_STATIC
 from songforge.radio.pointer_cache import PointerRecord
 from songforge.radio.selection import pick_static
@@ -50,14 +58,16 @@ async def _write_pointer_best_effort(
     ends_at: datetime,
     version: int,
 ) -> None:
-    """Best-effort write of the resolved pointer view to the Redis pointer key.
+    """Best-effort write + publish of the resolved pointer view.
 
     Builds the same denormalized shape the web tier serves (`PointerRecord`, design
-    D1) so a cold web instance can answer `/now-playing` with zero Postgres reads. Any
-    failure is logged and swallowed — Postgres has already committed by the time this
-    runs, so a Redis outage must never fail the caller's init/advance. The try/except
-    spans record construction too (not just `redis.set`), so even an unexpected error
-    building the view can never turn a committed advance into a failed one.
+    D1) so a cold web instance can answer `/now-playing` with zero Postgres reads, sets
+    it at the Redis pointer key (issue #9), then publishes the same payload to the
+    pub/sub channel `/events` relays (issue #10, criterion #2). Any failure is logged
+    and swallowed — Postgres has already committed by the time this runs, so a Redis
+    outage must never fail the caller's init/advance. The try/except spans record
+    construction too (not just the Redis calls), so even an unexpected error building
+    the view can never turn a committed advance into a failed one.
     """
     settings = get_settings()
     try:
@@ -75,7 +85,10 @@ async def _write_pointer_best_effort(
                 version=version,
             )
         )
-        await redis.set(settings.radio_pointer_redis_key, record.to_json())
+        payload = record.to_json()
+        await redis.set(settings.radio_pointer_redis_key, payload)
+        await redis.publish(settings.radio_pointer_channel, payload)
+        radio_pointer_events_published_total.inc()
     except Exception:
         log.warning("radio_pointer_write_failed", song_id=song.id, exc_info=True)
 
