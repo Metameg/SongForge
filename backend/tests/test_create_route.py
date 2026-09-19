@@ -35,7 +35,7 @@ from songforge.config import get_settings
 from songforge.jobs import generation_client
 from songforge.models import JOB_STATE_QUEUED, Base, Job
 from songforge.web.app import create_app
-from songforge.web.identity import mint, sign
+from songforge.web.identity import mint, sign, unsign
 from songforge.web.routes.create import get_notify_dependency, get_session
 
 _seq_counter = itertools.count(1)
@@ -147,6 +147,51 @@ async def test_create_with_valid_cookie_reuses_identity_without_cookie_churn(
     assert "sf_uid" not in resp.cookies  # no re-mint / cookie churn on a valid cookie
     rows = await _job_rows(sessionmaker)
     assert rows[0].user_id == existing_user_id
+
+
+async def test_create_with_tampered_cookie_is_rejected_and_remints_identity(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A tampered signature must be treated exactly like no cookie at all -- rejected,
+    not trusted, and a fresh identity minted with a freshly-signed cookie (criterion
+    #1's "reject-and-remint on bad signature"; the original user id must never leak
+    into the persisted job)."""
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+    original_user_id = mint()
+    signed = sign(original_user_id, secret=get_settings().session_secret)
+    flipped_last_char = "0" if signed[-1] != "0" else "1"
+    tampered = signed[:-1] + flipped_last_char
+    client.cookies.set("sf_uid", tampered)
+
+    resp = client.post("/create", json={"prompt": "a tampered-cookie song"})
+
+    assert resp.status_code == 200
+    assert "sf_uid" in resp.cookies  # re-minted -- the tampered cookie was not reused
+    rows = await _job_rows(sessionmaker)
+    assert rows[0].user_id != original_user_id
+    reminted = unsign(resp.cookies["sf_uid"], secret=get_settings().session_secret)
+    assert reminted == rows[0].user_id
+
+
+async def test_create_with_cookie_signed_by_a_different_secret_is_rejected(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A cookie signed by an old/wrong secret (e.g. a rotated `session_secret`, or a
+    forgery attempt) must be rejected exactly like a tampered one, not trusted as that
+    identity."""
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+    original_user_id = mint()
+    signed_wrong_secret = sign(original_user_id, secret="a-completely-different-secret")
+    client.cookies.set("sf_uid", signed_wrong_secret)
+
+    resp = client.post("/create", json={"prompt": "a wrong-secret cookie song"})
+
+    assert resp.status_code == 200
+    assert "sf_uid" in resp.cookies  # re-minted
+    rows = await _job_rows(sessionmaker)
+    assert rows[0].user_id != original_user_id
 
 
 async def test_create_never_calls_the_generation_client(

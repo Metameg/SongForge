@@ -196,3 +196,61 @@ async def test_create_notifies_the_new_job_channel_for_real(_clean_jobs: None) -
     finally:
         await listener_conn.close()
         await engine.dispose()
+
+
+async def test_concurrent_creates_from_the_same_identity_each_persist_a_distinct_job(
+    _clean_jobs: None,
+) -> None:
+    """Multiple `POST /create` calls sharing one identity cookie (e.g. a user with two
+    tabs open) must never collide -- each persists its own row with the real,
+    Postgres-generated `seq` (an `Identity` column, criterion #2's FIFO ordering key),
+    never overwriting or double-assigning another concurrent create's row. Uses real
+    concurrency (`asyncio.gather`) against real Postgres, not sequential calls, so this
+    exercises genuine concurrent `Identity` generation, not just distinct calls."""
+    import httpx
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from songforge.models import Job
+    from songforge.web.app import create_app
+    from songforge.web.identity import mint, sign
+    from songforge.web.routes import create as create_module
+
+    settings = _settings()
+    app = create_app(settings)
+    engine = create_async_engine(settings.database_url)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def _get_session():  # type: ignore[no-untyped-def]
+        async with sessionmaker() as session:
+            yield session
+
+    app.dependency_overrides[create_module.get_session] = _get_session
+
+    user_id = mint()
+    signed = sign(user_id, secret=settings.session_secret)
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+
+        async def _create() -> httpx.Response:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                c.cookies.set(settings.identity_cookie_name, signed)
+                return await c.post("/create", json={"prompt": "a concurrent-create song"})
+
+        responses = await asyncio.gather(*(_create() for _ in range(5)))
+
+        assert all(r.status_code == 200 for r in responses)
+        job_ids = [r.json()["job_id"] for r in responses]
+        assert len(set(job_ids)) == 5  # every create persisted a distinct job
+
+        async with sessionmaker() as session:
+            rows = (
+                await session.scalars(select(Job).where(Job.job_id.in_(job_ids)))
+            ).all()
+        assert len(rows) == 5
+        assert all(row.user_id == user_id for row in rows)
+        seqs = {row.seq for row in rows}
+        assert len(seqs) == 5  # distinct, genuinely Postgres-generated `seq` per job
+    finally:
+        await engine.dispose()
