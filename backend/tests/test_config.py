@@ -77,6 +77,7 @@ def test_identity_and_job_queue_tunables_have_documented_defaults() -> None:
     assert settings.identity_cookie_name == "sf_uid"
     assert settings.identity_cookie_max_age_seconds == 60 * 60 * 24 * 365
     assert settings.prompt_max_length == 2000
+    assert settings.lyrics_max_length == 5000
     assert settings.musicgpt_webhook_url == "http://web:8000/api/generation/webhook"
     assert settings.semaphore_global_key == "sem:gen:global"
     assert settings.semaphore_user_key_prefix == "sem:gen:user:"
@@ -94,6 +95,7 @@ def test_identity_and_job_queue_tunables_override_from_env() -> None:
             "IDENTITY_COOKIE_NAME": "uid",
             "IDENTITY_COOKIE_MAX_AGE_SECONDS": "3600",
             "PROMPT_MAX_LENGTH": "500",
+            "LYRICS_MAX_LENGTH": "1500",
             "MUSICGPT_WEBHOOK_URL": "http://web:9000/hook",
             "SEMAPHORE_GLOBAL_KEY": "sem:g",
             "SEMAPHORE_USER_KEY_PREFIX": "sem:u:",
@@ -107,6 +109,7 @@ def test_identity_and_job_queue_tunables_override_from_env() -> None:
     assert settings.identity_cookie_name == "uid"
     assert settings.identity_cookie_max_age_seconds == 3600
     assert settings.prompt_max_length == 500
+    assert settings.lyrics_max_length == 1500
     assert settings.musicgpt_webhook_url == "http://web:9000/hook"
     assert settings.semaphore_global_key == "sem:g"
     assert settings.semaphore_user_key_prefix == "sem:u:"

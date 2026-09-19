@@ -115,6 +115,20 @@ def _validate_prompt(prompt: str) -> None:
         )
 
 
+def _validate_lyrics(lyrics: str | None) -> None:
+    """422 on oversized lyrics -- mirrors `_validate_prompt`'s length cap (security
+    report MEDIUM finding: `lyrics` is the equally attacker-controlled sibling
+    field and had no cap at all)."""
+    if lyrics is None:
+        return
+    settings = get_settings()
+    if len(lyrics) > settings.lyrics_max_length:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"lyrics exceeds max length ({settings.lyrics_max_length})",
+        )
+
+
 @router.post("/create", response_model=CreateResponse)
 async def create_job(
     body: CreateRequest,
@@ -132,6 +146,7 @@ async def create_job(
     """
     settings = get_settings()
     _validate_prompt(body.prompt)
+    _validate_lyrics(body.lyrics)
     lyrics = body.lyrics.strip() if body.lyrics else None
 
     existing_identity = _read_identity(request)

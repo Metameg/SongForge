@@ -116,6 +116,11 @@ class Settings(BaseSettings):
 
     # ── Prompt validation (issue #12, criterion #1) ──────────────────────────
     prompt_max_length: int = 2000
+    # `lyrics` is the same attacker-controlled, unauthenticated-request field as
+    # `prompt` (security report MEDIUM finding) -- capped the same way so it can't
+    # be left as an unbounded resource-abuse vector (oversized DB rows / oversized
+    # outbound generation-API bodies) just because `prompt`'s cap doesn't cover it.
+    lyrics_max_length: int = 5000
 
     # ── Generation job pipeline (issue #12) ───────────────────────────────────
     # Callback base URL sent as `webhook_url` on the generation API's create call; the

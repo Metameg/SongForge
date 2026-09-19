@@ -247,3 +247,38 @@ async def test_create_rejects_invalid_prompt_and_persists_nothing(
 
     assert resp.status_code == 422
     assert await _job_rows(sessionmaker) == []
+
+
+async def test_create_rejects_oversized_lyrics_and_persists_nothing(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Security report MEDIUM finding: `lyrics` is the sibling of `prompt` in the
+    same attacker-controlled, unauthenticated request body and must be capped the
+    same way -- an unbounded `lyrics` field is the same resource-abuse vector
+    (oversized DB rows + oversized outbound generation-API bodies) the prompt cap
+    exists to close."""
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+    oversized_lyrics = "x" * (get_settings().lyrics_max_length + 1)
+
+    resp = client.post(
+        "/create", json={"prompt": "a normal prompt", "lyrics": oversized_lyrics}
+    )
+
+    assert resp.status_code == 422
+    assert await _job_rows(sessionmaker) == []
+
+
+async def test_create_accepts_lyrics_at_the_max_length(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+    max_lyrics = "x" * get_settings().lyrics_max_length
+
+    resp = client.post("/create", json={"prompt": "a normal prompt", "lyrics": max_lyrics})
+
+    assert resp.status_code == 200
+    rows = await _job_rows(sessionmaker)
+    assert len(rows) == 1
+    assert rows[0].lyrics == max_lyrics
