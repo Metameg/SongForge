@@ -136,3 +136,55 @@ describe("computeExpectedOffsetSeconds", () => {
     expect(computeExpectedOffsetSeconds(startedAtMs, clientNowMs, skewMs)).toBe(expected);
   });
 });
+
+/**
+ * Issue #10 (SSE push + gapless transitions): two NEW pure decisions `Player.tsx`
+ * needs now that updates arrive by push instead of poll.
+ *
+ * `shouldReanchorOnPointer` — every `/events` frame (including the ~30s heartbeat
+ * re-broadcast of the SAME pointer, and the pub/sub relay of a genuinely new one) is
+ * `song-change`-shaped. The player must only re-anchor/reseek `<audio>` when the
+ * incoming pointer is actually a new song (`playback_id` changed); re-anchoring on
+ * every frame would audibly restart playback on each heartbeat.
+ *
+ * `nextPreloadSlot` — gapless playback bookkeeping (criterion #3): which of the two
+ * `<audio>` buffers ("a"/"b") becomes the active one after a swap. A plain A/B toggle,
+ * not a next-song lookahead field (out of scope per `.orchestrator/CONTEXT.md`) — the
+ * SSE push itself carries the real next-song data at the boundary, this just tracks
+ * which DOM element is "current" vs. "preloading".
+ *
+ * Neither symbol exists yet in `./sync` — this is the RED phase for issue #10's
+ * frontend gap. Imported dynamically INSIDE each test (rather than a static
+ * top-of-file import) so a missing export fails only these tests, not the whole
+ * file/collection of the pre-existing tests above — mirrors the backend's
+ * local-import convention for RED-phase symbols (see the NOTE block in
+ * `backend/tests/test_now_playing.py`).
+ */
+describe("shouldReanchorOnPointer", () => {
+  it("is true when the incoming pointer is a different playback_id (a real song change)", async () => {
+    const { shouldReanchorOnPointer } = await import("./sync");
+    expect(shouldReanchorOnPointer("pb-1", "pb-2")).toBe(true);
+  });
+
+  it("is false when the incoming pointer repeats the same playback_id (a heartbeat, not a change)", async () => {
+    const { shouldReanchorOnPointer } = await import("./sync");
+    expect(shouldReanchorOnPointer("pb-1", "pb-1")).toBe(false);
+  });
+
+  it("is true on the very first pointer (no previous playback_id yet)", async () => {
+    const { shouldReanchorOnPointer } = await import("./sync");
+    expect(shouldReanchorOnPointer(null, "pb-1")).toBe(true);
+  });
+});
+
+describe("nextPreloadSlot", () => {
+  it("toggles from the 'a' buffer to the 'b' buffer", async () => {
+    const { nextPreloadSlot } = await import("./sync");
+    expect(nextPreloadSlot("a")).toBe("b");
+  });
+
+  it("toggles from the 'b' buffer back to the 'a' buffer", async () => {
+    const { nextPreloadSlot } = await import("./sync");
+    expect(nextPreloadSlot("b")).toBe("a");
+  });
+});
