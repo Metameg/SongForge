@@ -272,3 +272,171 @@ async def test_listen_notify_wakes_a_waiting_listener() -> None:
         await listener_conn.close()
 
     assert received == [f"{_TEST_JOB_PREFIX}notify"]
+
+
+# ── songforge.jobs.dispatch.claim_next_job / count_active_jobs (criterion #2) ─────
+#
+# The tests above drive the claim SQL directly via asyncpg to characterize the raw
+# mechanics (FIFO seq order, SKIP LOCKED, the partial index, LISTEN/NOTIFY). These
+# drive the actual Python entry points dispatch/worker code calls, against the same
+# real, migrated Postgres, via a SQLAlchemy async session.
+
+
+@pytest.fixture()
+async def sessionmaker():  # type: ignore[no-untyped-def]
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(_SETTINGS_DATABASE_URL)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+async def test_claim_next_job_returns_the_oldest_queued_job_and_transitions_it(
+    conn: "asyncpg.Connection[asyncpg.Record]", sessionmaker
+) -> None:
+    from songforge.jobs.dispatch import claim_next_job
+    from songforge.models import JOB_STATE_SUBMITTING
+
+    await _insert_queued(conn, "orm-a")
+    await _insert_queued(conn, "orm-b")
+
+    async with sessionmaker() as session:
+        job = await claim_next_job(session)
+
+    assert job is not None
+    assert job.job_id == f"{_TEST_JOB_PREFIX}orm-a"
+    assert job.state == JOB_STATE_SUBMITTING
+
+    # Committed for real -- a fresh read sees SUBMITTING, not QUEUED.
+    row = await conn.fetchrow(
+        "SELECT state FROM jobs WHERE job_id = $1", f"{_TEST_JOB_PREFIX}orm-a"
+    )
+    assert row is not None
+    assert row["state"] == "SUBMITTING"
+
+
+async def test_claim_next_job_never_double_claims_across_concurrent_sessions(
+    conn: "asyncpg.Connection[asyncpg.Record]", sessionmaker
+) -> None:
+    from songforge.jobs.dispatch import claim_next_job
+
+    await _insert_queued(conn, "orm-x")
+    await _insert_queued(conn, "orm-y")
+
+    async def _claim() -> str | None:
+        async with sessionmaker() as session:
+            job = await claim_next_job(session)
+            return job.job_id if job else None
+
+    results = await asyncio.gather(_claim(), _claim())
+    claimed = {r for r in results if r is not None}
+    assert claimed == {f"{_TEST_JOB_PREFIX}orm-x", f"{_TEST_JOB_PREFIX}orm-y"}
+
+
+async def test_count_active_jobs_counts_only_active_states(
+    conn: "asyncpg.Connection[asyncpg.Record]", sessionmaker
+) -> None:
+    from songforge.jobs.dispatch import count_active_jobs
+
+    for i, state in enumerate(
+        ["QUEUED", "SUBMITTING", "WAITING_FOR_WEBHOOK", "INGEST_PENDING", "READY", "FAILED"]
+    ):
+        await conn.execute(
+            "INSERT INTO jobs (job_id, user_id, prompt, state, attempts) "
+            "VALUES ($1, 'u1', 'p', $2, 0)",
+            f"{_TEST_JOB_PREFIX}state-{i}",
+            state,
+        )
+
+    async with sessionmaker() as session:
+        count = await count_active_jobs(session)
+
+    # SUBMITTING + WAITING_FOR_WEBHOOK + INGEST_PENDING only.
+    assert count == 3
+
+
+async def test_semaphore_release_notify_wakes_a_waiting_listener(
+    conn: "asyncpg.Connection[asyncpg.Record]", sessionmaker
+) -> None:
+    """Orchestrator directive extending criterion #5: dispatch's release path (429/
+    terminal/transient) must pg_notify the semaphore-release channel, not just the
+    global counter, so a dispatcher parked on a full cap wakes promptly. Proves the
+    real wiring end to end: claim a job via the ORM, run dispatch_claimed_job with a
+    rejecting client and a notify_release hook that issues a genuine pg_notify on its
+    own connection, and assert a separate LISTENer receives it."""
+    from songforge.config import Settings
+    from songforge.jobs.dispatch import claim_next_job, dispatch_claimed_job
+    from songforge.jobs.generation_client import GenerationRejected
+
+    await _insert_queued(conn, "release-notify")
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": _SETTINGS_DATABASE_URL,
+            "REDIS_URL": "redis://127.0.0.1:1/0",
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+        }
+    )
+
+    class _AlwaysAcquireSemaphore:
+        async def acquire(self, user_id: str) -> bool:
+            return True
+
+        async def release(self, user_id: str) -> None:
+            return None
+
+        async def reconcile_from_active_count(self, count: int) -> None:
+            return None
+
+    class _RejectingClient:
+        async def create(self, *, prompt, lyrics, webhook_url):  # type: ignore[no-untyped-def]
+            raise GenerationRejected(400, "bad prompt")
+
+    notifier_conn = await asyncpg.connect(_ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS)
+    listener_conn = await asyncpg.connect(_ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS)
+    received: list[str] = []
+    woke = asyncio.Event()
+
+    def _on_notify(connection: object, pid: int, channel: str, payload: str) -> None:
+        received.append(payload)
+        woke.set()
+
+    try:
+        await listener_conn.add_listener(settings.semaphore_release_channel, _on_notify)
+
+        async def _notify_release(job_id: str) -> None:
+            await notifier_conn.execute(
+                "SELECT pg_notify($1, $2)", settings.semaphore_release_channel, job_id
+            )
+
+        async with sessionmaker() as session:
+            job = await claim_next_job(session)
+            assert job is not None
+            await dispatch_claimed_job(
+                job,
+                semaphore=_AlwaysAcquireSemaphore(),  # type: ignore[arg-type]
+                client=_RejectingClient(),  # type: ignore[arg-type]
+                settings=settings,
+                count_active_jobs=lambda: _zero(),
+                notify_release=_notify_release,
+            )
+            await session.commit()
+
+        try:
+            await asyncio.wait_for(woke.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pytest.fail("listener did not wake within 5s of the release NOTIFY")
+        assert received == [f"{_TEST_JOB_PREFIX}release-notify"]
+    finally:
+        await listener_conn.remove_listener(settings.semaphore_release_channel, _on_notify)
+        await listener_conn.close()
+        await notifier_conn.close()
+
+
+async def _zero() -> int:
+    return 0

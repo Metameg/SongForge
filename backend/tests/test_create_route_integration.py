@@ -89,11 +89,15 @@ def _settings():  # type: ignore[no-untyped-def]
 
 @pytest.fixture()
 async def _clean_jobs():  # type: ignore[no-untyped-def]
+    """`POST /create` mints its own job_id (a plain UUID4 hex, not prefixed), so this
+    can't filter by a test-owned prefix like `tests/test_jobs_queue_integration.py`
+    does -- truncate the whole table instead. Safe: this integration Postgres is an
+    ephemeral, throwaway instance dedicated to this worktree's tests."""
     conn = await asyncpg.connect(_ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
-        await conn.execute("DELETE FROM jobs WHERE job_id LIKE 'test-issue12-route-%'")
+        await conn.execute("TRUNCATE TABLE jobs")
         yield
-        await conn.execute("DELETE FROM jobs WHERE job_id LIKE 'test-issue12-route-%'")
+        await conn.execute("TRUNCATE TABLE jobs")
     finally:
         await conn.close()
 
