@@ -203,6 +203,81 @@ async def test_skip_locked_never_double_claims_across_concurrent_connections(
         await conn_b.close()
 
 
+async def test_skip_locked_with_n_concurrent_claimers_claims_each_row_once_and_skips_none(
+    conn: "asyncpg.Connection[asyncpg.Record]",
+) -> None:
+    """Generalizes the 2-claimer test above to N=5 concurrent claimers against exactly
+    5 QUEUED rows: criterion #2 requires every worker instance to be able to run
+    dispatch in parallel with no double-claim AND no row left unclaimed. A 2-claimer/
+    2-row test can't rule out an off-by-one that only shows up with more contenders."""
+    n = 5
+    ids = [f"skip-n-{i}" for i in range(n)]
+    for job_id in ids:
+        await _insert_queued(conn, job_id)
+
+    connections = [
+        await asyncpg.connect(_ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS)
+        for _ in range(n)
+    ]
+    try:
+        transactions = [connection.transaction() for connection in connections]
+        for tx in transactions:
+            await tx.start()
+        try:
+            claimed_rows = await asyncio.gather(
+                *(connection.fetchrow(_CLAIM_SQL) for connection in connections)
+            )
+        except BaseException:
+            for tx in transactions:
+                await tx.rollback()
+            raise
+        else:
+            for tx in transactions:
+                await tx.commit()
+
+        claimed_ids = [row["job_id"] for row in claimed_rows if row is not None]
+        assert len(claimed_ids) == n, "every claimer should have won exactly one row"
+        assert len(set(claimed_ids)) == n, "no row was claimed by more than one claimer"
+        assert set(claimed_ids) == {f"{_TEST_JOB_PREFIX}{job_id}" for job_id in ids}, (
+            "no row was left unclaimed"
+        )
+    finally:
+        for connection in connections:
+            await connection.close()
+
+
+async def test_backoff_requeued_job_is_not_reclaimed_before_available_at(
+    conn: "asyncpg.Connection[asyncpg.Record]",
+) -> None:
+    """A 429/5xx/timeout requeue sets `available_at` into the future (dispatch's
+    backoff -- see `songforge/jobs/dispatch.py`'s `_apply_backoff`). The claim query's
+    `available_at <= now()` predicate must actually keep such a row un-claimable until
+    that time passes, or dispatch would hot-loop immediately re-submitting a job that
+    just failed/was rate-limited."""
+    await conn.execute(
+        "INSERT INTO jobs (job_id, user_id, prompt, state, attempts, available_at) "
+        "VALUES ($1, 'u1', 'a test prompt', 'QUEUED', 1, now() + interval '1 hour')",
+        f"{_TEST_JOB_PREFIX}not-due-yet",
+    )
+    await _insert_queued(conn, "ready-now")
+
+    async with conn.transaction():
+        first = await conn.fetchrow(_CLAIM_SQL)
+        assert first is not None
+        assert first["job_id"] == f"{_TEST_JOB_PREFIX}ready-now"  # future row skipped
+        # Mimic the real claim transition (see `claim_next_job`) so this job is no
+        # longer QUEUED for the second claim attempt below -- otherwise it would be
+        # re-claimed again, masking whether the *future* row was correctly excluded.
+        await conn.execute(
+            "UPDATE jobs SET state = 'SUBMITTING' WHERE job_id = $1", first["job_id"]
+        )
+
+    # Nothing else is claimable -- the backed-off row still isn't due.
+    async with conn.transaction():
+        second = await conn.fetchrow(_CLAIM_SQL)
+    assert second is None
+
+
 async def test_partial_index_exists_on_seq_where_queued(
     conn: "asyncpg.Connection[asyncpg.Record]",
 ) -> None:
