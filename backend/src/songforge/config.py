@@ -106,6 +106,36 @@ class Settings(BaseSettings):
     # request storm within the window costs 0 datastore reads.
     radio_pointer_cache_ttl_seconds: float = 1.0
 
+    # ── Identity (issue #12: signed-cookie anon identity, criterion #1) ─────
+    # HMAC key signing the identity cookie (stdlib hmac; see web/identity.py). MUST be
+    # overridden in prod -- a default/leaked secret lets a client forge another
+    # identity's cookie and, e.g., exhaust its rate-limit quota or read its jobs.
+    session_secret: str = "dev-insecure-change-me"
+    identity_cookie_name: str = "sf_uid"
+    identity_cookie_max_age_seconds: int = 60 * 60 * 24 * 365  # ~1 year
+
+    # ── Prompt validation (issue #12, criterion #1) ──────────────────────────
+    prompt_max_length: int = 2000
+
+    # ── Generation job pipeline (issue #12) ───────────────────────────────────
+    # Callback base URL sent as `webhook_url` on the generation API's create call; the
+    # receiving handler is a later issue (see .orchestrator/CONTEXT.md scope) -- #12
+    # only sends a plausible, config-driven URL.
+    musicgpt_webhook_url: str = "http://web:8000/api/generation/webhook"
+    # Redis semaphore keys (criterion #3: global + per-user in-flight generation caps).
+    semaphore_global_key: str = "sem:gen:global"
+    semaphore_user_key_prefix: str = "sem:gen:user:"
+    # Postgres LISTEN/NOTIFY channel names (criterion #5): new-job wakes dispatch
+    # without polling; semaphore-release wakes a dispatcher waiting on a full cap.
+    jobs_new_channel: str = "new_job"
+    semaphore_release_channel: str = "sem_release"
+    # Slow-poll backstop for the dispatch loop, in case a NOTIFY is missed (e.g. a
+    # dispatcher was down when it fired).
+    dispatch_poll_backstop_seconds: float = 5.0
+    # Backoff applied to a job's `available_at` on a 429/5xx/timeout requeue, so
+    # dispatch doesn't hot-loop re-claiming the same job immediately.
+    dispatch_requeue_backoff_seconds: float = 5.0
+
     # ── Observability (always on, every environment; spec #77) ──────────────
     metrics_enabled: bool = True
     correlation_id_header: str = "X-Correlation-ID"
