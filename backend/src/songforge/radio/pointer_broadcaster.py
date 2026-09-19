@@ -40,6 +40,13 @@ log = get_logger(__name__)
 # (both re-send the *current* pointer, not a queued backlog).
 _QUEUE_MAXSIZE = 8
 
+# Sleep after an unexpected `get_message` error before retrying, so a Redis outage
+# (which makes `get_message` raise immediately and repeatedly) degrades into a slow
+# retry loop rather than a CPU hot-spin + log flood. Short enough that recovery is
+# prompt once Redis returns; a genuine push arriving during the sleep is not lost --
+# it is still queued on the subscription and picked up on the next successful read.
+_ERROR_BACKOFF_SECONDS = 0.5
+
 
 class PointerBroadcaster:
     """Fans out one Redis pub/sub subscription to N per-client queues.
@@ -49,10 +56,18 @@ class PointerBroadcaster:
     to call from a lifespan context manager.
     """
 
-    def __init__(self, *, redis: Redis, channel: str, cache: PointerCache) -> None:
+    def __init__(
+        self,
+        *,
+        redis: Redis,
+        channel: str,
+        cache: PointerCache,
+        error_backoff_seconds: float = _ERROR_BACKOFF_SECONDS,
+    ) -> None:
         self._redis = redis
         self._channel = channel
         self._cache = cache
+        self._error_backoff_seconds = error_backoff_seconds
         self._pubsub: PubSub | None = None
         self._task: asyncio.Task[None] | None = None
         self._queues: set[asyncio.Queue[PointerRecord]] = set()
@@ -116,7 +131,11 @@ class PointerBroadcaster:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # Redis unreachable (or the subscription dropped): `get_message` will
+                # keep raising until it recovers. Back off before retrying so this
+                # degrades into a slow retry loop, not a hot-spin + log flood.
                 log.warning("pointer_broadcaster_get_message_failed", exc_info=True)
+                await asyncio.sleep(self._error_backoff_seconds)
                 continue
             if message is None or message.get("type") != "message":
                 continue

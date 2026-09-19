@@ -375,3 +375,60 @@ async def test_pubsub_relay_updates_pointer_cache_so_now_playing_reflects_it_imm
         assert resp2.status_code == 200
         assert resp2.json()["song_id"] == "song-2"
         assert resp2.json()["version"] == 2
+
+
+async def test_events_idle_then_song_change_delivered_on_the_same_open_connection() -> None:
+    """A listener who connects while the station is idle must receive the first
+    `song-change` on that SAME already-open stream once a pointer is published — not
+    only after reconnecting (criteria #1/#4: the push, not a reconnect, catches them up)."""
+    redis = _FakeRedis()
+    async with _running_app(redis) as (_app, client):
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            name, payload = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name == "idle"
+            assert payload == {"status": "idle"}
+
+            published = _record(song_id="song-9", version=9, playback_id="pb-9")
+            await redis.publish(CHANNEL, published.to_json())
+
+            name2, payload2 = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name2 == "song-change"
+            assert payload2["song_id"] == "song-9"
+            assert payload2["version"] == 9
+            assert payload2["playback_id"] == "pb-9"
+
+
+async def test_events_unregisters_client_on_disconnect() -> None:
+    """When an SSE client disconnects, its queue is unregistered (the generator's
+    `finally`) so neither the queue set nor the `sse_connected_listeners` gauge leaks —
+    the gauge whose flatness-vs-advances is the datastore-decoupling proof."""
+    redis = _FakeRedis()
+    async with _running_app(redis, heartbeat_seconds=0.05) as (app, client):
+        app.state.pointer_cache.set(_record(song_id="song-1", version=1, playback_id="pb-1"))
+        broadcaster = app.state.pointer_broadcaster
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert len(broadcaster._queues) == 1
+
+        # After the stream closes, the server-side generator's `finally` runs
+        # `unregister`; poll briefly since that cleanup is asynchronous to this side.
+        for _ in range(200):
+            if len(broadcaster._queues) == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert len(broadcaster._queues) == 0
+
+
+async def test_metrics_endpoint_exposes_the_new_sse_metrics() -> None:
+    """The three issue-#10 metrics are registered and scrapeable at `/metrics` — the
+    observable surface for reasoning about listener load vs. datastore load (spec #78)."""
+    redis = _FakeRedis()
+    async with _running_app(redis) as (_app, client):
+        resp = await client.get("/metrics")
+        assert resp.status_code == 200
+        body = resp.text
+        assert "songforge_sse_connected_listeners" in body
+        assert "songforge_radio_pointer_events_published_total" in body
+        assert "songforge_radio_pointer_events_relayed_total" in body

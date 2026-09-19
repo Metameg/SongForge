@@ -11,12 +11,14 @@ only, no I/O -- same posture as ``PointerCache`` above and ``Redis.from_url(...)
 ``app.state`` for dependency injection/overriding even when nothing has "started" it.
 Actually *starting* its background relay task is wired through FastAPI's ``lifespan``
 (the modern, non-deprecated startup/shutdown API), started on app startup and cancelled
-on shutdown. Critically: every test in this repo constructs ``TestClient(app)`` (or an
-``httpx.AsyncClient``) *without* the ``with``/lifespan-context form -- bare construction
-plus ``.get()``/``.stream()`` calls never trigger ``lifespan``, so the broadcaster never
-actually connects to Redis in those tests. SSE-specific tests that need the relay
-running drive it explicitly via ``app.router.lifespan_context(app)`` and inject a fake
-Redis via the ``redis=`` keyword below.
+on shutdown. Critically: every non-SSE test in this repo constructs ``TestClient(app)``
+*without* the ``with``/lifespan-context form -- bare construction plus ``.get()`` calls
+never trigger ``lifespan``, so the broadcaster never actually connects to Redis in those
+tests. SSE-specific tests that need the relay running serve the app under a real
+``uvicorn.Server`` on an ephemeral port (``tests/test_events_sse.py``) -- which runs the
+``lifespan`` and, over a real socket, can consume an infinite SSE stream that a
+buffering ASGI transport (``httpx.ASGITransport``) would deadlock on -- and inject a
+fake Redis via the ``redis=`` keyword below.
 """
 
 from __future__ import annotations

@@ -16,9 +16,10 @@ is wrapped in its own try/except: Postgres has already committed by that point, 
 Redis outage must never turn a successful advance into a failed one.
 
 Issue #10 adds one more, in the same best-effort block: after the ``redis.set``, also
-``redis.publish`` the same resolved view to the pub/sub channel ``/events`` (the SSE
-endpoint) subscribes to (criterion #2), so a connected listener is pushed the change
-instead of waiting on a poll. Exactly mirrors the ``set`` contract -- a lost CAS race or
+``redis.publish`` the same resolved view to the pub/sub channel each app instance's
+``PointerBroadcaster`` subscribes to and relays to its ``/events`` SSE listeners
+(criterion #2), so a connected listener is pushed the change instead of waiting on a
+poll. Exactly mirrors the ``set`` contract -- a lost CAS race or
 a no-op initialize never publishes (nothing changed to announce), and a publish failure
 is caught and logged, never raised.
 
