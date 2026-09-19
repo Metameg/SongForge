@@ -1,35 +1,44 @@
 "use client";
 
 /**
- * Minimal static-radio player (issue #8, criteria #4, #5).
+ * Minimal static-radio player (issue #8, criteria #4, #5; issue #10, criteria #1-#4).
  *
- * Loading the page fetches the current pointer and shows a Play button — browsers block
- * autoplay, so the button press is the anchor point: it computes clock skew + the elapsed
- * offset into the current song via `frontend/lib/sync.ts` and seeks `<audio>` there before
- * calling `.play()` (criterion #4).
+ * Loading the page opens an SSE connection (`new EventSource("/events")`) and shows a
+ * Play button once the current pointer arrives — browsers block autoplay, so the button
+ * press is the anchor point: it computes clock skew + the elapsed offset into the
+ * current song via `frontend/lib/sync.ts` and seeks `<audio>` there before calling
+ * `.play()` (criterion #4).
  *
- * Without SSE (a later issue — see `.orchestrator/CONTEXT.md` DEFERRED list), the song
- * change at a boundary (criterion #5) is driven by a self-rescheduling poll of
- * `/now-playing` (armed to each pointer's `ends_at`) plus the `<audio>` element's `ended`
- * event (PRD story #11 — playback reaching the end of the current track with no next-song
- * anchor yet). When the pointer's `playback_id` changes, a `useEffect` re-anchors the
- * (by-then freshly-`src`'d) audio element to the live offset — see the effect below for
- * why re-anchoring must happen after React commits the new `src`, not inside a setState
- * updater.
+ * Issue #10 replaces the old self-rescheduling `/now-playing` poll with server push: the
+ * backend's `/events` endpoint sends the current pointer immediately on connect
+ * (sync-on-arrival) and again on every genuine song change (a Redis pub/sub-fed push,
+ * arriving the instant the station advances — no up-to-1s poll lag) or ~30s heartbeat
+ * (a dropped push self-corrects). `shouldReanchorOnPointer` (`lib/sync.ts`) tells the
+ * handler whether an incoming frame is a real song change (`playback_id` differs) or
+ * just a heartbeat re-send of the same one — re-anchoring on every frame would audibly
+ * restart playback each heartbeat. The `<audio>` `ended` event (PRD story #11 —
+ * playback reaching the end of the current track with no next-song push having arrived
+ * yet) still triggers an immediate `/now-playing` re-fetch as a safeguard.
  *
- * Issue #9 (design D6) closes criterion #1's continuous-sync gap: the `<audio>`
- * `timeupdate` event (which fires several times a second during playback) runs a free
- * local drift check (deadband < 1s, hard-seek ≥ 1s via `decideDrift`) against the
- * server timeline, and — on that same event — a ~30s heartbeat (`shouldRefetchOnHeartbeat`
- * against the elapsed-since-last-fetch) re-fetches `/now-playing` so a drifting clock
- * skew or a missed boundary self-corrects (PRD stories #9, #10). Driving the heartbeat
- * off elapsed time (rather than a raw `setInterval`) means it self-corrects the moment a
- * backgrounded/throttled tab resumes playback. Clock skew is measured at each response's
- * *receipt* and kept in a ref, so the per-tick drift math uses a skew sampled at a known
- * moment rather than recomputing it from an increasingly stale `server_time`.
+ * Gapless transitions (criterion #3) use two `<audio preload="auto">` buffers
+ * (`audioARef`/`audioBRef`): a real song change loads the *inactive* buffer with the
+ * new track, seeks + plays it, pauses the previously-active one, then flips which
+ * buffer is "active" (`nextPreloadSlot`, `lib/sync.ts`) — avoiding the single-element
+ * `src`-reassignment reset/jank a listener would otherwise hear at every boundary. This
+ * does not (and, per the static-radio pointer model, cannot) eliminate the new track's
+ * own fetch+decode latency — there is no next-song id known ahead of the boundary to
+ * pre-warm a buffer with; see `.orchestrator/CONTEXT.md`'s explicit scope note.
+ *
+ * Issue #9 (design D6) continuous-sync gap: the `<audio>` `timeupdate` event (which
+ * fires several times a second during playback) runs a free local drift check (deadband
+ * < 1s, hard-seek ≥ 1s via `decideDrift`) against the server timeline. Clock skew is
+ * measured at each pointer's *receipt* and kept in a ref, so the per-tick drift math
+ * uses a skew sampled at a known moment rather than recomputing it from an increasingly
+ * stale `server_time`. The client-side heartbeat re-fetch timer from issue #9 is
+ * removed — the server now drives re-sync via the ~30s SSE heartbeat re-emit.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
 import {
   computeExpectedOffsetSeconds,
@@ -37,20 +46,15 @@ import {
   computeSkewMs,
   correctedServerNowMs,
   decideDrift,
-  shouldRefetchOnHeartbeat,
+  nextPreloadSlot,
+  shouldReanchorOnPointer,
+  type PreloadSlot,
 } from "../lib/sync";
 
 // Same-origin base: the browser fetches "/now-playing" on its own origin and the Next
-// server proxies it to the backend (see `next.config.js` rewrites). This avoids CORS and
-// keeps the internal backend hostname out of the browser.
+// server proxies it to the backend. This avoids CORS and keeps the internal backend
+// hostname out of the browser. `/events` (the SSE stream) is reached the same way.
 const NOW_PLAYING_BASE = "";
-
-// A stale/past `ends_at` (or an idle station) must not spin a per-client `setTimeout(0)`
-// tight refetch loop against `/now-playing` — floor every reschedule to this.
-const MIN_REFETCH_DELAY_MS = 1000;
-// After a transient fetch failure (or while idle), retry on this cadence so one failed
-// poll never permanently stops the song-change updates.
-const RETRY_DELAY_MS = 5000;
 
 /** Seek `audio` to where the server timeline says this song should be right now. */
 function seekToLiveOffset(audio: HTMLAudioElement, playing: NowPlaying): void {
@@ -61,108 +65,126 @@ function seekToLiveOffset(audio: HTMLAudioElement, playing: NowPlaying): void {
   audio.currentTime = Math.max(offsetSeconds, 0);
 }
 
+/**
+ * Resolve the "live" (or "preloading") `<audio>` element from the two buffer refs and
+ * the current slot. A module-level helper (rather than a component-scoped closure) so
+ * it carries no per-render identity of its own and needs no `useCallback` dependency
+ * bookkeeping at any of its call sites.
+ */
+function bufferElement(
+  slot: PreloadSlot,
+  audioARef: React.RefObject<HTMLAudioElement | null>,
+  audioBRef: React.RefObject<HTMLAudioElement | null>,
+): HTMLAudioElement | null {
+  return (slot === "a" ? audioARef : audioBRef).current;
+}
+
 export default function Player() {
   const [state, setState] = useState<NowPlayingState | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  // Set by the poll effect; lets the `<audio>` `ended` handler force an immediate
-  // re-fetch (PRD story #11) without waiting for the scheduled boundary tick.
-  const pollNowRef = useRef<() => void>(() => {});
-  // Clock skew (client − server, ms) sampled at each `/now-playing` receipt. The
-  // `timeupdate` drift check reads this rather than recomputing from `server_time`,
-  // which grows stale between fetches (issue #9, design D6).
+  const audioARef = useRef<HTMLAudioElement | null>(null);
+  const audioBRef = useRef<HTMLAudioElement | null>(null);
+  // Which buffer is currently "live" (the other is preloading/idle). A ref, not state:
+  // nothing in the render depends on it (both `<audio>` elements are rendered
+  // unconditionally; their `src` is set imperatively), so it need not trigger a re-render.
+  const activeBufferRef = useRef<PreloadSlot>("a");
+  // Mirrors `hasStarted` for use inside `applyPlaying`, which is created once (stable
+  // callback identity) and so cannot close over a fresh `hasStarted` from each render.
+  const hasStartedRef = useRef(false);
+  // The last pointer's `playback_id` applied to the buffers — lets `shouldReanchorOnPointer`
+  // tell a genuine song change apart from a heartbeat re-send of the same one.
+  const prevPlaybackIdRef = useRef<string | null>(null);
+  // Clock skew (client − server, ms) sampled at each pointer's receipt. The `timeupdate`
+  // drift check reads this rather than recomputing it from `server_time`, which grows
+  // stale between events (issue #9, design D6).
   const skewMsRef = useRef<number>(0);
-  // Wall-clock time of the last `/now-playing` receipt (ms). The `timeupdate` handler
-  // uses it to fire the ~30s heartbeat via `shouldRefetchOnHeartbeat` (issue #9, D6).
-  const lastFetchAtMsRef = useRef<number>(0);
 
-  // Poll `/now-playing` and reschedule to the next boundary. Resilient (a transient
-  // failure retries rather than killing the reschedule chain) and floored (a stale
-  // `ends_at` can't tight-loop). Owns its own timer + cancellation.
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
+  // Apply an incoming "playing" pointer, from either the SSE stream or the `ended`
+  // safeguard's direct fetch. Always updates `state` + resamples clock skew; only
+  // touches the `<audio>` buffers when `shouldReanchorOnPointer` says this is a real
+  // song change (criterion #3) rather than a heartbeat re-send of the current one.
+  // Stable identity (only refs + setState in its closure) so the mount-once SSE effect
+  // below can depend on it safely.
+  const applyPlaying = useCallback((next: NowPlaying) => {
+    const isChange = shouldReanchorOnPointer(prevPlaybackIdRef.current, next.playback_id);
+    prevPlaybackIdRef.current = next.playback_id;
+    skewMsRef.current = computeSkewMs(Date.parse(next.server_time), Date.now());
+    setState(next);
+    if (!isChange) return;
 
-    const schedule = (delayMs: number): void => {
-      if (cancelled) return;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(poll, Math.max(delayMs, MIN_REFETCH_DELAY_MS));
-    };
-
-    const poll = (): void => {
-      fetchNowPlaying(NOW_PLAYING_BASE)
-        .then((next) => {
-          if (cancelled) return;
-          lastFetchAtMsRef.current = Date.now();
-          if (next.status === "playing") {
-            // Sample skew NOW, at receipt — this is the one moment `server_time` and
-            // the client clock line up, so the `timeupdate` handler can trust it later.
-            skewMsRef.current = computeSkewMs(Date.parse(next.server_time), Date.now());
-          }
-          setState(next);
-          schedule(
-            next.status === "playing"
-              ? Date.parse(next.ends_at) - Date.now()
-              : RETRY_DELAY_MS,
-          );
-        })
-        .catch(() => {
-          // Network blip / non-JSON body — keep the reschedule chain alive.
-          schedule(RETRY_DELAY_MS);
-        });
-    };
-
-    pollNowRef.current = poll;
-    poll();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-      pollNowRef.current = () => {};
-    };
+    const outgoing = bufferElement(activeBufferRef.current, audioARef, audioBRef);
+    const incoming = bufferElement(nextPreloadSlot(activeBufferRef.current), audioARef, audioBRef);
+    if (incoming) {
+      incoming.src = next.audio_url;
+      if (hasStartedRef.current) {
+        seekToLiveOffset(incoming, next);
+        void incoming.play();
+      }
+    }
+    if (hasStartedRef.current) {
+      outgoing?.pause();
+    }
+    activeBufferRef.current = nextPreloadSlot(activeBufferRef.current);
   }, []);
 
-  // Re-anchor on song change: once the listener has pressed Play, every new pointer
-  // (`playback_id` change) seeks the freshly-loaded `<audio>` to the live server-timeline
-  // offset and resumes. Keyed on `playback_id` so it runs AFTER React commits the new
-  // `src` — changing an `<audio>` element's `src` reloads it and resets `currentTime` to
-  // 0, so a seek performed before that commit is silently discarded (criterion #5). The
-  // FIRST play stays in the click handler: browsers only allow `play()` from the user
-  // gesture, and the element is unlocked for subsequent programmatic seeks once that
-  // gesture has played it.
-  const playbackId = state?.status === "playing" ? state.playback_id : null;
+  // Open the SSE connection once. The server sends the current pointer immediately on
+  // connect (sync-on-arrival) and on every push/heartbeat thereafter (criterion #4); a
+  // dropped connection is handled by the browser's native `EventSource` auto-reconnect,
+  // whose first frame on the new connection is again the current truth.
   useEffect(() => {
-    if (!hasStarted || playbackId === null) return;
-    const audio = audioRef.current;
-    if (!audio || !state || state.status !== "playing") return;
-    seekToLiveOffset(audio, state);
-    void audio.play();
-    // Fires on playback_id / hasStarted change; `state` is read fresh from that render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playbackId, hasStarted]);
+    const source = new EventSource("/events");
+
+    const handleSongChange = (event: MessageEvent<string>) => {
+      applyPlaying(JSON.parse(event.data) as NowPlaying);
+    };
+    const handleIdle = () => {
+      prevPlaybackIdRef.current = null;
+      setState({ status: "idle" });
+    };
+
+    source.addEventListener("song-change", handleSongChange);
+    source.addEventListener("idle", handleIdle);
+
+    return () => {
+      source.close();
+    };
+  }, [applyPlaying]);
 
   const handlePlay = () => {
-    const audio = audioRef.current;
-    if (!audio || !state || state.status !== "playing") return;
+    if (!state || state.status !== "playing") return;
+    const audio = bufferElement(activeBufferRef.current, audioARef, audioBRef);
+    if (!audio) return;
     seekToLiveOffset(audio, state);
     void audio.play();
+    hasStartedRef.current = true;
     setHasStarted(true);
   };
 
-  const handleEnded = () => {
-    // The current track finished with no next-song anchor yet — re-fetch immediately
-    // (PRD story #11) rather than waiting for the scheduled boundary tick.
-    pollNowRef.current();
+  // The current track finished with no next-song push having arrived yet — re-fetch
+  // immediately (PRD story #11) rather than waiting for the next SSE frame. Routed
+  // through `applyPlaying` so a genuinely new pointer also gets the gapless swap.
+  const handleEnded = async (event: React.SyntheticEvent<HTMLAudioElement>) => {
+    if (event.currentTarget !== bufferElement(activeBufferRef.current, audioARef, audioBRef)) {
+      return;
+    }
+    const next = await fetchNowPlaying(NOW_PLAYING_BASE);
+    if (next.status === "playing") {
+      applyPlaying(next);
+    } else {
+      prevPlaybackIdRef.current = null;
+      setState(next);
+    }
   };
 
   // Continuous drift correction (issue #9, criterion #1 / design D6): on every
-  // `timeupdate`, compare where we ARE (`audio.currentTime`) to where the server
-  // timeline says we should be, and hard-seek only when the drift crosses the 1s
-  // deadband (`decideDrift`) — a sub-second gap is left alone so imperceptible jitter
-  // never nudges playback. Runs only after the listener has started playback.
-  const handleTimeUpdate = () => {
-    if (!hasStarted || !state || state.status !== "playing") return;
-    const audio = audioRef.current;
-    if (!audio) return;
+  // `timeupdate` of whichever buffer is currently active, compare where we ARE
+  // (`audio.currentTime`) to where the server timeline says we should be, and hard-seek
+  // only when the drift crosses the 1s deadband (`decideDrift`) — a sub-second gap is
+  // left alone so imperceptible jitter never nudges playback.
+  const handleTimeUpdate = (event: React.SyntheticEvent<HTMLAudioElement>) => {
+    const audio = bufferElement(activeBufferRef.current, audioARef, audioBRef);
+    if (event.currentTarget !== audio) return;
+    if (!hasStarted || !audio || !state || state.status !== "playing") return;
     const expected = computeExpectedOffsetSeconds(
       Date.parse(state.started_at),
       Date.now(),
@@ -170,14 +192,6 @@ export default function Player() {
     );
     if (decideDrift(audio.currentTime - expected) === "seek") {
       audio.currentTime = Math.max(expected, 0);
-    }
-    // ~30s heartbeat (issue #9, D6): once enough time has passed since the last fetch,
-    // re-fetch to re-sample skew / catch a missed change. Bump `lastFetchAtMsRef` up
-    // front so the several-per-second `timeupdate` events during the in-flight fetch
-    // don't each trigger a duplicate request (the poll's own receipt resets it again).
-    if (shouldRefetchOnHeartbeat(Date.now() - lastFetchAtMsRef.current)) {
-      lastFetchAtMsRef.current = Date.now();
-      pollNowRef.current();
     }
   };
 
@@ -215,12 +229,8 @@ export default function Player() {
       >
         Play
       </button>
-      <audio
-        ref={audioRef}
-        src={isPlaying ? (state as NowPlaying).audio_url : undefined}
-        onEnded={handleEnded}
-        onTimeUpdate={handleTimeUpdate}
-      />
+      <audio ref={audioARef} preload="auto" onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
+      <audio ref={audioBRef} preload="auto" onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
     </main>
   );
 }
