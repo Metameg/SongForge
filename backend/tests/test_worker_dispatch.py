@@ -8,10 +8,13 @@ property") and isn't unit-tested here.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+import songforge.worker.dispatch as worker_dispatch_module
 from songforge.config import Settings
-from songforge.worker.dispatch import _drain_ready_jobs
+from songforge.worker.dispatch import _drain_ready_jobs, run_dispatch
 
 
 def _settings() -> Settings:
@@ -132,3 +135,74 @@ async def test_drain_returns_immediately_when_nothing_is_queued(
     )
 
     assert dispatch_calls == 0
+
+
+# ── `run_dispatch`'s poll backstop (criterion #5: NOTIFY wakes dispatch, but a slow
+# poll is still a backstop for a missed notification) ──────────────────────────────
+#
+# The rest of this file drives `_drain_ready_jobs` directly (the testable decision
+# step). This exercises `run_dispatch`'s own outer loop -- normally left untested per
+# this repo's convention (mirrors `worker/radio_coordinator.py`: "any error inside it
+# is logged and backed off, never raised... resilience is its main correctness
+# property") -- specifically for the one behaviour that convention doesn't cover: that
+# the loop re-drains on a plain timeout even when NO wake-up (`add_listener` callback)
+# ever fires, i.e. the poll backstop genuinely backstops a missed/never-sent NOTIFY.
+# The real `asyncpg`/LISTEN connection and `httpx.AsyncClient` are never used for real
+# network I/O -- `asyncpg.connect` is monkeypatched to a fake connection whose
+# `add_listener` never invokes its callback, so `wake` never fires and only the
+# `dispatch_poll_backstop_seconds` timeout can drive further drain passes.
+
+
+class _FakeAsyncpgConnection:
+    """Stands in for the real LISTEN/NOTIFY connection. `add_listener` deliberately
+    never calls back -- simulating a NOTIFY that was missed/never sent -- so the test
+    can prove the backstop poll alone still drives re-draining."""
+
+    async def add_listener(self, channel: str, callback: object) -> None:
+        return None
+
+    async def execute(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_run_dispatch_poll_backstop_redrains_when_no_notify_ever_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_connect(dsn: str) -> _FakeAsyncpgConnection:
+        return _FakeAsyncpgConnection()
+
+    monkeypatch.setattr(worker_dispatch_module.asyncpg, "connect", _fake_connect)
+
+    drain_calls = 0
+    stop = asyncio.Event()
+
+    async def _fake_drain(sessionmaker: object, semaphore: object, client: object,
+                           settings: Settings, notify_release: object) -> None:
+        nonlocal drain_calls
+        drain_calls += 1
+        if drain_calls >= 3:
+            stop.set()
+
+    monkeypatch.setattr(worker_dispatch_module, "_drain_ready_jobs", _fake_drain)
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": "postgresql+asyncpg://u:p@127.0.0.1:1/songforge",
+            "REDIS_URL": "redis://127.0.0.1:1/0",
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+            "DISPATCH_POLL_BACKSTOP_SECONDS": "0.01",
+        }
+    )
+
+    await asyncio.wait_for(run_dispatch(settings, stop), timeout=5.0)
+
+    # Three drain passes happened purely from the poll-backstop timeout ticking --
+    # `_FakeAsyncpgConnection.add_listener` never invoked a wake callback, so nothing
+    # but the backstop could have driven passes 2 and 3.
+    assert drain_calls == 3
