@@ -146,6 +146,23 @@ class Settings(BaseSettings):
     # Backoff applied to a job's `available_at` on a 429/5xx/timeout requeue, so
     # dispatch doesn't hot-loop re-claiming the same job immediately.
     dispatch_requeue_backoff_seconds: float = 5.0
+
+    # ── Async ingest (issue #13: webhook -> download -> R2 upload -> READY) ────
+    # Postgres LISTEN/NOTIFY channel the webhook handler NOTIFYs after recording a
+    # successful webhook (state -> INGEST_PENDING), and the ingest worker LISTENs on.
+    ingest_channel: str = "ingest_pending"
+    # Slow-poll backstop for the ingest loop, mirrors dispatch_poll_backstop_seconds.
+    ingest_poll_backstop_seconds: float = 5.0
+    # httpx timeout for downloading the finished audio from its (possibly expiring)
+    # hint URL, or from the by-id-refreshed URL.
+    ingest_download_timeout_seconds: float = 30.0
+    # Backoff applied to a job's `available_at` on a download/by-id-lookup failure
+    # that isn't resolved by the single in-claim refresh-and-retry.
+    ingest_requeue_backoff_seconds: float = 10.0
+    # Bounded ingest retries before giving up -> FAILED (this is NOT the watchdog's
+    # job; see .orchestrator/CONTEXT.md OUT-of-scope).
+    ingest_max_attempts: int = 5
+
     # ── SSE + pub/sub (issue #10: push + gapless transitions) ───────────────
     # Redis pub/sub channel the coordinator publishes the resolved pointer to on
     # every genuine init/advance, and that each app instance's `PointerBroadcaster`

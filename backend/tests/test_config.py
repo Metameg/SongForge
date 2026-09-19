@@ -175,3 +175,32 @@ def test_radio_tunables_override_from_env() -> None:
     assert settings.radio_advisory_lock_key == 42
     assert settings.radio_default_track_seconds == 240
     assert settings.radio_coordinator_backoff_seconds == 2.5
+
+
+def test_ingest_tunables_have_documented_defaults() -> None:
+    """Issue #13: single config source for the ingest NOTIFY channel, poll backstop,
+    download timeout, requeue backoff, and the bounded-attempts cap."""
+    settings = Settings(_env=_base_env())
+    assert settings.ingest_channel == "ingest_pending"
+    assert settings.ingest_poll_backstop_seconds == 5.0
+    assert settings.ingest_download_timeout_seconds == 30.0
+    assert settings.ingest_requeue_backoff_seconds == 10.0
+    assert settings.ingest_max_attempts == 5
+
+
+def test_ingest_tunables_override_from_env() -> None:
+    settings = Settings(
+        _env={
+            **_base_env(),
+            "INGEST_CHANNEL": "ip",
+            "INGEST_POLL_BACKSTOP_SECONDS": "1.5",
+            "INGEST_DOWNLOAD_TIMEOUT_SECONDS": "15",
+            "INGEST_REQUEUE_BACKOFF_SECONDS": "3",
+            "INGEST_MAX_ATTEMPTS": "3",
+        }
+    )
+    assert settings.ingest_channel == "ip"
+    assert settings.ingest_poll_backstop_seconds == 1.5
+    assert settings.ingest_download_timeout_seconds == 15.0
+    assert settings.ingest_requeue_backoff_seconds == 3.0
+    assert settings.ingest_max_attempts == 3
