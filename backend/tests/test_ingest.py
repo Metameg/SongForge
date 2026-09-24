@@ -26,8 +26,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.config import Settings
-from songforge.jobs.generation_client import GenerationTransientError
+from songforge.jobs.generation_client import (
+    GenerationRateLimited,
+    GenerationRejected,
+    GenerationTransientError,
+)
 from songforge.jobs.ingest import AudioDownloadError, ingest_claimed_job
+from songforge.metrics import ingest_completed_total, ingest_failed_total, ingest_requeued_total
 from songforge.models import (
     JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
@@ -405,3 +410,189 @@ async def test_idempotent_reingest_does_not_duplicate_an_existing_song_row(
     assert job.state == JOB_STATE_READY
     rows = (await session.scalars(select(Song).where(Song.id == "conv-1"))).all()
     assert len(rows) == 1
+
+
+# ── Data-integrity guard: missing conversion_id_1 (phase-4 hardening) ─────────────
+
+
+async def test_missing_conversion_id_1_marks_job_failed_without_touching_ports(
+    session: AsyncSession,
+) -> None:
+    """`WAITING_FOR_WEBHOOK -> INGEST_PENDING` should never happen without
+    `conversion_id_1` (dispatch sets it before that state), but a corrupted/legacy
+    row must fail cleanly rather than crash the ingest loop or attempt any I/O."""
+    events: list[str] = []
+    job = _claimed_ingest_job(conversion_id_1=None)
+    storage = _FakeStorage(events)
+    downloader = _FakeDownloader(events, {})
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    settings = Settings()
+    before_failed = ingest_failed_total._value.get()
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_FAILED
+    assert job.song_id is None
+    assert events == []  # never touched storage, downloader, or the generation client
+    assert ingest_failed_total._value.get() == before_failed + 1
+
+
+# ── By-id refresh failure: all three typed exceptions behave identically ──────────
+
+
+@pytest.mark.parametrize(
+    "by_id_exception",
+    [
+        GenerationRateLimited("byId is at capacity"),
+        GenerationRejected(404, "unknown task_id"),
+    ],
+    ids=["rate_limited", "rejected"],
+)
+async def test_by_id_refresh_raising_rate_limited_or_rejected_counts_as_a_failed_attempt(
+    session: AsyncSession, by_id_exception: Exception
+) -> None:
+    """Companion to `test_by_id_refresh_itself_failing_counts_as_a_failed_attempt`
+    (which only covers `GenerationTransientError`): `ingest_claimed_job` catches
+    `GenerationRateLimited`/`GenerationRejected`/`GenerationTransientError`
+    identically in `_download_with_refresh` -- any of the three counts as a failed
+    ingest attempt (requeued with backoff here, below the cap), never re-raised."""
+    events: list[str] = []
+    job = _claimed_ingest_job()
+    storage = _FakeStorage(events)
+    downloader = _FakeDownloader(events, {})  # the hint URL fails
+    client = _FakeGenerationClient(events, by_id_result=by_id_exception)
+    settings = Settings(ingest_max_attempts=3, ingest_requeue_backoff_seconds=15)
+
+    before = datetime.now(timezone.utc)
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_INGEST_PENDING
+    assert job.ingest_attempts == 1
+    assert job.available_at >= before + timedelta(seconds=15)
+    assert await session.get(Song, job.conversion_id_1) is None
+
+
+# ── Counters: ingest_completed/failed/requeued increment on the right outcomes ────
+
+
+async def test_ingest_completed_total_increments_on_happy_path(
+    session: AsyncSession,
+) -> None:
+    events: list[str] = []
+    job = _claimed_ingest_job()
+    storage = _FakeStorage(events)
+    downloader = _FakeDownloader(events, {job.audio_url: b"bytes"})
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    settings = Settings()
+    before = ingest_completed_total._value.get()
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_READY
+    assert ingest_completed_total._value.get() == before + 1
+
+
+async def test_ingest_completed_total_increments_on_idempotent_reingest(
+    session: AsyncSession,
+) -> None:
+    """The idempotent self-heal path (`storage.exists` true) is also a "completed"
+    outcome -- it must count toward the same counter as a fresh download+upload."""
+    events: list[str] = []
+    job = _claimed_ingest_job()
+    key = audio_key(job.conversion_id_1)
+    storage = _FakeStorage(events, existing_keys={key})
+    downloader = _FakeDownloader(events, {})
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    settings = Settings()
+    before = ingest_completed_total._value.get()
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_READY
+    assert ingest_completed_total._value.get() == before + 1
+
+
+async def test_ingest_requeued_total_increments_below_the_cap(
+    session: AsyncSession,
+) -> None:
+    events: list[str] = []
+    job = _claimed_ingest_job(ingest_attempts=0)
+    storage = _FakeStorage(events)
+    always_fails = _FakeDownloader(events, {})
+    client = _FakeGenerationClient(
+        events, by_id_result="http://musicgpt.test/audio/still-bad"
+    )
+    settings = Settings(ingest_max_attempts=3, ingest_requeue_backoff_seconds=1)
+    before = ingest_requeued_total._value.get()
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=always_fails,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_INGEST_PENDING
+    assert ingest_requeued_total._value.get() == before + 1
+
+
+async def test_ingest_failed_total_increments_on_attempt_exhaustion(
+    session: AsyncSession,
+) -> None:
+    events: list[str] = []
+    job = _claimed_ingest_job(ingest_attempts=2)  # one attempt away from the cap
+    storage = _FakeStorage(events)
+    always_fails = _FakeDownloader(events, {})
+    client = _FakeGenerationClient(
+        events, by_id_result="http://musicgpt.test/audio/still-bad"
+    )
+    settings = Settings(ingest_max_attempts=3, ingest_requeue_backoff_seconds=1)
+    before = ingest_failed_total._value.get()
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=always_fails,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_FAILED
+    assert ingest_failed_total._value.get() == before + 1

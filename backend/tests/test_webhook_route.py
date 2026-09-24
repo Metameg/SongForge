@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from songforge.config import get_settings
 from songforge.jobs import generation_client
+from songforge.metrics import webhooks_received_total
 from songforge.models import (
     JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
@@ -319,3 +320,137 @@ async def test_webhook_failure_status_is_idempotent_too(
     job = await _get_job(sessionmaker, "job-1")
     assert job.state == JOB_STATE_FAILED
     assert notify_spy.calls == []
+
+
+# ── Malformed / missing-field payloads -> 422 (phase-4 hardening) ─────────────────
+#
+# FastAPI/pydantic reject these before `receive_webhook` ever runs -- proving the
+# route's declared `WebhookPayload` model actually enforces its required fields
+# rather than silently defaulting/coercing them, which would otherwise let a
+# malformed delivery slip through as a false "success" or an unhandled crash.
+
+
+async def test_webhook_missing_task_id_returns_422(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, notify_spy = _build_client(sessionmaker)
+    body = _webhook_body()
+    del body["task_id"]
+
+    resp = client.post("/api/generation/webhook", json=body)
+
+    assert resp.status_code == 422
+    assert notify_spy.calls == []
+    job = await _get_job(sessionmaker, "job-1")
+    assert job.state == JOB_STATE_WAITING_FOR_WEBHOOK  # untouched
+
+
+async def test_webhook_missing_conversion_id_returns_422(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, notify_spy = _build_client(sessionmaker)
+    body = _webhook_body()
+    del body["conversion_id"]
+
+    resp = client.post("/api/generation/webhook", json=body)
+
+    assert resp.status_code == 422
+    assert notify_spy.calls == []
+
+
+async def test_webhook_non_numeric_conversion_duration_returns_422(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, notify_spy = _build_client(sessionmaker)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_duration="not-a-number"),
+    )
+
+    assert resp.status_code == 422
+    assert notify_spy.calls == []
+    job = await _get_job(sessionmaker, "job-1")
+    assert job.state == JOB_STATE_WAITING_FOR_WEBHOOK  # untouched
+
+
+async def test_webhook_empty_body_returns_422_not_500() -> None:
+    """No datastore access should even be attempted for a body this malformed --
+    validation must fail before the `get_session`/`get_notify_dependency`
+    dependencies are resolved."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    client, notify_spy = _build_client(sessionmaker)
+
+    resp = client.post("/api/generation/webhook", json={})
+
+    assert resp.status_code == 422
+    assert notify_spy.calls == []
+
+
+# ── Counters: `webhooks_received_total` increments by outcome (phase-4 hardening) ──
+
+
+def _outcome_count(outcome: str) -> float:
+    return webhooks_received_total.labels(outcome=outcome)._value.get()
+
+
+async def test_webhook_success_increments_ingest_pending_counter(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, _ = _build_client(sessionmaker)
+    before = _outcome_count("ingest_pending")
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert _outcome_count("ingest_pending") == before + 1
+
+
+async def test_webhook_duplicate_increments_duplicate_ignored_counter(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker, state=JOB_STATE_INGEST_PENDING)
+    client, _ = _build_client(sessionmaker)
+    before = _outcome_count("duplicate_ignored")
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert _outcome_count("duplicate_ignored") == before + 1
+
+
+async def test_webhook_failure_status_increments_failed_counter(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, _ = _build_client(sessionmaker)
+    before = _outcome_count("failed")
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None, status="ERROR"),
+    )
+
+    assert resp.status_code == 200
+    assert _outcome_count("failed") == before + 1
+
+
+async def test_webhook_unknown_task_increments_unknown_task_counter(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, _ = _build_client(sessionmaker)
+    before = _outcome_count("unknown_task")
+
+    resp = client.post(
+        "/api/generation/webhook", json=_webhook_body(task_id="no-such-task")
+    )
+
+    assert resp.status_code == 200
+    assert _outcome_count("unknown_task") == before + 1
