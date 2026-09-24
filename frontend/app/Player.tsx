@@ -40,6 +40,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
+import { fetchQuota, formatSongsLeft, type QuotaResponse } from "../lib/quota";
 import {
   computeExpectedOffsetSeconds,
   computeOffsetSeconds,
@@ -82,6 +83,10 @@ function bufferElement(
 export default function Player() {
   const [state, setState] = useState<NowPlayingState | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
+  // Issue #15, criterion #5: remaining daily "songs left", read once on mount from the
+  // same-origin `/quota` proxy. Null until it loads (the indicator stays hidden), so a
+  // slow/unreachable backend never blocks the player.
+  const [quota, setQuota] = useState<QuotaResponse | null>(null);
   const audioARef = useRef<HTMLAudioElement | null>(null);
   const audioBRef = useRef<HTMLAudioElement | null>(null);
   // Which buffer is currently "live" (the other is preloading/idle). A ref, not state:
@@ -195,6 +200,22 @@ export default function Player() {
     }
   };
 
+  // Issue #15, criterion #5: load "songs left" once on mount. Best-effort — a failure
+  // leaves the indicator hidden and never disrupts playback.
+  useEffect(() => {
+    let cancelled = false;
+    fetchQuota(NOW_PLAYING_BASE)
+      .then((q) => {
+        if (!cancelled) setQuota(q);
+      })
+      .catch(() => {
+        /* backend unreachable — leave the indicator hidden */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const isPlaying = state?.status === "playing";
 
   return (
@@ -213,6 +234,11 @@ export default function Player() {
       <p style={{ opacity: 0.7, margin: 0 }}>
         {isPlaying ? (state as NowPlaying).title : "The station is quiet right now."}
       </p>
+      {quota !== null && (
+        <p style={{ opacity: 0.5, margin: 0, fontSize: "0.85rem" }}>
+          {formatSongsLeft(quota)}
+        </p>
+      )}
       <button
         onClick={handlePlay}
         disabled={!isPlaying}
