@@ -152,6 +152,34 @@ async def test_reconcile_corrects_the_counter_both_upward_and_downward() -> None
     assert backend.get(global_key(settings)) == 2
 
 
+async def test_per_user_acquire_never_lets_total_in_flight_exceed_the_global_cap_across_users() -> (
+    None
+):
+    """Issue #15, criterion #2 (first half), confirmatory: even with many DIFFERENT
+    users each acquiring up to their OWN per-user cap, the TOTAL in-flight across all of
+    them can never exceed ``global_generation_concurrency`` -- this is already
+    guaranteed by ``acquire``'s global-then-per-user pairing (see the module docstring
+    and ``test_failed_per_user_acquire_does_not_leak_a_global_slot`` above). This test
+    documents/locks that existing guarantee for issue #15 rather than driving new
+    behavior, so unlike the rest of this issue's tests it is expected to be GREEN
+    immediately."""
+    settings = _settings(global_generation_concurrency=3, per_user_concurrent_jobs=2)
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    users = [f"user-{i}" for i in range(5)]
+
+    # Each of 5 distinct users tries to acquire up to their own per-user cap (2),
+    # concurrently -- 10 total attempts against a global cap of 3.
+    results = await asyncio.gather(*(sem.acquire(user) for user in users for _ in range(2)))
+
+    granted = sum(1 for ok in results if ok)
+    assert granted == 3  # the global cap, not the sum of per-user caps (10)
+    assert backend.get(global_key(settings)) == 3
+    # No single user was granted more than their own per-user cap either.
+    for user in users:
+        assert backend.get(user_key(settings, user)) <= 2
+
+
 async def test_concurrent_acquires_never_exceed_the_global_cap() -> None:
     settings = _settings(global_generation_concurrency=3, per_user_concurrent_jobs=20)
     backend = _InMemorySemaphoreBackend()
