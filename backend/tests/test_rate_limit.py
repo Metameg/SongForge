@@ -56,6 +56,10 @@ class _InMemoryRateLimitBackend:
 
 
 def _settings(**overrides: object) -> Settings:
+    # This suite exercises enforcement LOGIC, so it opts back into enforcement (the
+    # suite-wide default is OFF -- see `conftest.py`); the `enforce_rate_limits=False`
+    # tests below override this explicitly.
+    overrides.setdefault("enforce_rate_limits", True)
     return Settings(**overrides)  # type: ignore[arg-type]
 
 

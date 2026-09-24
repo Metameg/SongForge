@@ -18,6 +18,10 @@ from songforge.config import Settings
 
 
 def _settings(**overrides: object) -> Settings:
+    # This suite exercises the bot-check header LOGIC, which is bypassed when enforcement
+    # is off, so it opts back into enforcement (the suite-wide default is OFF -- see
+    # `conftest.py`).
+    overrides.setdefault("enforce_rate_limits", True)
     return Settings(**overrides)  # type: ignore[arg-type]
 
 

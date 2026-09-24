@@ -78,6 +78,20 @@ semaphore_acquire_denied_total = Counter(
     "Generation semaphore acquires denied because the global or per-user cap was full.",
     registry=REGISTRY
 )
+
+# ── Identity, rate limiting & abuse (issue #15) — load driver: create-rate ───────
+rate_limit_rejected_total = Counter(
+    "songforge_rate_limit_rejected_total",
+    "POST /create requests rejected by a daily-quota cap, labelled by the cap scope.",
+    labelnames=("scope",),
+    registry=REGISTRY,
+)
+
+bot_check_failed_total = Counter(
+    "songforge_bot_check_failed_total",
+    "POST /create requests rejected because the bot check failed.",
+    registry=REGISTRY,
+)
 # ── SSE + pub/sub (issue #10) — organized by load driver: listener count ────────
 #
 # The direct observable proof that listener count is decoupled from datastore load:
