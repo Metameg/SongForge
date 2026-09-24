@@ -199,6 +199,82 @@ async def test_webhook_notifies_after_the_persisting_commit(
     assert events[1].startswith("notify:")
 
 
+async def test_webhook_lookup_uses_a_row_lock_for_update(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """LOW/MED finding: two genuinely concurrent webhook deliveries for the same
+    `task_id` must not both observe WAITING_FOR_WEBHOOK and both transition + NOTIFY
+    -- `with_for_update()` on the lookup closes that race at its source (mirrors
+    `jobs.dispatch.claim_next_job`'s own row lock). True concurrent contention isn't
+    reproducible against an in-memory SQLite session (SQLite has no row-level
+    locking and silently no-ops `with_for_update()`, exactly like dispatch's
+    precedent), so this instead captures the actual `Select` statement the route
+    passes to `session.scalars(...)` and proves it would compile to a real
+    `SELECT ... FOR UPDATE` against Postgres."""
+    await _insert_job(sessionmaker)
+    captured: list[Any] = []
+
+    class _CapturingSession:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._session, name)
+
+        async def scalars(self, stmt: Any, *args: object, **kwargs: object) -> Any:
+            captured.append(stmt)
+            return await self._session.scalars(stmt, *args, **kwargs)
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield _CapturingSession(session)  # type: ignore[misc]
+
+    notify_spy = _NotifySpy()
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: notify_spy
+    client = TestClient(app)
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert captured, "the job lookup must go through session.scalars"
+    from sqlalchemy.dialects import postgresql
+
+    compiled = str(captured[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled.upper()
+
+
+async def test_webhook_returns_200_even_if_notify_raises(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """LOW finding: `notify(...)` fires after the state transition is already
+    durably committed -- a NOTIFY failure (e.g. a dropped connection between commit
+    and this call) must not surface as a 500 to the external generation API's
+    webhook caller, which would incorrectly signal failure and invite a retry the
+    idempotency check would then just no-op anyway. `_safe_notify` swallows it."""
+    await _insert_job(sessionmaker)
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield session
+
+    class _ExplodingNotify:
+        async def __call__(self, channel: str, payload: str) -> None:
+            raise RuntimeError("notify boom")
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: _ExplodingNotify()
+    client = TestClient(app)
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    job = await _get_job(sessionmaker, "job-1")
+    assert job.state == JOB_STATE_INGEST_PENDING  # already committed before notify ran
+
+
 async def test_webhook_never_calls_the_generation_client(
     sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

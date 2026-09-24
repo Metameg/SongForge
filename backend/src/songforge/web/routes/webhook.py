@@ -85,6 +85,20 @@ async def _pg_notify(session: AsyncSession, channel: str, payload: str) -> None:
     await session.commit()
 
 
+async def _safe_notify(notify: Notifier, channel: str, payload: str) -> None:
+    """Best-effort post-commit notify (quality report LOW finding, mirrors
+    ``jobs.dispatch._safe_notify``): the state transition above is already durably
+    committed by this point, so a NOTIFY failure (e.g. a dropped connection between
+    commit and this call) must never surface as a 500 to the external generation
+    API's webhook caller -- that would incorrectly signal failure and invite a retry,
+    which the idempotency check above already handles as a no-op. Worst case here is
+    only the poll backstop's latency, never a lost transition."""
+    try:
+        await notify(channel, payload)
+    except Exception:
+        log.exception("webhook_notify_failed", channel=channel, payload=payload)
+
+
 def get_notify_dependency(
     session: AsyncSession = Depends(get_session),
 ) -> Notifier:
@@ -109,9 +123,33 @@ async def receive_webhook(
     the transition is committed to Postgres before ``notify`` fires, and this route
     never calls the generation client -- the audio download/upload belongs entirely
     to the async ingest worker (``songforge.jobs.ingest``).
+
+    SECURITY (deferred, follow-up ticket -- see security report Finding 1): this
+    route does not verify the caller is genuinely the generation provider (no HMAC
+    signature / shared-secret / source check). Left unbuilt for #13 because the
+    simulator seam has no signing contract to verify against and the topology is
+    currently internal-only + UUID-gated (``task_id`` is a 128-bit random handle) --
+    but a real external provider deployment MUST add provider-signature
+    verification here (``identity.py``'s ``hmac.compare_digest`` pattern is the
+    model) before this endpoint is genuinely public. The audio URL this handler
+    records is trusted downstream at the actual network fetch -- see the matching
+    comment at the download site in ``songforge.jobs.ingest.HttpAudioDownloader``.
     """
     settings = get_settings()
-    job = (await session.scalars(select(Job).where(Job.task_id == body.task_id))).first()
+    # `.with_for_update()` (LOW/MED finding): without a row lock, two genuinely
+    # concurrent deliveries for the same `task_id` could both observe
+    # WAITING_FOR_WEBHOOK before either commits and both apply the transition +
+    # NOTIFY. Harmless today (ingest's own claim is FOR UPDATE SKIP LOCKED-
+    # serialized, so a second wake just finds nothing to do), but this closes the
+    # race at its source instead of relying on that downstream idempotency. A no-op
+    # on SQLite (the dialect used by this file's unit tests) -- it simply doesn't
+    # emit a locking clause there, matching `jobs.dispatch.claim_next_job`'s
+    # precedent for the same reason.
+    job = (
+        await session.scalars(
+            select(Job).where(Job.task_id == body.task_id).with_for_update()
+        )
+    ).first()
 
     if job is None:
         webhooks_received_total.labels(outcome="unknown_task").inc()
@@ -145,6 +183,6 @@ async def receive_webhook(
     webhooks_received_total.labels(outcome="ingest_pending").inc()
     log.info("webhook_ingest_pending", task_id=body.task_id, job_id=job.job_id)
 
-    await notify(settings.ingest_channel, job.job_id)
+    await _safe_notify(notify, settings.ingest_channel, job.job_id)
 
     return WebhookResponse()
