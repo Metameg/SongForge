@@ -79,6 +79,20 @@ semaphore_acquire_denied_total = Counter(
     registry=REGISTRY
 )
 
+# ── Identity, rate limiting & abuse (issue #15) — load driver: create-rate ───────
+rate_limit_rejected_total = Counter(
+    "songforge_rate_limit_rejected_total",
+    "POST /create requests rejected by a daily-quota cap, labelled by the cap scope.",
+    labelnames=("scope",),
+    registry=REGISTRY,
+)
+
+bot_check_failed_total = Counter(
+    "songforge_bot_check_failed_total",
+    "POST /create requests rejected because the bot check failed.",
+    registry=REGISTRY,
+)
+
 # ── Webhook + async ingest (issue #13) ───────────────────────────────────────────
 webhooks_received_total = Counter(
     "songforge_webhooks_received_total",

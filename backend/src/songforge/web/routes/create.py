@@ -25,9 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from songforge.config import get_settings
 from songforge.db import get_sessionmaker
 from songforge.logging_setup import get_logger
-from songforge.metrics import jobs_created_total
+from songforge.metrics import bot_check_failed_total, jobs_created_total
 from songforge.models import JOB_STATE_QUEUED, Job
-from songforge.web.identity import mint, sign, unsign
+from songforge.redis_client import get_redis
+from songforge.web.bot_check import BotCheck, HeaderTokenBotCheck
+from songforge.web.identity import client_ip, resolve_identity, set_identity_cookie
+from songforge.web.rate_limit import RateLimiter, RedisRateLimitBackend
 
 router = APIRouter(tags=["create"])
 log = get_logger(__name__)
@@ -80,32 +83,19 @@ def get_notify_dependency(
     return _notify
 
 
-def _read_identity(request: Request) -> str | None:
-    """Read + verify the signed identity cookie, if present. ``None`` on absent,
-    malformed, or tampered — the caller mints a fresh identity in that case."""
+def get_rate_limiter() -> RateLimiter:
+    """The daily-quota rate limiter (issue #15, criteria #1/#4); overridden in tests with
+    a fake so the edge tests need no live Redis. Reads settings at request time so the
+    ``enforce_rate_limits`` kill switch (and test monkeypatches of ``get_settings``) take
+    effect without reconstructing the app."""
     settings = get_settings()
-    raw = request.cookies.get(settings.identity_cookie_name)
-    if raw is None:
-        return None
-    return unsign(raw, secret=settings.session_secret)
+    return RateLimiter(RedisRateLimitBackend(get_redis()), settings)
 
 
-def _set_identity_cookie(response: Response, user_id: str) -> None:
-    """Mint the signed cookie for a freshly-minted identity (criterion #1).
-
-    `secure` is config-driven off `environment` (security report MEDIUM finding):
-    this cookie is the sole identity/auth token, so outside local dev (where plain
-    HTTP is expected) it must never be sent over an unencrypted connection.
-    """
-    settings = get_settings()
-    response.set_cookie(
-        settings.identity_cookie_name,
-        sign(user_id, secret=settings.session_secret),
-        max_age=settings.identity_cookie_max_age_seconds,
-        httponly=True,
-        samesite="lax",
-        secure=settings.environment != "local",
-    )
+def get_bot_check() -> BotCheck:
+    """The bot-check gate (issue #15, criterion #3); overridden in tests with a
+    pass/fail fake."""
+    return HeaderTokenBotCheck(get_settings())
 
 
 def _validate_prompt(prompt: str) -> None:
@@ -142,25 +132,46 @@ async def create_job(
     response: Response,
     session: AsyncSession = Depends(get_session),
     notify: Notifier = Depends(get_notify_dependency),
+    rate_limiter: RateLimiter = Depends(get_rate_limiter),
+    bot_check: BotCheck = Depends(get_bot_check),
 ) -> CreateResponse:
-    """Mint/reuse identity, validate the prompt, persist QUEUED, then NOTIFY.
+    """Gate the create action, then persist QUEUED before any external call, then NOTIFY.
 
-    Ordering is the point of this handler (criteria #1 + #5): the job row is committed
-    to Postgres, in the QUEUED state, before ``notify`` fires and long before any
-    generation-API call happens (that call belongs entirely to
+    Gate order (issue #15): the **bot check** runs first (403 on failure -- deter
+    scripted farming before doing any work); then prompt **validation** (422 -- reject
+    malformed input WITHOUT charging a quota slot); then the **daily-quota rate limiter**
+    ``consume`` (429 on any exceeded cap -- charges the slot only for a valid, human
+    request). Every rejection persists nothing.
+
+    After the gates, the ordering from issue #12 still holds (criteria #1 + #5): the job
+    row is committed to Postgres, in the QUEUED state, before ``notify`` fires and long
+    before any generation-API call (that call belongs entirely to
     ``songforge.jobs.dispatch``, never to this route).
     """
     settings = get_settings()
+
+    identity = resolve_identity(request, settings)
+    ip = client_ip(request, settings)
+
+    if not await bot_check.verify(request):
+        bot_check_failed_total.inc()
+        log.info("bot_check_failed", user_id=identity.user_id)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "bot check failed")
+
     _validate_prompt(body.prompt)
     _validate_lyrics(body.lyrics)
     lyrics = body.lyrics.strip() if body.lyrics else None
 
-    existing_identity = _read_identity(request)
-    user_id = existing_identity if existing_identity is not None else mint()
+    decision = await rate_limiter.consume(identity, ip)
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "daily song limit reached — try again tomorrow",
+        )
 
     job = Job(
         job_id=uuid.uuid4().hex,
-        user_id=user_id,
+        user_id=identity.user_id,
         prompt=body.prompt.strip(),
         lyrics=lyrics,
         state=JOB_STATE_QUEUED,
@@ -169,11 +180,11 @@ async def create_job(
     session.add(job)
     await session.commit()
     jobs_created_total.inc()
-    log.info("job_created", job_id=job.job_id, user_id=user_id)
+    log.info("job_created", job_id=job.job_id, user_id=identity.user_id)
 
     await notify(settings.jobs_new_channel, job.job_id)
 
-    if existing_identity is None:
-        _set_identity_cookie(response, user_id)
+    if identity.minted:
+        set_identity_cookie(response, identity.user_id, settings)
 
     return CreateResponse(job_id=job.job_id, state=job.state)

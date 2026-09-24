@@ -91,6 +91,32 @@ class Settings(BaseSettings):
     per_user_concurrent_jobs: int = 2
     global_generation_concurrency: int = 1
 
+    # ── Rate-limit daily window + counter keys (issue #15, criteria #1/#4) ───
+    # TTL stamped on each daily counter on its FIRST increment (default 24h). The key
+    # also carries a per-day UTC bucket, so "songs left" resets both by TTL expiry and
+    # by the day rolling over.
+    rate_limit_window_seconds: int = 60 * 60 * 24
+    rate_limit_cookie_prefix: str = "rl:cookie:"
+    rate_limit_ip_prefix: str = "rl:ip:"
+    rate_limit_account_prefix: str = "rl:account:"
+
+    # ── Client IP resolution (issue #15, criterion #1) ──────────────────────
+    # Trusted forwarded header carrying the real client IP behind a proxy/LB. Left
+    # unset (``None``), the direct socket peer (``request.client.host``) is used and any
+    # forwarded header is IGNORED -- trusting a client-supplied header with no known
+    # proxy in front lets anyone spoof their IP and dodge the per-IP cap. Set to e.g.
+    # ``X-Forwarded-For`` only when a trusted proxy always overwrites it.
+    client_ip_header: str | None = None
+
+    # ── Bot check (issue #15, criterion #3) ─────────────────────────────────
+    # Shared-secret header gate on ``POST /create``. An empty ``bot_check_token`` (the
+    # default) disables the check -- the documented local-dev seam -- so dev is not
+    # walled off with no way to pass it; a real CAPTCHA/provider can replace
+    # ``HeaderTokenBotCheck`` behind the ``BotCheck`` protocol without touching the
+    # route. The gate is also bypassed entirely when ``enforce_rate_limits`` is false.
+    bot_check_header: str = "X-Bot-Check"
+    bot_check_token: str = ""
+
     # ── Worker ──────────────────────────────────────────────────────────────
     worker_heartbeat_path: str = "/tmp/songforge-worker.heartbeat"  # noqa: S108
     worker_loop_interval_seconds: float = 5.0

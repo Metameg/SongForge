@@ -26,6 +26,18 @@ x-backend-env: &backend-env
   MUSICGPT_BASE_URL: ${MUSICGPT_BASE_URL:-http://simulator:8080}
   MUSICGPT_API_KEY: ${MUSICGPT_API_KEY:-}
   ENFORCE_RATE_LIMITS: ${ENFORCE_RATE_LIMITS:-true}
+  # Issue #15: daily-quota caps, window, client-IP resolution, and the bot-check gate --
+  # forwarded here so they are tunable via .env without a rebuild (criterion #4). Caps
+  # default to the code defaults; BOT_CHECK_TOKEN blank leaves the bot check disabled.
+  ANON_DAILY_SONGS_PER_COOKIE: ${ANON_DAILY_SONGS_PER_COOKIE:-2}
+  ANON_DAILY_SONGS_PER_IP: ${ANON_DAILY_SONGS_PER_IP:-6}
+  ACCOUNTS_PER_IP: ${ACCOUNTS_PER_IP:-2}
+  AUTHED_DAILY_SONGS: ${AUTHED_DAILY_SONGS:-10}
+  PER_USER_CONCURRENT_JOBS: ${PER_USER_CONCURRENT_JOBS:-2}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-86400}
+  CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
+  BOT_CHECK_HEADER: ${BOT_CHECK_HEADER:-X-Bot-Check}
+  BOT_CHECK_TOKEN: ${BOT_CHECK_TOKEN:-}
   # Issue #12: signed-cookie identity + job-queue dispatch. SESSION_SECRET MUST be
   # overridden in prod (see .env.example) -- the dev-insecure default is fine locally.
   SESSION_SECRET: ${SESSION_SECRET:-dev-insecure-change-me}

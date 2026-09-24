@@ -307,6 +307,188 @@ async def test_identity_cookie_lacks_secure_flag_in_local(
     assert "secure" not in set_cookie_header.lower()
 
 
+
+# ── Rate limiting + bot check gates (issue #15, criteria #1 + #3 + #4) ────────────
+#
+# `get_rate_limiter`/`get_bot_check` don't exist on `songforge.web.routes.create` yet,
+# nor does the gating logic in `create_job` itself -- imported locally inside each
+# test/helper below (mirrors `tests/test_now_playing.py`'s NOTE-documented convention)
+# so these RED tests don't break the pre-existing tests above in this file.
+
+
+def _build_client_with_gates(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    events: list[str],
+    *,
+    rate_limiter: Any,
+    bot_check: Any,
+) -> tuple[TestClient, _NotifySpy]:
+    from songforge.web.routes.create import get_bot_check, get_rate_limiter
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield _CommitTrackingSession(session, events)  # type: ignore[misc]
+
+    notify_spy = _NotifySpy(events)
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: notify_spy
+    app.dependency_overrides[get_rate_limiter] = lambda: rate_limiter
+    app.dependency_overrides[get_bot_check] = lambda: bot_check
+    return TestClient(app), notify_spy
+
+
+class _PassingBotCheck:
+    async def verify(self, request: Any) -> bool:
+        return True
+
+
+class _FailingBotCheck:
+    async def verify(self, request: Any) -> bool:
+        return False
+
+
+async def test_create_is_blocked_with_429_when_the_cookie_cap_is_exceeded(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _CookieDenyingLimiter:
+        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=False, blocked_scope="cookie", remaining=0)
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 0
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    client, _ = _build_client_with_gates(
+        sessionmaker,
+        events,
+        rate_limiter=_CookieDenyingLimiter(),
+        bot_check=_PassingBotCheck(),
+    )
+
+    resp = client.post("/create", json={"prompt": "one too many songs"})
+
+    assert resp.status_code == 429
+    assert resp.json()["detail"]  # friendly body, not empty
+    assert await _job_rows(sessionmaker) == []
+
+
+async def test_create_is_blocked_with_429_when_the_ip_cap_is_exceeded(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _IpDenyingLimiter:
+        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=False, blocked_scope="ip", remaining=0)
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 0
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    client, _ = _build_client_with_gates(
+        sessionmaker, events, rate_limiter=_IpDenyingLimiter(), bot_check=_PassingBotCheck()
+    )
+
+    resp = client.post("/create", json={"prompt": "another ip-capped song"})
+
+    assert resp.status_code == 429
+    assert await _job_rows(sessionmaker) == []
+
+
+async def test_create_is_blocked_with_403_when_the_bot_check_fails(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _AllowingLimiter:
+        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=True, blocked_scope=None, remaining=5)
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 5
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    client, _ = _build_client_with_gates(
+        sessionmaker, events, rate_limiter=_AllowingLimiter(), bot_check=_FailingBotCheck()
+    )
+
+    resp = client.post("/create", json={"prompt": "a bot's song"})
+
+    assert resp.status_code == 403
+    assert await _job_rows(sessionmaker) == []
+
+
+async def test_create_succeeds_within_caps_and_increments_the_limiter_counter(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _RecordingLimiter:
+        def __init__(self) -> None:
+            self.consume_calls: list[tuple[str, str]] = []
+
+        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+            self.consume_calls.append((identity.user_id, ip))
+            return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 1
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    limiter = _RecordingLimiter()
+    client, _ = _build_client_with_gates(
+        sessionmaker, events, rate_limiter=limiter, bot_check=_PassingBotCheck()
+    )
+
+    resp = client.post("/create", json={"prompt": "a song under the cap"})
+
+    assert resp.status_code == 200
+    rows = await _job_rows(sessionmaker)
+    assert len(rows) == 1
+    assert len(limiter.consume_calls) == 1  # the counter was actually incremented
+
+
+async def test_enforce_rate_limits_false_never_blocks_and_bypasses_bot_check(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Global kill switch (spec #29): with enforcement off, creation must never be
+    blocked by the daily caps OR the bot check -- exercised against the REAL default
+    rate-limiter/bot-check dependencies (no fakes), proving the disabled posture
+    end-to-end. This needs no live Redis: the disabled decision layer never touches its
+    backend at all (see `tests/test_rate_limit.py::test_enforce_rate_limits_false_*`),
+    and the Redis client itself only connects lazily on first command (see
+    `redis_client.py`'s docstring / `web/app.py`'s `PointerBroadcaster` construction)."""
+    disabled_settings = Settings(_env={**os.environ, "ENFORCE_RATE_LIMITS": "false"})
+    monkeypatch.setattr(create_route, "get_settings", lambda: disabled_settings)
+
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+
+    responses = [
+        client.post("/create", json={"prompt": f"song number {i}"}) for i in range(5)
+    ]
+
+    assert all(resp.status_code == 200 for resp in responses)
+    rows = await _job_rows(sessionmaker)
+    assert len(rows) == 5
+
+
 @pytest.mark.parametrize("environment", ["staging", "prod"])
 async def test_identity_cookie_has_secure_flag_outside_local(
     sessionmaker: async_sessionmaker[AsyncSession],
