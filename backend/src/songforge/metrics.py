@@ -92,6 +92,34 @@ bot_check_failed_total = Counter(
     "POST /create requests rejected because the bot check failed.",
     registry=REGISTRY,
 )
+
+# ── Webhook + async ingest (issue #13) ───────────────────────────────────────────
+webhooks_received_total = Counter(
+    "songforge_webhooks_received_total",
+    "Generation-API webhook deliveries received, by outcome.",
+    labelnames=("outcome",),
+    registry=REGISTRY,
+)
+
+ingest_completed_total = Counter(
+    "songforge_ingest_completed_total",
+    "Jobs that reached READY via the async ingest worker (audio stored in R2).",
+    registry=REGISTRY,
+)
+
+ingest_failed_total = Counter(
+    "songforge_ingest_failed_total",
+    "Jobs marked FAILED after ingest attempts were exhausted (or an unrecoverable "
+    "data-integrity condition, e.g. a missing conversion_id_1).",
+    registry=REGISTRY,
+)
+
+ingest_requeued_total = Counter(
+    "songforge_ingest_requeued_total",
+    "Ingest attempts requeued to INGEST_PENDING after a download/by-id failure that "
+    "the in-claim refresh-and-retry didn't resolve.",
+    registry=REGISTRY,
+)
 # ── SSE + pub/sub (issue #10) — organized by load driver: listener count ────────
 #
 # The direct observable proof that listener count is decoupled from datastore load:

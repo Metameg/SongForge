@@ -97,11 +97,11 @@ class RadioState(Base):
 #   QUEUED -> SUBMITTING -> WAITING_FOR_WEBHOOK -> INGEST_PENDING -> READY
 #                       \\_______________ FAILED ______________/
 #
-# Issue #12 only drives QUEUED -> SUBMITTING -> WAITING_FOR_WEBHOOK, plus requeue to
-# QUEUED (generation API 429 -- best-effort Redis semaphore backstopped by the API's
-# authoritative rate limit, see .orchestrator/CONTEXT.md "In-scope decision") and
-# straight to FAILED on a terminal 4xx. INGEST_PENDING/READY are later tickets; the
-# full enum is defined now for forward-compatibility so the column never needs a widen.
+# Issue #12 drives QUEUED -> SUBMITTING -> WAITING_FOR_WEBHOOK (plus requeue to QUEUED,
+# or straight to FAILED on a terminal 4xx). Issue #13 drives WAITING_FOR_WEBHOOK ->
+# INGEST_PENDING (the webhook handler, songforge.web.routes.webhook) and
+# INGEST_PENDING -> READY / FAILED (the async ingest worker, songforge.jobs.ingest).
+# Playback-queue enqueue on READY is a later ticket.
 JobState = Literal[
     "QUEUED",
     "SUBMITTING",
@@ -178,6 +178,27 @@ class Job(Base):
     # The callback URL sent to the generation API at submit time (config-derived;
     # the receiving webhook handler is a later issue -- see CONTEXT.md scope).
     webhook_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # Webhook-recorded metadata (issue #13, acceptance criterion #1): `audio_url` is a
+    # *hint* URL that can expire before ingest runs -- the ingest worker refreshes it
+    # via a by-id lookup when needed (see songforge.jobs.ingest). Overwritten in place
+    # on refresh, never a history of URLs.
+    audio_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    audio_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Set at READY (issue #13, criterion #3): the playable Song this job produced.
+    # `Song.id` is the job's `conversion_id_1` (the canonical conversion the PRD says
+    # to store), not a separately generated id -- see songforge.jobs.ingest.
+    song_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("songs.id"), nullable=True
+    )
+
+    # Ingest retry bookkeeping (issue #13): a SEPARATE counter from `attempts` above --
+    # commingling them would erase whether a retry happened during dispatch or during
+    # ingest. `available_at` (already defined above) is reused as-is for ingest's
+    # requeue backoff (the job's `state` alone disambiguates which stage it belongs to).
+    ingest_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
