@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # API; on R2 public access is configured out-of-band, so a failure is non-fatal.
     # Set false to keep the bucket private (e.g. if serving via signed URLs instead).
     s3_public_bucket: bool = True
+    # botocore socket timeouts for the underlying S3 client (quality report MED
+    # finding): without these, a hung MinIO/R2 connection would block indefinitely --
+    # unbounded, unlike the rest of this module's explicit timeouts.
+    s3_connect_timeout_seconds: float = 10.0
+    s3_read_timeout_seconds: float = 30.0
 
     # ── Static library (seeded at boot; spec #76) ───────────────────────────
     # Directory of curated *.mp3 files uploaded + cataloged on boot. Bind-mounted
@@ -146,6 +151,28 @@ class Settings(BaseSettings):
     # Backoff applied to a job's `available_at` on a 429/5xx/timeout requeue, so
     # dispatch doesn't hot-loop re-claiming the same job immediately.
     dispatch_requeue_backoff_seconds: float = 5.0
+
+    # ── Async ingest (issue #13: webhook -> download -> R2 upload -> READY) ────
+    # Postgres LISTEN/NOTIFY channel the webhook handler NOTIFYs after recording a
+    # successful webhook (state -> INGEST_PENDING), and the ingest worker LISTENs on.
+    ingest_channel: str = "ingest_pending"
+    # Slow-poll backstop for the ingest loop, mirrors dispatch_poll_backstop_seconds.
+    ingest_poll_backstop_seconds: float = 5.0
+    # httpx timeout for downloading the finished audio from its (possibly expiring)
+    # hint URL, or from the by-id-refreshed URL.
+    ingest_download_timeout_seconds: float = 30.0
+    # Backoff applied to a job's `available_at` on a download/by-id-lookup failure
+    # that isn't resolved by the single in-claim refresh-and-retry.
+    ingest_requeue_backoff_seconds: float = 10.0
+    # Bounded ingest retries before giving up -> FAILED (this is NOT the watchdog's
+    # job; see .orchestrator/CONTEXT.md OUT-of-scope).
+    ingest_max_attempts: int = 5
+    # Hard ceiling on a single audio download's size (security report MED finding:
+    # memory-exhaustion / DoS via a hostile or oversized `audio_url`). 100 MiB is
+    # generously above any real song-length MP3; exceeding it fails the download the
+    # same way a network error would (bounded retry -> requeue/FAILED).
+    ingest_max_download_bytes: int = 100 * 1024 * 1024
+
     # ── SSE + pub/sub (issue #10: push + gapless transitions) ───────────────
     # Redis pub/sub channel the coordinator publishes the resolved pointer to on
     # every genuine init/advance, and that each app instance's `PointerBroadcaster`

@@ -58,13 +58,25 @@ class GenerationHandles:
 
 
 class GenerationClient(Protocol):
-    """Port ``songforge.jobs.dispatch`` depends on; tests inject a stub/fake."""
+    """Port ``songforge.jobs.dispatch`` (and ``songforge.jobs.ingest``) depend on;
+    tests inject a stub/fake."""
 
     async def create(
         self, *, prompt: str, lyrics: str | None, webhook_url: str
     ) -> GenerationHandles:
         """Submit a generation request. Raises ``GenerationRateLimited``,
         ``GenerationRejected``, or ``GenerationTransientError`` on non-200 outcomes."""
+        ...
+
+    async def get_audio_url_by_id(self, task_id: str) -> str:
+        """By-handle URL refresh (issue #13, acceptance criterion #4): the webhook's
+        ``conversion_path`` is only a *hint* that can expire before ingest runs; this
+        re-fetches a fresh, unexpired audio URL for the same task. Raises
+        ``GenerationRateLimited``, ``GenerationRejected`` (a 404 unknown ``task_id``
+        included), or ``GenerationTransientError`` on non-200 outcomes -- the same
+        typed-exception mapping as ``create`` -- and also raises
+        ``GenerationTransientError`` if a 200 response has no usable ``audio_url``
+        (the task isn't completed yet, or a malformed body)."""
         ...
 
 
@@ -129,3 +141,43 @@ class HttpGenerationClient:
             raise GenerationTransientError(
                 f"generation API returned a malformed 200 body: {exc}"
             ) from exc
+
+    async def get_audio_url_by_id(self, task_id: str) -> str:
+        url = f"{self._settings.musicgpt_base_url}/byId"
+        headers = {"Authorization": self._settings.musicgpt_api_key}
+        try:
+            response = await self._http_client.get(
+                url, params={"task_id": task_id}, headers=headers
+            )
+        except httpx.TimeoutException as exc:
+            raise GenerationTransientError(f"by-id lookup timed out: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise GenerationTransientError(
+                f"by-id lookup request failed: {exc}"
+            ) from exc
+
+        if response.status_code == 429:
+            raise GenerationRateLimited("by-id lookup is at capacity")
+        if response.status_code >= 500:
+            raise GenerationTransientError(
+                f"by-id lookup returned {response.status_code}"
+            )
+        if response.status_code >= 400:
+            raise GenerationRejected(response.status_code, response.text)
+
+        try:
+            data = response.json()
+        except json.JSONDecodeError as exc:
+            raise GenerationTransientError(
+                f"by-id lookup returned a malformed 200 body: {exc}"
+            ) from exc
+
+        audio_url = data.get("audio_url") if isinstance(data, dict) else None
+        if not audio_url:
+            # Missing/empty `audio_url` on a 200 -- either the task genuinely isn't
+            # completed yet, or a malformed body; both are retriable from the
+            # caller's perspective (ingest.py's refresh-and-retry), not a crash.
+            raise GenerationTransientError(
+                "by-id lookup returned no usable audio_url"
+            )
+        return str(audio_url)

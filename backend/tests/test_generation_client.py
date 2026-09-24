@@ -27,6 +27,7 @@ from songforge.jobs.generation_client import (
     GenerationTransientError,
     HttpGenerationClient,
 )
+from songforge.simulator.app import wait_for_pending_webhooks
 from songforge.simulator.faults import FAULT_HEADER, Fault
 from tests.simulator_helpers import DEFAULT_BODY, make_rig, make_sim_client
 
@@ -215,3 +216,135 @@ async def test_create_against_real_simulator_raises_rate_limited_on_real_429() -
                     lyrics=None,
                     webhook_url=str(DEFAULT_BODY["webhook_url"]),
                 )
+
+
+# ── `get_audio_url_by_id` (issue #13: by-handle URL refresh, `GET {base}/byId`) ───
+#
+# The webhook's `conversion_path` is only a *hint*; when it's expired or the download
+# fails, the ingest path refreshes it via the generation API's by-handle lookup
+# (PRD #6 "Object storage & Generation pipeline"). Mirrors `create`'s two-tier test
+# structure above: hand-crafted `MockTransport` responses first, then the real
+# simulator (`simulator/routes/by_id.py` + `simulator/schemas.py::ByIdResponse`) so
+# fixture drift on either side can't hide a break.
+
+
+async def test_get_audio_url_by_id_returns_fresh_url_on_200() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/byId"
+        assert request.url.params["task_id"] == "t1"
+        return httpx.Response(
+            200,
+            json={
+                "task_id": "t1",
+                "status": "COMPLETED",
+                "conversion_id_1": "c1",
+                "conversion_id_2": "c2",
+                "audio_url": "http://musicgpt.test/audio/fresh-token",
+                "conversion_duration": 123.4,
+                "title": "A Song",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        url = await client.get_audio_url_by_id("t1")
+
+    assert url == "http://musicgpt.test/audio/fresh-token"
+
+
+async def test_get_audio_url_by_id_raises_rejected_on_404() -> None:
+    """Unknown `task_id` mirrors `simulator/routes/by_id.py`'s 404 -- not retriable."""
+    handler = httpx.MockTransport(lambda r: httpx.Response(404, text="unknown task_id"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationRejected) as exc_info:
+            await client.get_audio_url_by_id("unknown")
+    assert exc_info.value.status_code == 404
+
+
+async def test_get_audio_url_by_id_raises_rate_limited_on_429() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(429, text="high demand"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationRateLimited):
+            await client.get_audio_url_by_id("t1")
+
+
+async def test_get_audio_url_by_id_raises_transient_error_on_5xx() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(503, text="down"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_audio_url_by_id("t1")
+
+
+async def test_get_audio_url_by_id_raises_transient_error_on_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_audio_url_by_id("t1")
+
+
+async def test_get_audio_url_by_id_raises_transient_error_on_malformed_json_body() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(200, text="not json"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_audio_url_by_id("t1")
+
+
+async def test_get_audio_url_by_id_raises_transient_error_on_200_missing_audio_url() -> None:
+    """A 200 body missing the expected `audio_url` field (malformed API response, not
+    the legitimate "not completed yet" case which the real simulator never returns
+    from a freshly-minted refresh) must be treated as transient/retriable."""
+    handler = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "task_id": "t1",
+                "status": "COMPLETED",
+                "conversion_id_1": "c1",
+                "conversion_id_2": "c2",
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_audio_url_by_id("t1")
+
+
+# ── Against the REAL simulator (data-contract audit) ──────────────────────────────
+
+
+async def test_get_audio_url_by_id_against_real_simulator_returns_a_fresh_url() -> None:
+    """Drives the real `GET /byId` (simulator/routes/by_id.py) end to end -- proves
+    `HttpGenerationClient.get_audio_url_by_id`'s parsing matches the real
+    `ByIdResponse` shape (simulator/schemas.py), not a hand-crafted MockTransport
+    dict."""
+    rig = make_rig()
+    async with rig.client:
+        client = HttpGenerationClient(_settings(), rig.client)
+        handles = await client.create(
+            prompt=str(DEFAULT_BODY["prompt"]),
+            lyrics=None,
+            webhook_url=str(DEFAULT_BODY["webhook_url"]),
+        )
+        await wait_for_pending_webhooks(rig.app)
+
+        url = await client.get_audio_url_by_id(handles.task_id)
+
+    assert url
+    assert url.startswith("http")
+
+
+async def test_get_audio_url_by_id_against_real_sim_rejects_unknown_task() -> None:
+    rig = make_rig()
+    async with rig.client:
+        client = HttpGenerationClient(_settings(), rig.client)
+        with pytest.raises(GenerationRejected) as exc_info:
+            await client.get_audio_url_by_id("does-not-exist")
+    assert exc_info.value.status_code == 404

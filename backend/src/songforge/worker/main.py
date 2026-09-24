@@ -15,6 +15,7 @@ from songforge.config import Settings, get_settings
 from songforge.logging_setup import configure_logging, get_logger
 from songforge.worker.dispatch import run_dispatch
 from songforge.worker.health import touch_heartbeat
+from songforge.worker.ingest import run_ingest
 from songforge.worker.radio_coordinator import run_radio_coordinator
 
 log = get_logger(__name__)
@@ -43,9 +44,12 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
       * dispatch  — claim QUEUED jobs (FOR UPDATE SKIP LOCKED) + Redis semaphore,
         woken by LISTEN/NOTIFY on the new-job and semaphore-release channels
         (issue #12, criteria #2/#3/#5).
+      * ingest    — claim INGEST_PENDING jobs (FOR UPDATE SKIP LOCKED), download
+        finished audio (refreshing an expired URL via by-id lookup when needed),
+        upload to R2, and land the job at READY with a playable Song row (issue
+        #13, criteria #2/#3/#4). Row-claimable like dispatch, not leader-elected.
 
     Later tickets add, concurrently supervised alongside these:
-      * ingest    — download finished audio, upload to R2, enqueue the song
       * watchdog  — leaderless recovery sweep; every side-effect is row-claimed first
     """
     log.info("worker_started", environment=settings.environment)
@@ -53,6 +57,7 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
         _heartbeat_loop(settings, stop),
         run_radio_coordinator(settings, stop),
         run_dispatch(settings, stop),
+        run_ingest(settings, stop),
     )
     log.info("worker_stopped")
 

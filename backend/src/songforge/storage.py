@@ -43,6 +43,8 @@ class ObjectStorage:
         region: str = "auto",
         public_base_url: str | None = None,
         public_read: bool = True,
+        connect_timeout: float = 10.0,
+        read_timeout: float = 30.0,
     ) -> None:
         self.bucket = bucket
         self.endpoint_url = endpoint_url.rstrip("/")
@@ -54,8 +56,16 @@ class ObjectStorage:
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name=region,
-            # Path-style addressing works uniformly for MinIO and R2.
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            # Path-style addressing works uniformly for MinIO and R2. Explicit socket
+            # timeouts (quality report MED finding, issue #13 review): without these,
+            # a hung MinIO/R2 connection blocks the calling thread indefinitely --
+            # config-driven so local/staging/prod can tune independently.
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                connect_timeout=connect_timeout,
+                read_timeout=read_timeout,
+            ),
         )
 
     @classmethod
@@ -69,6 +79,8 @@ class ObjectStorage:
             region=settings.s3_region,
             public_base_url=settings.s3_public_base_url,
             public_read=settings.s3_public_bucket,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
         )
 
     def public_url(self, key: str) -> str:
