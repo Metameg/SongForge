@@ -1,17 +1,16 @@
-"""Edge-case coverage for `songforge.jobs.ingest.ingest_claimed_job` (issue #13,
-phase-4 test-hardening) that documents -- rather than changes -- two boundary
-inputs the main `test_ingest.py` suite doesn't exercise: a genuinely missing
-(``None``) ``audio_url`` on an otherwise-valid ``INGEST_PENDING`` job, and a blank
-(empty-string) ``conversion_id_1``.
+"""Edge-case coverage for `songforge.jobs.ingest.ingest_claimed_job` (issue #13) for
+two boundary inputs the main `test_ingest.py` suite doesn't exercise: a genuinely
+missing (``None``) ``audio_url`` on an otherwise-valid ``INGEST_PENDING`` job, and a
+blank (empty-string) ``conversion_id_1``.
 
 Both are "should never happen" inputs under the normal webhook -> dispatch flow
 (the webhook route never persists a ``None`` ``audio_url`` en route to
 ``INGEST_PENDING`` -- see `web/routes/webhook.py`'s
 ``body.conversion_path is None`` check; `jobs/dispatch.py` always sets a non-empty
-``conversion_id_1`` before ``WAITING_FOR_WEBHOOK``). Per the phase-4 brief ("assert
-it, don't change it"), these tests pin down exactly what the CURRENT implementation
-does with a corrupted/legacy row, without modifying `jobs/ingest.py`. See each
-test's docstring for a documented behavioral asymmetry worth a look in review.
+``conversion_id_1`` before ``WAITING_FOR_WEBHOOK``). Phase-4 pinned these down as
+documented CONCERNS (a bare ``assert`` for the first, an ``is None`` guard that
+missed empty-string for the second); phase-5 review fixed both (quality report HIGH
+and MED findings) -- this file now asserts the FIXED graceful-FAILED behavior.
 """
 
 from __future__ import annotations
@@ -24,14 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from songforge.config import Settings
 from songforge.jobs.ingest import ingest_claimed_job
+from songforge.metrics import ingest_failed_total
 from songforge.models import (
+    JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
-    JOB_STATE_READY,
     Base,
     Job,
     Song,
 )
-from songforge.storage import audio_key
 
 
 @pytest.fixture()
@@ -92,76 +91,55 @@ def _claimed_ingest_job(**overrides: object) -> Job:
     return Job(**defaults)  # type: ignore[arg-type]
 
 
-async def test_none_audio_url_on_an_ingest_pending_job_raises_assertion_error(
+async def test_none_audio_url_on_an_ingest_pending_job_marks_job_failed_gracefully(
     session: AsyncSession,
 ) -> None:
-    """CONCERN flagged for review (not fixed here): unlike the ``conversion_id_1 is
-    None`` data-integrity guard in ``ingest_claimed_job`` (which gracefully marks
-    the job FAILED -- see `test_ingest.py`'s
-    `test_missing_conversion_id_1_marks_job_failed_without_touching_ports`), a
-    ``None`` ``audio_url`` on an otherwise-valid ``INGEST_PENDING`` job is only
-    caught by a bare ``assert`` in ``_download_with_refresh`` -- it raises
-    ``AssertionError`` (uncaught by `ingest_claimed_job`) rather than failing the
-    job gracefully, and ``assert`` statements are stripped entirely under
-    ``python -O``. This can't happen through the normal webhook path today, but
-    nothing in ``ingest_claimed_job`` enforces that invariant itself the way the
-    parallel ``conversion_id_1`` guard does. This test pins down CURRENT behavior;
-    it does not assert this is desired, and no production code is changed here."""
+    """FIXED (quality report HIGH finding): a ``None`` ``audio_url`` on an otherwise-
+    valid ``INGEST_PENDING`` job used to be caught only by a bare ``assert`` in
+    ``_download_with_refresh`` -- an uncaught ``AssertionError`` (stripped entirely
+    under ``python -O``) that would have wedged the whole ingest loop (no catch-all
+    existed either). ``ingest_claimed_job`` now guards this explicitly, mirroring the
+    ``conversion_id_1`` guard: mark the job FAILED, touch no I/O port, and return
+    normally -- this can't happen through the normal webhook path today, but a
+    corrupted/legacy row must fail cleanly rather than crash the ingest loop."""
     job = _claimed_ingest_job(audio_url=None)
-
-    with pytest.raises(AssertionError):
-        await ingest_claimed_job(
-            job,
-            session=session,
-            storage=_NeverCalledStorage(),  # type: ignore[arg-type]
-            generation_client=_NeverCalledGenerationClient(),  # type: ignore[arg-type]
-            downloader=_NeverCalledDownloader(),  # type: ignore[arg-type]
-            settings=Settings(),
-        )
-
-
-async def test_blank_conversion_id_1_is_treated_as_a_valid_song_id(
-    session: AsyncSession,
-) -> None:
-    """``ingest_claimed_job``'s data-integrity guard checks ``is None``, not
-    falsiness -- an empty-string ``conversion_id_1`` (never produced by
-    `jobs/dispatch.py` today, but not type-guarded against here either) is NOT
-    caught by that guard and proceeds as if it were a valid id: the object key
-    becomes ``audio/.mp3`` and the ``Song`` row is created with ``id=""``.
-    Documented here as current behavior; not a crash, but worth a look in review
-    since it silently accepts a degenerate id rather than failing the job."""
-    job = _claimed_ingest_job(conversion_id_1="")
-    key = audio_key("")
-
-    class _RecordingStorage:
-        def __init__(self) -> None:
-            self.put_calls: list[tuple[str, bytes]] = []
-
-        def exists(self, k: str) -> bool:
-            return False
-
-        def put(self, k: str, data: bytes, content_type: str = "audio/mpeg") -> str:
-            self.put_calls.append((k, data))
-            return f"https://cdn.test/{k}"
-
-    class _StubDownloader:
-        async def download(self, url: str) -> bytes:
-            return b"fake-bytes"
-
-    storage = _RecordingStorage()
+    before_failed = ingest_failed_total._value.get()
 
     await ingest_claimed_job(
         job,
         session=session,
-        storage=storage,  # type: ignore[arg-type]
+        storage=_NeverCalledStorage(),  # type: ignore[arg-type]
         generation_client=_NeverCalledGenerationClient(),  # type: ignore[arg-type]
-        downloader=_StubDownloader(),  # type: ignore[arg-type]
+        downloader=_NeverCalledDownloader(),  # type: ignore[arg-type]
         settings=Settings(),
     )
 
-    assert job.state == JOB_STATE_READY
-    assert job.song_id == ""
-    assert storage.put_calls == [(key, b"fake-bytes")]
-    song = await session.get(Song, "")
-    assert song is not None
-    assert song.object_key == key
+    assert job.state == JOB_STATE_FAILED
+    assert job.song_id is None
+    assert ingest_failed_total._value.get() == before_failed + 1
+
+
+async def test_blank_conversion_id_1_marks_job_failed_instead_of_a_degenerate_id(
+    session: AsyncSession,
+) -> None:
+    """FIXED (quality report MED finding): the ``conversion_id_1`` data-integrity
+    guard used to check ``is None``, not falsiness, so an empty-string
+    ``conversion_id_1`` (never produced by `jobs/dispatch.py` today, but not type-
+    guarded against here either) sailed past it and produced a degenerate
+    ``Song(id="")`` at key ``audio/.mp3``. The guard now uses falsiness
+    (``not job.conversion_id_1``), so a blank id is rejected exactly like a missing
+    one -- no I/O port is touched and no ``Song`` row is created."""
+    job = _claimed_ingest_job(conversion_id_1="")
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=_NeverCalledStorage(),  # type: ignore[arg-type]
+        generation_client=_NeverCalledGenerationClient(),  # type: ignore[arg-type]
+        downloader=_NeverCalledDownloader(),  # type: ignore[arg-type]
+        settings=Settings(),
+    )
+
+    assert job.state == JOB_STATE_FAILED
+    assert job.song_id is None
+    assert await session.get(Song, "") is None

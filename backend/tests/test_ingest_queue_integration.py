@@ -288,3 +288,91 @@ async def test_claim_next_ingest_job_never_double_claims_across_concurrent_sessi
     results = await asyncio.gather(_claim_and_finish(), _claim_and_finish())
     claimed = {r for r in results if r is not None}
     assert claimed == {f"{_TEST_JOB_PREFIX}orm-x", f"{_TEST_JOB_PREFIX}orm-y"}
+
+
+async def test_ingest_claimed_job_finalize_ready_against_real_postgres_fk(
+    conn: Any, sessionmaker: Any
+) -> None:
+    """Regression test for the CRITICAL FK flush-ordering finding (prod-validation
+    report): `_finalize_ready` must flush the staged `Song` INSERT before mutating
+    `job.state`/`job.song_id`, or real Postgres's `fk_jobs_song_id_songs` constraint
+    rejects the `Job` UPDATE (`Job.song_id` and `Song` have no declared
+    `relationship()`, so SQLAlchemy's unit-of-work has no ordering information of its
+    own). SQLite -- every other ingest test in this suite -- doesn't enforce foreign
+    keys, so this bug was invisible everywhere except against a real database; this
+    test runs `ingest_claimed_job` end to end (minus the network/S3 ports, which are
+    fakes) against real Postgres specifically to catch it."""
+    from songforge.config import Settings
+    from songforge.jobs.ingest import ingest_claimed_job
+    from songforge.models import JOB_STATE_READY, Job, Song
+
+    job_id = f"{_TEST_JOB_PREFIX}fk-flush-order"
+    conversion_id = "conv-fk-flush-order"
+    await _insert_ingest_pending(conn, "fk-flush-order", conversion_id)
+
+    class _FakeStorage:
+        def exists(self, key: str) -> bool:
+            return False
+
+        def put(self, key: str, data: bytes, content_type: str = "audio/mpeg") -> str:
+            return f"https://cdn.test/{key}"
+
+    class _FakeDownloader:
+        async def download(self, url: str) -> bytes:
+            return b"fake-mp3-bytes"
+
+    class _FakeGenerationClient:
+        async def create(self, **kwargs: object) -> None:
+            raise AssertionError("must not be called")
+
+        async def get_audio_url_by_id(self, task_id: str) -> str:
+            raise AssertionError("must not be called")
+
+    settings = Settings(
+        _env={
+            "DATABASE_URL": _SETTINGS_DATABASE_URL,
+            "REDIS_URL": "redis://127.0.0.1:1/0",
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+        }
+    )
+
+    try:
+        async with sessionmaker() as session:
+            job = await session.get(Job, job_id)
+            assert job is not None
+            job.audio_url = "http://musicgpt.test/audio/hint-token"
+
+            await ingest_claimed_job(
+                job,
+                session=session,
+                storage=_FakeStorage(),  # type: ignore[arg-type]
+                generation_client=_FakeGenerationClient(),  # type: ignore[arg-type]
+                downloader=_FakeDownloader(),  # type: ignore[arg-type]
+                settings=settings,
+            )
+            # Must NOT raise fk_jobs_song_id_songs -- this is the whole point of
+            # the test: the Song INSERT must already be flushed before this commits
+            # the Job UPDATE that references it.
+            await session.commit()
+
+        async with sessionmaker() as session:
+            final = await session.get(Job, job_id)
+            assert final is not None
+            assert final.state == JOB_STATE_READY
+            assert final.song_id == conversion_id
+
+            song = await session.get(Song, conversion_id)
+            assert song is not None
+            assert song.object_key.endswith(f"{conversion_id}.mp3")
+    finally:
+        # Delete the `jobs` row FIRST -- it FK-references the `songs` row this test
+        # creates, so the song can't be deleted while the job still points at it.
+        # The `conn` fixture's own teardown also deletes `jobs` rows by prefix, but
+        # that runs AFTER this block, and the `songs` row (keyed by `conversion_id`,
+        # with no shared prefix to filter on) needs its own explicit cleanup here
+        # (mirrors `test_webhook_ingest_e2e_integration.py`'s equivalent teardown).
+        await conn.execute("DELETE FROM jobs WHERE job_id = $1", job_id)
+        await conn.execute("DELETE FROM songs WHERE id = $1", conversion_id)

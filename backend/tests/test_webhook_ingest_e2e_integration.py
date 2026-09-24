@@ -203,7 +203,9 @@ async def test_webhook_then_ingest_happy_path_against_real_simulator(
                 transport=httpx.ASGITransport(app=sim_app), base_url="http://simulator:8080"
             ) as sim_io_client:
                 downloader = HttpAudioDownloader(
-                    sim_io_client, timeout=settings.ingest_download_timeout_seconds
+                    sim_io_client,
+                    timeout=settings.ingest_download_timeout_seconds,
+                    max_bytes=settings.ingest_max_download_bytes,
                 )
                 generation_client = HttpGenerationClient(settings, sim_io_client)
 
@@ -232,6 +234,15 @@ async def test_webhook_then_ingest_happy_path_against_real_simulator(
         finally:
             if handles:
                 async with sessionmaker() as session:
+                    # Delete the referencing `Job` row FIRST (now that the FK
+                    # flush-ordering fix means `job.song_id` actually persists) --
+                    # `fk_jobs_song_id_songs` forbids deleting the `Song` row while
+                    # a job still points at it. `_clean_rows`'s own teardown also
+                    # deletes this job by prefix, but that runs AFTER this block.
+                    job_row = await session.get(Job, job_id)
+                    if job_row is not None:
+                        await session.delete(job_row)
+                        await session.commit()
                     song = await session.get(Song, handles["conversion_id_1"])
                     if song is not None:
                         await session.delete(song)
@@ -314,7 +325,9 @@ async def test_expired_hint_url_is_refreshed_via_by_id_against_real_simulator(
                 transport=httpx.ASGITransport(app=sim_app), base_url="http://simulator:8080"
             ) as sim_io_client:
                 downloader = HttpAudioDownloader(
-                    sim_io_client, timeout=settings.ingest_download_timeout_seconds
+                    sim_io_client,
+                    timeout=settings.ingest_download_timeout_seconds,
+                    max_bytes=settings.ingest_max_download_bytes,
                 )
                 generation_client = HttpGenerationClient(settings, sim_io_client)
 
@@ -336,6 +349,12 @@ async def test_expired_hint_url_is_refreshed_via_by_id_against_real_simulator(
         finally:
             if conversion_id_1 is not None:
                 async with sessionmaker() as session:
+                    # Delete the referencing `Job` row FIRST -- see the matching
+                    # comment in the happy-path test's teardown above.
+                    job_row = await session.get(Job, job_id)
+                    if job_row is not None:
+                        await session.delete(job_row)
+                        await session.commit()
                     song = await session.get(Song, conversion_id_1)
                     if song is not None:
                         await session.delete(song)

@@ -138,7 +138,9 @@ async def test_real_download_from_the_simulator_reaches_ready(
         job = _claimed_job_from_handles("job-ingest-contract-happy", handles)
         storage = _FakeStorage()
         downloader = HttpAudioDownloader(
-            sim_io_client, timeout=settings.ingest_download_timeout_seconds
+            sim_io_client,
+            timeout=settings.ingest_download_timeout_seconds,
+            max_bytes=settings.ingest_max_download_bytes,
         )
         generation_client = HttpGenerationClient(settings, sim_io_client)
 
@@ -181,7 +183,9 @@ async def test_real_expired_token_403_triggers_real_by_id_refresh_and_succeeds(
         expired_url = job.audio_url
         storage = _FakeStorage()
         downloader = HttpAudioDownloader(
-            sim_io_client, timeout=settings.ingest_download_timeout_seconds
+            sim_io_client,
+            timeout=settings.ingest_download_timeout_seconds,
+            max_bytes=settings.ingest_max_download_bytes,
         )
         generation_client = HttpGenerationClient(settings, sim_io_client)
 

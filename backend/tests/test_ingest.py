@@ -572,6 +572,144 @@ async def test_ingest_requeued_total_increments_below_the_cap(
     assert ingest_requeued_total._value.get() == before + 1
 
 
+async def test_duration_is_rounded_not_truncated(session: AsyncSession) -> None:
+    """LOW finding: `_finalize_ready` used `int(...)` (truncation); `round(...)` is
+    more correct for a duration column -- 181.6s should become 182, not 181."""
+    events: list[str] = []
+    job = _claimed_ingest_job(audio_duration=181.6)
+    storage = _FakeStorage(events)
+    downloader = _FakeDownloader(events, {job.audio_url: b"bytes"})
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    settings = Settings()
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    song = await session.get(Song, job.conversion_id_1)
+    assert song is not None
+    assert song.duration_seconds == 182
+
+
+# ── Catch-all: no unmapped exception may propagate and wedge the ingest loop ──────
+
+
+class _ExplodingStorage:
+    """A storage port whose `exists` raises an unexpected (unmapped) exception --
+    simulating a boto3 `ClientError` or any other surprise. `put` must never be
+    reached in these tests."""
+
+    def exists(self, key: str) -> bool:
+        raise RuntimeError("boom: unexpected storage error")
+
+    def put(self, key: str, data: bytes, content_type: str = "audio/mpeg") -> str:
+        raise AssertionError("must not be called")
+
+
+async def test_unmapped_exception_is_caught_and_requeues_with_backoff_below_the_cap(
+    session: AsyncSession,
+) -> None:
+    """Critical quality-report finding: `ingest_claimed_job` had no catch-all
+    (unlike `dispatch_claimed_job`), so any unmapped exception propagated out,
+    crashed the drain loop, and -- because the same poisoned row (oldest `seq`) is
+    always re-claimed first -- permanently wedged ingest for every worker instance.
+    An unmapped exception must instead be bounded like any other failed attempt."""
+    events: list[str] = []
+    job = _claimed_ingest_job(ingest_attempts=0)
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    downloader = _FakeDownloader(events, {})
+    settings = Settings(ingest_max_attempts=3, ingest_requeue_backoff_seconds=20)
+    before = datetime.now(timezone.utc)
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=_ExplodingStorage(),  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_INGEST_PENDING  # requeued, not FAILED yet
+    assert job.ingest_attempts == 1
+    assert job.available_at >= before + timedelta(seconds=20)
+    assert await session.get(Song, job.conversion_id_1) is None
+
+
+async def test_unmapped_exception_exhausting_the_cap_marks_job_failed_not_propagated(
+    session: AsyncSession,
+) -> None:
+    """Companion to the requeue case: repeated unmapped exceptions must eventually
+    give up -> FAILED (never propagate), exactly like the download-failure path."""
+    events: list[str] = []
+    job = _claimed_ingest_job(ingest_attempts=2)  # one attempt away from the cap
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    downloader = _FakeDownloader(events, {})
+    settings = Settings(ingest_max_attempts=3, ingest_requeue_backoff_seconds=20)
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=_ExplodingStorage(),  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_FAILED
+    assert job.ingest_attempts == 3
+    assert await session.get(Song, job.conversion_id_1) is None
+
+
+async def test_unmapped_exception_during_finalize_rolls_back_the_partial_flush(
+    session: AsyncSession,
+) -> None:
+    """The security report's "poison-pill" scenario: an exception raised while
+    staging/flushing the `Song` row (e.g. a real Postgres column-length violation on
+    an oversized `title`) must roll back cleanly and still bound the retry -- not
+    leave the session in a broken state that then fails the caller's own commit
+    forever, and not leave the job stuck retrying without ever counting an attempt."""
+    events: list[str] = []
+    job = _claimed_ingest_job(ingest_attempts=0)
+    storage = _FakeStorage(events)
+    downloader = _FakeDownloader(events, {job.audio_url: b"bytes"})
+    client = _FakeGenerationClient(
+        events, by_id_result=AssertionError("must not be called")
+    )
+    settings = Settings(ingest_max_attempts=3, ingest_requeue_backoff_seconds=20)
+
+    async def _exploding_flush() -> None:
+        raise RuntimeError("simulated flush-time integrity error")
+
+    session.flush = _exploding_flush  # type: ignore[method-assign]
+
+    await ingest_claimed_job(
+        job,
+        session=session,
+        storage=storage,  # type: ignore[arg-type]
+        generation_client=client,  # type: ignore[arg-type]
+        downloader=downloader,  # type: ignore[arg-type]
+        settings=settings,
+    )
+
+    assert job.state == JOB_STATE_INGEST_PENDING
+    assert job.ingest_attempts == 1
+    # The caller's own commit (mirroring `worker/ingest.py`'s drain loop) must still
+    # succeed afterwards -- the rollback left the session usable, not broken.
+    await session.commit()
+
+
 async def test_ingest_failed_total_increments_on_attempt_exhaustion(
     session: AsyncSession,
 ) -> None:

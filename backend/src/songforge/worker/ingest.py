@@ -113,7 +113,9 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
                 ) as http_client:
                     generation_client = HttpGenerationClient(settings, http_client)
                     downloader = HttpAudioDownloader(
-                        http_client, timeout=settings.ingest_download_timeout_seconds
+                        http_client,
+                        timeout=settings.ingest_download_timeout_seconds,
+                        max_bytes=settings.ingest_max_download_bytes,
                     )
                     while not stop.is_set():
                         await _drain_ingest_pending(
