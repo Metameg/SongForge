@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from songforge.config import Settings
 from songforge.web.rate_limit import (
     Identity,
@@ -245,6 +247,66 @@ async def test_refund_for_authenticated_identity_only_touches_the_account_counte
 
     assert await backend.get_count(ip_key(settings, ip, _today())) == 0
     assert await backend.get_count(account_key(settings, "acct-1", _today())) == 0
+
+
+async def test_refund_with_an_explicit_day_decrements_that_days_bucket_not_today(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3 (issue #16 phase 5 fix): a refund's day bucket must be the job's CHARGE day
+    -- passed explicitly by a caller that knows it (``jobs.watchdog.
+    sweep_terminal_failures``) -- not whatever ``_today()`` resolves to when the
+    refund happens to run. Freezes "today" to a date AFTER the charged day and proves
+    the explicit ``day=`` bucket is what gets decremented, while today's (never
+    charged) bucket is untouched -- closing the cross-midnight farmable-gap an
+    always-``_today()`` refund would leave open."""
+    import songforge.web.rate_limit as rate_limit_module
+
+    settings = _settings(anon_daily_songs_per_cookie=5, anon_daily_songs_per_ip=5)
+    backend = _InMemoryRateLimitBackend()
+    limiter = RateLimiter(backend, settings)
+    identity = Identity(user_id="user-a", is_authenticated=False, minted=False)
+    ip = "203.0.113.5"
+    charged_day = "2026-01-01"
+
+    # Charge directly against the charged-day bucket (bypassing `consume`, which
+    # always charges "today") to set up the scenario: a slot was consumed on
+    # `charged_day`, and the refund runs on a LATER "today".
+    await backend.incr_with_expiry(
+        cookie_key(settings, "user-a", charged_day), settings.rate_limit_window_seconds
+    )
+    await backend.incr_with_expiry(
+        ip_key(settings, ip, charged_day), settings.rate_limit_window_seconds
+    )
+
+    monkeypatch.setattr(
+        rate_limit_module,
+        "_today",
+        lambda: "2026-01-02",  # "now" is a day AFTER the charge
+    )
+
+    await limiter.refund(identity, ip, day=charged_day)
+
+    assert await backend.get_count(cookie_key(settings, "user-a", charged_day)) == 0
+    assert await backend.get_count(ip_key(settings, ip, charged_day)) == 0
+    # Today's bucket (never charged) is untouched -- no farmable extra slot appears.
+    assert await backend.get_count(cookie_key(settings, "user-a", "2026-01-02")) == 0
+    assert await backend.get_count(ip_key(settings, ip, "2026-01-02")) == 0
+
+
+async def test_refund_with_no_day_defaults_to_today_backward_compatible() -> None:
+    """Backward compatibility: existing callers (e.g. issue #15's own tests) that call
+    ``refund(identity, ip)`` with no ``day`` keep refunding "today"."""
+    settings = _settings(anon_daily_songs_per_cookie=5, anon_daily_songs_per_ip=5)
+    backend = _InMemoryRateLimitBackend()
+    limiter = RateLimiter(backend, settings)
+    identity = Identity(user_id="user-a", is_authenticated=False, minted=False)
+    ip = "203.0.113.5"
+    await limiter.consume(identity, ip)
+
+    await limiter.refund(identity, ip)
+
+    assert await backend.get_count(cookie_key(settings, "user-a", _today())) == 0
+    assert await backend.get_count(ip_key(settings, ip, _today())) == 0
 
 
 # ── enforce_rate_limits kill switch ──────────────────────────────────────────────

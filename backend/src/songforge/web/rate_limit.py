@@ -249,13 +249,23 @@ class RateLimiter:
             values.append(max(scope.cap - count, 0))
         return min(values)
 
-    async def refund(self, identity: Identity, ip: str) -> None:
+    async def refund(self, identity: Identity, ip: str, *, day: str | None = None) -> None:
         """Hand back one previously-consumed slot on every applicable counter (floored
         at 0). Called by the failure-recovery path (issue #16) when a generation fails,
         so a failure never costs the user a quota slot. No-op when enforcement is off
-        (nothing was ever charged)."""
+        (nothing was ever charged).
+
+        ``day`` defaults to today (``_today()``) for backward compatibility, but a
+        refund logically belongs to the day the job was originally CHARGED
+        (``consume``'s bucket), not the day the failure happens to be handled on. A
+        FAILED job recovered after a UTC-midnight rollover would otherwise refund a
+        counter bucket it never charged -- decrementing an unrelated (likely zero,
+        floored) counter while the day that WAS charged stays permanently over-counted
+        by one, a farmable gap under repeated cross-midnight failures. Callers that
+        know the job's charge-day (``jobs.watchdog.sweep_terminal_failures``) pass it
+        explicitly."""
         if not self._settings.enforce_rate_limits:
             return
-        for scope in self._scopes(identity, ip, _today()):
+        for scope in self._scopes(identity, ip, day or _today()):
             await self._backend.decr(scope.key)
-        log.info("rate_limit_refunded", user_id=identity.user_id)
+        log.info("rate_limit_refunded", user_id=identity.user_id, day=day or _today())
