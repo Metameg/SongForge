@@ -32,14 +32,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import get_settings
 from songforge.db import get_sessionmaker
+from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
 from songforge.logging_setup import get_logger
-from songforge.metrics import webhooks_received_total
+from songforge.metrics import semaphore_released_total, webhooks_received_total
 from songforge.models import (
     JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
     JOB_STATE_WAITING_FOR_WEBHOOK,
     Job,
 )
+from songforge.redis_client import get_redis
 
 router = APIRouter(tags=["webhook"])
 log = get_logger(__name__)
@@ -111,11 +113,33 @@ def get_notify_dependency(
     return _notify
 
 
+def get_semaphore_dependency() -> Semaphore:
+    """The generation semaphore (issue #16 slot-leak fix); overridden in tests with a
+    fake so edge tests need no live Redis. Mirrors ``web/routes/create.py``'s
+    ``get_rate_limiter`` shape: built fresh per request from ``get_settings()`` so a
+    test's monkeypatched settings take effect without reconstructing the app."""
+    return RedisSemaphore(RedisSemaphoreBackend(get_redis()), get_settings())
+
+
+async def _safe_release_semaphore(semaphore: Semaphore, user_id: str) -> None:
+    """Best-effort post-commit semaphore release (issue #16 slot-leak fix, mirrors
+    ``_safe_notify`` above): the FAILED transition below is already durably
+    committed, so a release failure (e.g. a dropped Redis connection) must never
+    surface as a 500 to the external generation API's webhook caller. Worst case is
+    corrected later by the watchdog's reconcile backstop (``worker/watchdog.py``)."""
+    try:
+        await semaphore.release(user_id)
+        semaphore_released_total.labels(site="webhook").inc()
+    except Exception:
+        log.exception("semaphore_release_failed", site="webhook", user_id=user_id)
+
+
 @router.post("/api/generation/webhook", response_model=WebhookResponse)
 async def receive_webhook(
     body: WebhookPayload,
     session: AsyncSession = Depends(get_session),
     notify: Notifier = Depends(get_notify_dependency),
+    semaphore: Semaphore = Depends(get_semaphore_dependency),
 ) -> WebhookResponse:
     """Look up the job by ``task_id``, transition it, NOTIFY, and return 200.
 
@@ -173,6 +197,10 @@ async def receive_webhook(
         await session.commit()
         webhooks_received_total.labels(outcome="failed").inc()
         log.info("webhook_marked_failed", task_id=body.task_id, status=body.status)
+        # Issue #16 slot-leak fix: the job leaves WAITING_FOR_WEBHOOK (an active
+        # state) here without ever reaching ingest -- release its generation-
+        # semaphore slot, post-commit, best-effort.
+        await _safe_release_semaphore(semaphore, job.user_id)
         return WebhookResponse()
 
     job.audio_url = body.conversion_path
