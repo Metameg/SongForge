@@ -57,6 +57,31 @@ class GenerationHandles:
     credit_estimate: float
 
 
+# `/byId` status values (mirrors the simulator's `ByIdStatus`, `simulator/schemas.py`
+# -- kept as plain strings here rather than importing that enum, matching this
+# module's existing convention of not depending on the simulator's own types).
+GENERATION_STATUS_IN_QUEUE = "IN_QUEUE"
+GENERATION_STATUS_COMPLETED = "COMPLETED"
+GENERATION_STATUS_ERROR = "ERROR"
+GENERATION_STATUS_FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class GenerationStatus:
+    """Status-bearing outcome of a `/byId` poll (issue #16).
+
+    Unlike `get_audio_url_by_id` (which raises unless the task is COMPLETED), the
+    watchdog's `sweep_waiting_overdue` needs the raw STATUS to branch: COMPLETED ->
+    recover (no re-charge), ERROR/FAILED -> terminal, IN_QUEUE -> leave waiting.
+    `audio_url`/`duration`/`title` are only populated when `status == COMPLETED`.
+    """
+
+    status: str
+    audio_url: str | None
+    duration: float | None
+    title: str | None
+
+
 class GenerationClient(Protocol):
     """Port ``songforge.jobs.dispatch`` (and ``songforge.jobs.ingest``) depend on;
     tests inject a stub/fake."""
@@ -77,6 +102,14 @@ class GenerationClient(Protocol):
         typed-exception mapping as ``create`` -- and also raises
         ``GenerationTransientError`` if a 200 response has no usable ``audio_url``
         (the task isn't completed yet, or a malformed body)."""
+        ...
+
+    async def get_status_by_id(self, task_id: str) -> GenerationStatus:
+        """By-handle STATUS lookup (issue #16, watchdog's ``sweep_waiting_overdue``):
+        returns the raw status so the caller can branch (``COMPLETED`` -> recover,
+        ``ERROR``/``FAILED`` -> terminal, ``IN_QUEUE`` -> leave waiting) instead of
+        raising on anything but completion. Same typed-exception mapping as
+        ``create``/``get_audio_url_by_id`` for the non-2xx/malformed-body paths."""
         ...
 
 
@@ -143,6 +176,17 @@ class HttpGenerationClient:
             ) from exc
 
     async def get_audio_url_by_id(self, task_id: str) -> str:
+        status = await self.get_status_by_id(task_id)
+        if status.status != GENERATION_STATUS_COMPLETED or not status.audio_url:
+            # Missing/empty `audio_url` on a 200 -- either the task genuinely isn't
+            # completed yet, or a malformed body; both are retriable from the
+            # caller's perspective (ingest.py's refresh-and-retry), not a crash.
+            raise GenerationTransientError(
+                "by-id lookup returned no usable audio_url"
+            )
+        return status.audio_url
+
+    async def get_status_by_id(self, task_id: str) -> GenerationStatus:
         url = f"{self._settings.musicgpt_base_url}/byId"
         headers = {"Authorization": self._settings.musicgpt_api_key}
         try:
@@ -172,12 +216,14 @@ class HttpGenerationClient:
                 f"by-id lookup returned a malformed 200 body: {exc}"
             ) from exc
 
-        audio_url = data.get("audio_url") if isinstance(data, dict) else None
-        if not audio_url:
-            # Missing/empty `audio_url` on a 200 -- either the task genuinely isn't
-            # completed yet, or a malformed body; both are retriable from the
-            # caller's perspective (ingest.py's refresh-and-retry), not a crash.
+        if not isinstance(data, dict):
             raise GenerationTransientError(
-                "by-id lookup returned no usable audio_url"
+                "by-id lookup returned a malformed 200 body: not a JSON object"
             )
-        return str(audio_url)
+
+        return GenerationStatus(
+            status=str(data.get("status") or ""),
+            audio_url=data.get("audio_url"),
+            duration=data.get("conversion_duration"),
+            title=data.get("title"),
+        )
