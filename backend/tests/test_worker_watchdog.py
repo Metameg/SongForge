@@ -249,3 +249,68 @@ async def test_run_sweeps_skips_sweep_and_commit_when_nothing_is_claimable(
 
     assert calls == []
     assert commits == []
+
+
+async def test_run_sweeps_processes_at_most_one_row_per_sweep_type_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CONCERN, not a defect (flagged for the team, not silently changed here): unlike
+    `worker/dispatch.py::_drain_ready_jobs` / `worker/ingest.py`'s drain-to-exhaustion
+    shape -- and unlike `.orchestrator/plan-issue-16.md` step 5's stated design, which
+    called for the SAME shape here -- `_run_sweeps` claims (and acts on) AT MOST ONE
+    row per sweep type per call, even when the claim fake below would happily keep
+    handing back more "overdue" rows. A second overdue row of the same type only gets
+    handled on the NEXT watchdog tick (`watchdog_poll_interval_seconds` later), not the
+    same one. Not a correctness bug -- every sweep is idempotent and never double-acts
+    -- but it does mean recovery throughput under a mass-failure backlog is bounded to
+    one row per type per tick rather than draining fully each tick. This test pins the
+    ACTUAL behavior so a future change to either shape is a deliberate, visible diff."""
+    claim_calls = 0
+
+    async def _fake_claim_waiting(session: object, settings: Settings) -> _FakeJob:
+        nonlocal claim_calls
+        claim_calls += 1
+        return _FakeJob(f"waiting-{claim_calls}")  # pretend more rows are always ready
+
+    async def _fake_sweep_waiting(job: _FakeJob, **kwargs: object) -> None:
+        return None
+
+    async def _fake_claim_none_two_args(session: object, settings: Settings) -> None:
+        return None
+
+    async def _fake_claim_none_one_arg(session: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_waiting_overdue_job", _fake_claim_waiting
+    )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.sweep_waiting_overdue", _fake_sweep_waiting
+    )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_submitting_stuck_job", _fake_claim_none_two_args
+    )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_ingest_overdue_job", _fake_claim_none_two_args
+    )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_terminal_failure_job", _fake_claim_none_one_arg
+    )
+
+    async def _notify(channel: str, payload: str) -> None:
+        return None
+
+    async def _publish_user_event(user_id: str, message: str) -> None:
+        return None
+
+    commits: list[str] = []
+    await _run_sweeps(
+        _sessionmaker_factory(commits),
+        object(),
+        object(),
+        _settings(),
+        _notify,
+        _publish_user_event,
+    )
+
+    assert claim_calls == 1  # only one claim attempt, even though more rows "exist"

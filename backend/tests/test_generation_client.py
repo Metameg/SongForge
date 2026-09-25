@@ -493,6 +493,31 @@ async def test_get_status_by_id_raises_transient_error_on_malformed_json_body() 
             await client.get_status_by_id("t1")
 
 
+async def test_get_status_by_id_raises_transient_error_on_a_non_dict_json_body() -> None:
+    """Valid JSON that isn't an object (e.g. a bare array) is a distinct malformed-200
+    branch from a JSON parse failure -- `data.get(...)` would raise `AttributeError`
+    on a list, so this must be caught and mapped to the same typed exception rather
+    than crashing the watchdog loop."""
+    handler = httpx.MockTransport(lambda r: httpx.Response(200, json=["not", "an", "object"]))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_raises_transient_error_on_a_network_connection_error() -> None:
+    """A non-timeout `httpx.RequestError` (e.g. connection refused) must map the same
+    way a timeout does -- both are retriable, neither is a crash."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
 async def test_get_status_by_id_against_real_simulator_returns_completed() -> None:
     """Drives the real `GET /byId` end to end (mirrors
     `test_get_audio_url_by_id_against_real_simulator_returns_a_fresh_url`) -- proves

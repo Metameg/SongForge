@@ -18,7 +18,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from songforge.radio.user_events import UserEventBroadcaster, user_channel
+from songforge.radio.user_events import _QUEUE_MAXSIZE, UserEventBroadcaster, user_channel
 
 PREFIX = "user:"
 
@@ -183,5 +183,72 @@ async def test_a_published_job_failed_message_is_delivered_only_to_its_own_user(
         assert delivered is not None, "job-failed was never delivered to user-x"
         assert delivered.get("job_id") == "job-1"
         assert queue_y.empty()  # never delivered to the wrong user
+    finally:
+        await broadcaster.stop()
+
+
+async def test_two_clients_for_the_same_user_both_receive_the_message() -> None:
+    """A4's "notifies them over their per-user SSE channel" must reach every tab/
+    connection a user has open, not just one -- `register` supports more than one
+    queue per `user_id` for exactly this reason."""
+    redis = _FakeRedis()
+    broadcaster = _make(redis)
+    q1 = broadcaster.register("user-a")
+    q2 = broadcaster.register("user-a")
+    await broadcaster.start()
+    try:
+        redis.pubsub_obj.feed(
+            user_channel(PREFIX, "user-a"), '{"event": "job-failed", "job_id": "job-1"}'
+        )
+
+        assert await _wait_until(lambda: not q1.empty())
+        assert await _wait_until(lambda: not q2.empty())
+        assert q1.get_nowait().get("job_id") == "job-1"
+        assert q2.get_nowait().get("job_id") == "job-1"
+    finally:
+        await broadcaster.stop()
+
+
+async def test_a_full_queue_drops_the_frame_without_raising_and_without_affecting_others() -> None:
+    """A stalled/slow client for user A must never raise out of the relay loop (which
+    would take down delivery for every other connected client), and must never block
+    delivery to a HEALTHY second connection for the SAME user -- mirrors
+    `PointerBroadcaster`'s "a stalled client drops frames" posture."""
+    redis = _FakeRedis()
+    broadcaster = _make(redis)
+    full_queue = broadcaster.register("user-a")
+    for i in range(_QUEUE_MAXSIZE):
+        full_queue.put_nowait({"filler": i})
+    healthy_queue = broadcaster.register("user-a")
+    await broadcaster.start()
+    try:
+        redis.pubsub_obj.feed(
+            user_channel(PREFIX, "user-a"), '{"event": "job-failed", "job_id": "job-2"}'
+        )
+
+        assert await _wait_until(lambda: not healthy_queue.empty())
+        assert healthy_queue.get_nowait().get("job_id") == "job-2"
+        assert full_queue.qsize() == _QUEUE_MAXSIZE  # the frame was dropped, not queued
+    finally:
+        await broadcaster.stop()
+
+
+async def test_a_message_for_an_unregistered_user_is_a_noop() -> None:
+    """No client is registered under the message's user id at all -- the relay loop
+    must not raise (`self._queues.get(user_id, ())` -- an empty default, not a
+    `KeyError`)."""
+    redis = _FakeRedis()
+    broadcaster = _make(redis)
+    registered_elsewhere = broadcaster.register("user-b")
+    await broadcaster.start()
+    try:
+        redis.pubsub_obj.feed(
+            user_channel(PREFIX, "nobody-here"), '{"event": "job-failed", "job_id": "job-3"}'
+        )
+        # Nothing to await a delivery on; give the relay loop a chance to process the
+        # message and prove (by the broadcaster still being alive afterwards) that it
+        # didn't raise.
+        await asyncio.sleep(0.05)
+        assert registered_elsewhere.empty()  # never mis-delivered to an unrelated user
     finally:
         await broadcaster.stop()

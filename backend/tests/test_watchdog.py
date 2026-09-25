@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import songforge.jobs.watchdog as watchdog_module
 from songforge.config import Settings
 from songforge.jobs.generation_client import (
     GENERATION_STATUS_COMPLETED,
@@ -86,6 +87,21 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _frozen_datetime(frozen: datetime) -> type[datetime]:
+    """A `datetime` subclass whose `.now()` always returns `frozen` -- lets the
+    boundary tests below assert the claim predicates' `<=` inclusivity EXACTLY
+    (`overdue_at <= now`, `updated_at <= cutoff`) instead of relying on a margin wide
+    enough to survive test-execution jitter, which can never prove which side of `<=`
+    the comparison actually lands on."""
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:  # type: ignore[override]
+            return frozen
+
+    return _Frozen
 
 
 def _job(**overrides: object) -> Job:
@@ -194,6 +210,85 @@ class TestClaimWaitingOverdueJob:
         assert claimed is not None
         assert claimed.job_id == "older"
 
+    async def test_boundary_exactly_at_eta_plus_buffer_is_claimed(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D5's `overdue_at <= now` is inclusive: a row exactly AT the threshold, not
+        just past it, must already be recoverable."""
+        frozen = _now()
+        monkeypatch.setattr(watchdog_module, "datetime", _frozen_datetime(frozen))
+        settings = Settings(watchdog_waiting_overdue_buffer_seconds=30)
+        await _add(
+            session,
+            _job(
+                job_id="exact-boundary",
+                eta=60,
+                updated_at=frozen - timedelta(seconds=90),  # 60 + 30, exactly
+            ),
+        )
+
+        claimed = await claim_waiting_overdue_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "exact-boundary"
+
+    async def test_boundary_one_second_before_eta_plus_buffer_is_not_claimed(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frozen = _now()
+        monkeypatch.setattr(watchdog_module, "datetime", _frozen_datetime(frozen))
+        settings = Settings(watchdog_waiting_overdue_buffer_seconds=30)
+        await _add(
+            session,
+            _job(
+                job_id="one-second-early",
+                eta=60,
+                updated_at=frozen - timedelta(seconds=89),  # 1s short of 60 + 30
+            ),
+        )
+
+        claimed = await claim_waiting_overdue_job(session, settings)
+
+        assert claimed is None
+
+    async def test_eta_is_null_uses_the_buffer_alone_as_the_threshold(
+        self, session: AsyncSession
+    ) -> None:
+        """A WAITING row with `eta IS NULL` shouldn't happen post-dispatch, but
+        CONTEXT explicitly calls for a guard: `job.eta or 0` falls back to the buffer
+        alone as the overdue threshold."""
+        settings = Settings(watchdog_waiting_overdue_buffer_seconds=30)
+        await _add(
+            session,
+            _job(
+                job_id="no-eta-overdue",
+                eta=None,
+                updated_at=_now() - timedelta(seconds=40),  # > 0 + 30
+            ),
+        )
+
+        claimed = await claim_waiting_overdue_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "no-eta-overdue"
+
+    async def test_eta_is_null_still_respects_the_buffer_window(
+        self, session: AsyncSession
+    ) -> None:
+        settings = Settings(watchdog_waiting_overdue_buffer_seconds=30)
+        await _add(
+            session,
+            _job(
+                job_id="no-eta-fresh",
+                eta=None,
+                updated_at=_now() - timedelta(seconds=5),  # well within the buffer
+            ),
+        )
+
+        claimed = await claim_waiting_overdue_job(session, settings)
+
+        assert claimed is None
+
 
 class TestClaimSubmittingStuckJob:
     async def test_returns_a_task_id_less_row_past_the_lease(
@@ -252,6 +347,47 @@ class TestClaimSubmittingStuckJob:
 
         assert claimed is None
 
+    async def test_boundary_exactly_at_the_lease_is_claimed(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frozen = _now()
+        monkeypatch.setattr(watchdog_module, "datetime", _frozen_datetime(frozen))
+        settings = Settings(watchdog_submitting_lease_seconds=60)
+        await _add(
+            session,
+            _job(
+                job_id="lease-boundary",
+                state=JOB_STATE_SUBMITTING,
+                task_id=None,
+                updated_at=frozen - timedelta(seconds=60),
+            ),
+        )
+
+        claimed = await claim_submitting_stuck_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "lease-boundary"
+
+    async def test_boundary_one_second_before_the_lease_is_not_claimed(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frozen = _now()
+        monkeypatch.setattr(watchdog_module, "datetime", _frozen_datetime(frozen))
+        settings = Settings(watchdog_submitting_lease_seconds=60)
+        await _add(
+            session,
+            _job(
+                job_id="lease-one-early",
+                state=JOB_STATE_SUBMITTING,
+                task_id=None,
+                updated_at=frozen - timedelta(seconds=59),
+            ),
+        )
+
+        claimed = await claim_submitting_stuck_job(session, settings)
+
+        assert claimed is None
+
 
 class TestClaimIngestOverdueJob:
     async def test_returns_a_row_past_the_generous_threshold(
@@ -280,6 +416,45 @@ class TestClaimIngestOverdueJob:
                 job_id="normal-ingest",
                 state=JOB_STATE_INGEST_PENDING,
                 updated_at=_now() - timedelta(seconds=10),
+            ),
+        )
+
+        claimed = await claim_ingest_overdue_job(session, settings)
+
+        assert claimed is None
+
+    async def test_boundary_exactly_at_the_threshold_is_claimed(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frozen = _now()
+        monkeypatch.setattr(watchdog_module, "datetime", _frozen_datetime(frozen))
+        settings = Settings(watchdog_ingest_overdue_seconds=300)
+        await _add(
+            session,
+            _job(
+                job_id="ingest-boundary",
+                state=JOB_STATE_INGEST_PENDING,
+                updated_at=frozen - timedelta(seconds=300),
+            ),
+        )
+
+        claimed = await claim_ingest_overdue_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "ingest-boundary"
+
+    async def test_boundary_one_second_before_the_threshold_is_not_claimed(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        frozen = _now()
+        monkeypatch.setattr(watchdog_module, "datetime", _frozen_datetime(frozen))
+        settings = Settings(watchdog_ingest_overdue_seconds=300)
+        await _add(
+            session,
+            _job(
+                job_id="ingest-one-early",
+                state=JOB_STATE_INGEST_PENDING,
+                updated_at=frozen - timedelta(seconds=299),
             ),
         )
 
@@ -443,6 +618,60 @@ class TestSweepWaitingOverdue:
         assert events == ["by_id:task-1"]
         assert job.state == JOB_STATE_WAITING_FOR_WEBHOOK
 
+    async def test_completed_with_missing_audio_url_still_transitions_but_ingest_catches_it(
+        self, session: AsyncSession
+    ) -> None:
+        """A malformed COMPLETED `/byId` response (no `audio_url`) has NO dedicated
+        guard in `sweep_waiting_overdue` -- unlike `get_audio_url_by_id`, which raises
+        on exactly this shape. It transitions to INGEST_PENDING with `audio_url=None`
+        exactly like a well-formed COMPLETED. Proven SAFE, not asserted as a defect:
+        `jobs.ingest.ingest_claimed_job`'s own data-integrity guard
+        (`job.audio_url is None`) marks the very next claim of this row FAILED rather
+        than attempting a download with no URL -- this test drives that interaction
+        end to end so the two modules' assumptions are checked together, not just each
+        one's own docstring claim."""
+        from songforge.jobs.ingest import ingest_claimed_job
+
+        events: list[str] = []
+        job = _waiting_job()
+        client = _StubGenerationClient(
+            events,
+            status=GenerationStatus(
+                status=GENERATION_STATUS_COMPLETED,
+                audio_url=None,
+                duration=None,
+                title=None,
+            ),
+        )
+        settings = Settings()
+
+        await sweep_waiting_overdue(job, client=client, settings=settings)
+
+        assert job.state == JOB_STATE_INGEST_PENDING
+        assert job.audio_url is None
+
+        class _NullDownloader:
+            async def download(self, url: str) -> bytes:
+                raise AssertionError("must never attempt a download with no audio_url")
+
+        class _NullStorage:
+            def exists(self, key: str) -> bool:
+                return False
+
+            def put(self, key: str, data: bytes, content_type: str = "audio/mpeg") -> str:
+                raise AssertionError("must never upload with no audio_url")
+
+        await ingest_claimed_job(
+            job,
+            session=session,
+            storage=_NullStorage(),  # type: ignore[arg-type]
+            generation_client=client,  # type: ignore[arg-type]
+            downloader=_NullDownloader(),  # type: ignore[arg-type]
+            settings=settings,
+        )
+
+        assert job.state == JOB_STATE_FAILED
+
 
 def _submitting_job(**overrides: object) -> Job:
     defaults: dict[str, object] = dict(
@@ -477,6 +706,19 @@ class TestSweepSubmittingStuck:
         assert job.state == JOB_STATE_QUEUED
         assert job.attempts == 2
         assert notified == [job.job_id]
+
+    async def test_requeue_resets_available_at_to_now_for_immediate_reclaim(self) -> None:
+        """This is a crash-recovery re-queue, not a backoff (D6: the lease age-gate
+        already bounded the delay) -- `available_at` must move to NOW, not stay at its
+        stale pre-crash value or get pushed further out."""
+        job = _submitting_job(available_at=_now() - timedelta(seconds=999))
+        settings = Settings()
+        before = _now()
+
+        await sweep_submitting_stuck(job, settings=settings)
+
+        assert job.available_at is not None
+        assert job.available_at >= before
 
 
 def _ingest_job(**overrides: object) -> Job:
@@ -518,6 +760,19 @@ class TestSweepIngestOverdue:
 
         assert job.state == JOB_STATE_FAILED
 
+    async def test_boundary_one_below_the_ceiling_still_nudges_not_escalates(self) -> None:
+        """`>=` is the escalation predicate -- one below the ceiling must still take
+        the nudge branch, not the give-up branch."""
+        job = _ingest_job(ingest_attempts=4)
+        settings = Settings(ingest_max_attempts=5)
+        before = _now()
+
+        await sweep_ingest_overdue(job, settings=settings)
+
+        assert job.state == JOB_STATE_INGEST_PENDING
+        assert job.available_at >= before
+        assert job.ingest_attempts == 4  # the nudge never touches this counter
+
 
 class _RecordingRateLimiter:
     """File-local fake `RateLimiter`: only `refund` is exercised by the terminal-
@@ -536,6 +791,21 @@ class _RecordingRateLimiter:
 
     async def refund(self, identity: Identity, ip: str) -> None:
         self.refund_calls.append((identity, ip))
+
+
+class _RaisingRateLimiter:
+    """File-local fake `RateLimiter` whose `refund` always raises -- simulates a
+    Redis blip (repo convention #3: a Redis blip must never abort the Postgres commit
+    that stamps `failure_handled_at`)."""
+
+    async def consume(self, identity: Identity, ip: str) -> None:
+        raise AssertionError("sweep_terminal_failures must never consume a new slot")
+
+    async def remaining(self, identity: Identity, ip: str) -> int:
+        raise AssertionError("sweep_terminal_failures must never read `remaining`")
+
+    async def refund(self, identity: Identity, ip: str) -> None:
+        raise ConnectionError("redis blip")
 
 
 def _failed_job(**overrides: object) -> Job:
@@ -603,6 +873,88 @@ class TestSweepTerminalFailures:
         await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
 
         assert job.state == JOB_STATE_FAILED  # never transitioned to QUEUED/SUBMITTING
+
+
+class TestSweepTerminalFailuresBestEffort:
+    """Redis-facing side effects (refund, per-user publish) are best-effort: a blip in
+    EITHER must never stop the Postgres commit that stamps `failure_handled_at` (repo
+    convention #3, D2)."""
+
+    async def test_refund_raising_still_stamps_failure_handled_at(self) -> None:
+        job = _failed_job()
+        rate_limiter = _RaisingRateLimiter()
+        before = _now()
+
+        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+
+        assert job.failure_handled_at is not None
+        assert job.failure_handled_at >= before
+
+    async def test_publish_user_event_raising_still_stamps_failure_handled_at(self) -> None:
+        job = _failed_job()
+        rate_limiter = _RecordingRateLimiter()
+
+        async def _raising_publish(user_id: str, message: str) -> None:
+            raise ConnectionError("redis blip")
+
+        before = _now()
+        await sweep_terminal_failures(
+            job, rate_limiter=rate_limiter, publish_user_event=_raising_publish  # type: ignore[arg-type]
+        )
+
+        assert job.failure_handled_at is not None
+        assert job.failure_handled_at >= before
+        assert len(rate_limiter.refund_calls) == 1  # the refund itself still ran fine
+
+    async def test_refund_and_publish_both_raising_still_commits_the_stamp(
+        self, session: AsyncSession
+    ) -> None:
+        """Drives the real claim + sweep + commit (not just the in-memory `Job`) so the
+        Postgres commit itself -- not merely the in-process attribute -- is proven to
+        go through when BOTH Redis-facing side effects fail simultaneously."""
+        await _add(session, _job(job_id="failed-both-raise", state=JOB_STATE_FAILED))
+        rate_limiter = _RaisingRateLimiter()
+
+        async def _raising_publish(user_id: str, message: str) -> None:
+            raise ConnectionError("redis blip")
+
+        job = await claim_terminal_failure_job(session)
+        assert job is not None
+        await sweep_terminal_failures(
+            job, rate_limiter=rate_limiter, publish_user_event=_raising_publish  # type: ignore[arg-type]
+        )
+        await session.commit()
+
+        second_claim = await claim_terminal_failure_job(session)
+        assert second_claim is None  # stamped despite both failures -- never re-claimed
+
+    async def test_refund_uses_an_empty_string_when_client_ip_is_none(self) -> None:
+        job = _failed_job(client_ip=None)
+        rate_limiter = _RecordingRateLimiter()
+
+        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+
+        assert rate_limiter.refund_calls[0][1] == ""
+
+    async def test_refund_uses_an_empty_string_when_client_ip_is_the_empty_string(self) -> None:
+        job = _failed_job(client_ip="")
+        rate_limiter = _RecordingRateLimiter()
+
+        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+
+        assert rate_limiter.refund_calls[0][1] == ""
+
+    async def test_refund_reconstructs_an_authenticated_identity(self) -> None:
+        """D3: `is_authenticated` is always False today (no accounts system yet), but
+        the refund shape must already be correct once accounts land -- driven here with
+        a forward-looking `is_authenticated=True` job."""
+        job = _failed_job(is_authenticated=True)
+        rate_limiter = _RecordingRateLimiter()
+
+        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+
+        identity, _ip = rate_limiter.refund_calls[0]
+        assert identity.is_authenticated is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
