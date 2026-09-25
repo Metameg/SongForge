@@ -192,6 +192,22 @@ user_notifications_relayed_total = Counter(
     registry=REGISTRY,
 )
 
+# ── Generation semaphore slot-leak fix (issue #16 follow-up) ─────────────────────
+#
+# `jobs.dispatch.dispatch_claimed_job` already releases on its own FAILED/429/
+# transient paths (unlabelled, pre-existing) -- this covers the release sites this
+# fix ADDS: every ACTIVE_JOB_STATES -> terminal transition that happens OUTSIDE
+# dispatch (ingest completion/failure, a webhook failure, and the watchdog's own
+# sweeps).
+
+semaphore_released_total = Counter(
+    "songforge_semaphore_released_total",
+    "Generation semaphore slots released outside jobs.dispatch, by the site that "
+    "released them.",
+    labelnames=("site",),
+    registry=REGISTRY,
+)
+
 
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.
