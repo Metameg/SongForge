@@ -204,3 +204,36 @@ def test_ingest_tunables_override_from_env() -> None:
     assert settings.ingest_download_timeout_seconds == 15.0
     assert settings.ingest_requeue_backoff_seconds == 3.0
     assert settings.ingest_max_attempts == 3
+
+
+def test_watchdog_tunables_have_documented_defaults() -> None:
+    """Issue #16: single config source for the watchdog's poll interval, the
+    per-sweep overdue/lease thresholds (A2/A3), the claim-batch bound, and the
+    per-user SSE channel prefix (A4)."""
+    settings = Settings(_env=_base_env())
+    assert settings.watchdog_poll_interval_seconds == 30.0
+    assert settings.watchdog_waiting_overdue_buffer_seconds == 45.0
+    assert settings.watchdog_submitting_lease_seconds == 120.0
+    assert settings.watchdog_ingest_overdue_seconds == 300.0
+    assert settings.watchdog_claim_batch_size == 20
+    assert settings.user_events_channel_prefix == "user:"
+
+
+def test_watchdog_tunables_override_from_env() -> None:
+    settings = Settings(
+        _env={
+            **_base_env(),
+            "WATCHDOG_POLL_INTERVAL_SECONDS": "10",
+            "WATCHDOG_WAITING_OVERDUE_BUFFER_SECONDS": "20",
+            "WATCHDOG_SUBMITTING_LEASE_SECONDS": "60",
+            "WATCHDOG_INGEST_OVERDUE_SECONDS": "120",
+            "WATCHDOG_CLAIM_BATCH_SIZE": "5",
+            "USER_EVENTS_CHANNEL_PREFIX": "u:",
+        }
+    )
+    assert settings.watchdog_poll_interval_seconds == 10.0
+    assert settings.watchdog_waiting_overdue_buffer_seconds == 20.0
+    assert settings.watchdog_submitting_lease_seconds == 60.0
+    assert settings.watchdog_ingest_overdue_seconds == 120.0
+    assert settings.watchdog_claim_batch_size == 5
+    assert settings.user_events_channel_prefix == "u:"

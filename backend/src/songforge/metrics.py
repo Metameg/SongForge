@@ -163,6 +163,28 @@ radio_pointer_events_relayed_total = Counter(
 )
 
 
+# ── Failure recovery: watchdog, idempotency & refund (issue #16) ─────────────────
+watchdog_recovered_total = Counter(
+    "songforge_watchdog_recovered_total",
+    "Jobs recovered by the watchdog's periodic sweep, labelled by recovery path.",
+    labelnames=("path",),
+    registry=REGISTRY,
+)
+
+quota_refunded_total = Counter(
+    "songforge_quota_refunded_total",
+    "Daily-quota slots refunded by the watchdog's terminal-failure sweep (A4).",
+    registry=REGISTRY,
+)
+
+user_notifications_total = Counter(
+    "songforge_user_notifications_total",
+    "Per-user SSE notifications published, labelled by notification type.",
+    labelnames=("type",),
+    registry=REGISTRY,
+)
+
+
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.
 

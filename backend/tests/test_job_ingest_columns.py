@@ -8,6 +8,7 @@ uses the same test-only `before_insert` shim as `tests/test_create_route.py`.
 from __future__ import annotations
 
 import itertools
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.models import (
+    JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
     JOB_STATE_READY,
     SOURCE_GENERATED,
@@ -88,3 +90,52 @@ async def test_job_song_id_references_a_song_row(
         await session.refresh(job)
 
     assert job.song_id == "conv-1"
+
+
+# ── Issue #16 columns: client_ip / is_authenticated / failure_handled_at ─────────
+
+
+async def test_job_client_ip_and_is_authenticated_round_trip_with_defaults(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Design D3: persisted at create time so the watchdog's terminal-failure sweep
+    can reconstruct the exact identity+ip that created the job for an accurate
+    refund. Defaulted/nullable so every pre-#16 `Job(...)` construction is unaffected."""
+    job = Job(
+        job_id="job-1", user_id="user-1", prompt="p", state=JOB_STATE_INGEST_PENDING,
+        task_id="task-1", conversion_id_1="conv-1", conversion_id_2="conv-2",
+    )
+    async with sessionmaker() as session:
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+        assert job.client_ip is None
+        assert job.is_authenticated is False
+
+        job.client_ip = "203.0.113.5"
+        job.is_authenticated = True
+        await session.commit()
+        await session.refresh(job)
+        assert job.client_ip == "203.0.113.5"
+        assert job.is_authenticated is True
+
+
+async def test_job_failure_handled_at_defaults_to_none_and_round_trips_a_timestamp(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Design D2: the row-claim guard for the terminal-failure refund+notify sweep --
+    NULL means "still needs handling"; stamped once refund+notify has run."""
+    job = Job(
+        job_id="job-1", user_id="user-1", prompt="p", state=JOB_STATE_FAILED,
+        task_id="task-1", conversion_id_1="conv-1", conversion_id_2="conv-2",
+    )
+    async with sessionmaker() as session:
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+        assert job.failure_handled_at is None
+
+        job.failure_handled_at = datetime.now(timezone.utc)
+        await session.commit()
+        await session.refresh(job)
+        assert job.failure_handled_at is not None
