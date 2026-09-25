@@ -39,6 +39,8 @@ from songforge.radio.pointer_cache import (
     PointerRecord,
     get_now_playing_cached,
 )
+from songforge.radio.user_events import UserEventBroadcaster
+from songforge.web.identity import resolve_identity
 from songforge.web.routes.now_playing import (
     get_pg_loader_dependency,
     get_pointer_cache,
@@ -60,6 +62,12 @@ def get_pointer_broadcaster(request: Request) -> PointerBroadcaster:
     return cast(PointerBroadcaster, request.app.state.pointer_broadcaster)
 
 
+def get_user_event_broadcaster(request: Request) -> UserEventBroadcaster:
+    """This app instance's `UserEventBroadcaster` (issue #16, criterion A4): the
+    per-user mirror of `get_pointer_broadcaster`, set once per `create_app()` call."""
+    return cast(UserEventBroadcaster, request.app.state.user_event_broadcaster)
+
+
 def _format_event(event: str, payload: dict[str, Any]) -> str:
     """Hand-build one `text/event-stream` frame: a named event + a JSON data line."""
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
@@ -73,20 +81,30 @@ async def events(
     pg_loader: PgLoader = Depends(get_pg_loader_dependency),
     cache: PointerCache = Depends(get_pointer_cache),
     broadcaster: PointerBroadcaster = Depends(get_pointer_broadcaster),
+    user_broadcaster: UserEventBroadcaster = Depends(get_user_event_broadcaster),
     heartbeat_seconds: float = Depends(get_heartbeat_seconds),
 ) -> StreamingResponse:
-    """Stream `song-change` events: the current pointer on connect, then every push."""
+    """Stream `song-change` events (the current pointer on connect, then every push)
+    ALONGSIDE this caller's own `job-failed` notifications (issue #16, criterion A4;
+    design D4: no new endpoint). Identity is only READ here (`resolve_identity`) --
+    this GET never mints/sets the identity cookie, unlike `POST /create`; a listener
+    with no cookie yet simply never receives a `job-failed` frame."""
+    settings = get_settings()
     current: PointerRecord | None = await get_now_playing_cached(
         cache=cache,
         redis=redis,
         session=session,
         pg_loader=pg_loader,
-        redis_key=get_settings().radio_pointer_redis_key,
+        redis_key=settings.radio_pointer_redis_key,
     )
     queue = broadcaster.register()
+    identity = resolve_identity(request, settings)
+    user_queue = user_broadcaster.register(identity.user_id)
 
     async def stream() -> AsyncIterator[str]:
         nonlocal current
+        pointer_task: asyncio.Task[PointerRecord] | None = None
+        user_task: asyncio.Task[dict[str, Any]] | None = None
         try:
             if current is None:
                 yield _format_event("idle", {"status": "idle"})
@@ -98,12 +116,22 @@ async def events(
             while True:
                 if await request.is_disconnected():
                     break
-                try:
-                    current = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
-                except TimeoutError:
+                if pointer_task is None:
+                    pointer_task = asyncio.ensure_future(queue.get())
+                if user_task is None:
+                    user_task = asyncio.ensure_future(user_queue.get())
+
+                done, _pending = await asyncio.wait(
+                    {pointer_task, user_task},
+                    timeout=heartbeat_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if not done:
                     # Heartbeat: re-emit the last-known pointer, held locally -- this
                     # is the one place a naive implementation would silently
                     # reintroduce per-listener datastore load on every heartbeat.
+                    # Never re-sends a job-failed frame (one-shot, no replay).
                     if current is not None:
                         yield _format_event(
                             "song-change",
@@ -111,11 +139,23 @@ async def events(
                         )
                     continue
 
-                yield _format_event(
-                    "song-change", current.to_response(server_time=datetime.now(timezone.utc))
-                )
+                if pointer_task in done:
+                    current = pointer_task.result()
+                    pointer_task = None
+                    yield _format_event(
+                        "song-change",
+                        current.to_response(server_time=datetime.now(timezone.utc)),
+                    )
+                if user_task in done:
+                    message = user_task.result()
+                    user_task = None
+                    yield _format_event("job-failed", {"job_id": message.get("job_id")})
         finally:
+            for task in (pointer_task, user_task):
+                if task is not None and not task.done():
+                    task.cancel()
             broadcaster.unregister(queue)
+            user_broadcaster.unregister(identity.user_id, user_queue)
 
     return StreamingResponse(
         stream(),

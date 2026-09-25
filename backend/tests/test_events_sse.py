@@ -36,6 +36,7 @@ of the rest of the suite.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -92,18 +93,26 @@ def _record(*, song_id: str = "song-1", version: int = 1, playback_id: str = "pb
 
 class _FakePubSub:
     """Minimal async pubsub double mirroring `redis.asyncio.client.PubSub`'s
-    subscribe/get_message/close surface — the surface the broadcaster's listener loop
-    needs. One instance is created per `redis.pubsub()` call, matching real Redis."""
+    subscribe/psubscribe/get_message/close surface — the surface both broadcasters'
+    listener loops need. One instance is created per `redis.pubsub()` call, matching
+    real Redis. `psubscribe`/pattern `get_message` (issue #16: `UserEventBroadcaster`
+    PSUBSCRIBEs a wildcard pattern rather than a fixed channel) mirror real Redis's
+    `pmessage` shape: `{"type": "pmessage", "pattern": ..., "channel": ..., "data": ...}`."""
 
     def __init__(self, redis: "_FakeRedis") -> None:
         self._redis = redis
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._channels: set[str] = set()
+        self._patterns: set[str] = set()
         self.closed = False
 
     async def subscribe(self, channel: str) -> None:
         self._channels.add(channel)
         self._redis.subscribe_calls += 1
+        self._redis._subscribers.append(self)
+
+    async def psubscribe(self, pattern: str) -> None:
+        self._patterns.add(pattern)
         self._redis._subscribers.append(self)
 
     async def get_message(
@@ -124,10 +133,10 @@ class _FakePubSub:
 
 class _FakeRedis:
     """Fake async Redis double covering the surface `/events` needs: `publish` +
-    `pubsub()` (issue #10's fan-out), plus `get`/`set` in case a route falls back
-    through the existing `/now-playing` pointer-cache chain. File-local, per this
-    repo's per-file stub convention (see `_StubHistory` in `test_radio_coordinator.py`,
-    `_FakeRedis` in `test_now_playing.py`)."""
+    `pubsub()` (issue #10's fan-out; issue #16's per-user PSUBSCRIBE fan-out), plus
+    `get`/`set` in case a route falls back through the existing `/now-playing`
+    pointer-cache chain. File-local, per this repo's per-file stub convention (see
+    `_StubHistory` in `test_radio_coordinator.py`, `_FakeRedis` in `test_now_playing.py`)."""
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
@@ -146,6 +155,16 @@ class _FakeRedis:
         for sub in list(self._subscribers):
             if channel in sub._channels:
                 await sub._queue.put({"type": "message", "channel": channel, "data": message})
+            for pattern in sub._patterns:
+                if fnmatch.fnmatchcase(channel, pattern):
+                    await sub._queue.put(
+                        {
+                            "type": "pmessage",
+                            "pattern": pattern,
+                            "channel": channel,
+                            "data": message,
+                        }
+                    )
 
     def pubsub(self) -> _FakePubSub:
         return _FakePubSub(self)
@@ -419,6 +438,54 @@ async def test_events_unregisters_client_on_disconnect() -> None:
                 break
             await asyncio.sleep(0.01)
         assert len(broadcaster._queues) == 0
+
+
+
+# ── Per-user job-failed notifications (issue #16, acceptance criterion A4) ────────
+#
+# `/events` is also where a user's own `job-failed` notification rides (design D4: no
+# new endpoint). `create_app()`'s `app.state.user_event_broadcaster` and the route's
+# identity-based registration/merge into the SSE stream don't exist yet (issue #16
+# phase 3) -- referenced only inside this test function (mirrors this file's own NOTE
+# convention above) so a missing symbol fails only this test, not collection.
+
+
+async def test_events_emits_a_users_job_failed_frame_alongside_song_change() -> None:
+    """Acceptance A4: a `job-failed` notification published for the connecting
+    client's own (cookie) identity is delivered as a `job-failed` SSE frame on the
+    SAME `/events` connection that also carries `song-change`. Currently RED (issue
+    #16 phase 3): `app.state.user_event_broadcaster` doesn't exist yet."""
+    from songforge.web.identity import mint, sign
+
+    redis = _FakeRedis()
+    async with _running_app(redis) as (app, client):
+        assert hasattr(app.state, "user_event_broadcaster"), (
+            "issue #16 phase 3: create_app() must construct a UserEventBroadcaster "
+            "on app.state (mirrors app.state.pointer_broadcaster) and /events must "
+            "register the caller's identity with it, merging job-failed frames into "
+            "the same SSE stream as song-change"
+        )
+
+        from songforge.config import get_settings
+
+        user_id = mint()
+        signed = sign(user_id, secret=get_settings().session_secret)
+        client.cookies.set(get_settings().identity_cookie_name, signed)
+
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)  # idle/song-change
+
+            from songforge.radio.user_events import user_channel
+
+            await redis.publish(
+                user_channel(get_settings().user_events_channel_prefix, user_id),
+                '{"event": "job-failed", "job_id": "job-1"}',
+            )
+
+            name, payload = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name == "job-failed"
+            assert payload["job_id"] == "job-1"
 
 
 async def test_metrics_endpoint_exposes_the_new_sse_metrics() -> None:
