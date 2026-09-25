@@ -36,6 +36,17 @@
  * uses a skew sampled at a known moment rather than recomputing it from an increasingly
  * stale `server_time`. The client-side heartbeat re-fetch timer from issue #9 is
  * removed — the server now drives re-sync via the ~30s SSE heartbeat re-emit.
+ *
+ * Issue #14, criterion #3 (interrupt crossfade): a fresh user song can arrive as an
+ * ordinary `song-change` push mid-static-song (an interrupt) rather than at the
+ * natural boundary. No wire-contract change (design D2) — `applyPlaying` infers an
+ * interrupt purely from data it already has: `prevPointerRef` (the outgoing pointer)
+ * plus the usual clock-skew math tells it whether the outgoing song still had
+ * meaningful time left (`isInterruptArrival`, `lib/sync.ts`). An interrupt
+ * volume-ramps both buffers over `CROSSFADE_DURATION_MS` (`rampVolume` below) instead
+ * of the ordinary hard pause/play swap; an ordinary boundary (the outgoing song
+ * actually finished) or the `ended`-safeguard path both naturally read as "not an
+ * interrupt" since the outgoing song's remaining time is ~0 by then.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -46,7 +57,10 @@ import {
   computeOffsetSeconds,
   computeSkewMs,
   correctedServerNowMs,
+  crossfadeGains,
+  CROSSFADE_DURATION_MS,
   decideDrift,
+  isInterruptArrival,
   nextPreloadSlot,
   shouldReanchorOnPointer,
   type PreloadSlot,
@@ -80,6 +94,32 @@ function bufferElement(
   return (slot === "a" ? audioARef : audioBRef).current;
 }
 
+/**
+ * Volume-ramp `audio` over `durationMs` using {@link crossfadeGains} (issue #14,
+ * criterion #3's interrupt crossfade). DOM-side (touches `<audio>.volume` +
+ * `requestAnimationFrame`), so it lives here rather than in the pure `lib/sync.ts`
+ * seam, which only supplies the gain-at-elapsed-time math.
+ */
+function rampVolume(
+  audio: HTMLAudioElement,
+  buffer: "outgoing" | "incoming",
+  durationMs: number,
+  onDone?: () => void,
+): void {
+  const startMs = performance.now();
+  const step = (nowMs: number) => {
+    const elapsedMs = nowMs - startMs;
+    const { outgoingGain, incomingGain } = crossfadeGains(elapsedMs, durationMs);
+    audio.volume = buffer === "outgoing" ? outgoingGain : incomingGain;
+    if (elapsedMs < durationMs) {
+      requestAnimationFrame(step);
+    } else {
+      onDone?.();
+    }
+  };
+  requestAnimationFrame(step);
+}
+
 export default function Player() {
   const [state, setState] = useState<NowPlayingState | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
@@ -99,6 +139,10 @@ export default function Player() {
   // The last pointer's `playback_id` applied to the buffers — lets `shouldReanchorOnPointer`
   // tell a genuine song change apart from a heartbeat re-send of the same one.
   const prevPlaybackIdRef = useRef<string | null>(null);
+  // The last "playing" pointer itself (issue #14, criterion #3) — `applyPlaying` reads
+  // this to tell whether the OUTGOING song still had meaningful time left when the new
+  // pointer arrived (an interrupt) vs. having actually finished (an ordinary boundary).
+  const prevPointerRef = useRef<NowPlaying | null>(null);
   // Clock skew (client − server, ms) sampled at each pointer's receipt. The `timeupdate`
   // drift check reads this rather than recomputing it from `server_time`, which grows
   // stale between events (issue #9, design D6).
@@ -112,10 +156,31 @@ export default function Player() {
   // below can depend on it safely.
   const applyPlaying = useCallback((next: NowPlaying) => {
     const isChange = shouldReanchorOnPointer(prevPlaybackIdRef.current, next.playback_id);
+    const outgoingPointer = prevPointerRef.current;
     prevPlaybackIdRef.current = next.playback_id;
+    prevPointerRef.current = next;
     skewMsRef.current = computeSkewMs(Date.parse(next.server_time), Date.now());
     setState(next);
     if (!isChange) return;
+
+    // Issue #14, criterion #3: crossfade an interrupt instead of hard-cutting. Inferred
+    // from the OUTGOING pointer's own remaining time on the corrected server clock — a
+    // genuine boundary (or the `ended` safeguard, which only fires once the outgoing
+    // song has actually played out) has ~0 remaining and reads as "cut" for free.
+    let transition: "crossfade" | "cut" = "cut";
+    if (outgoingPointer && hasStartedRef.current) {
+      const serverNowMs = correctedServerNowMs(Date.now(), skewMsRef.current);
+      const offsetIntoOutgoingSeconds = computeOffsetSeconds(
+        serverNowMs,
+        Date.parse(outgoingPointer.started_at),
+      );
+      const outgoingDurationSeconds =
+        outgoingPointer.duration ??
+        (Date.parse(outgoingPointer.ends_at) - Date.parse(outgoingPointer.started_at)) / 1000;
+      if (isInterruptArrival(offsetIntoOutgoingSeconds, outgoingDurationSeconds)) {
+        transition = "crossfade";
+      }
+    }
 
     const outgoing = bufferElement(activeBufferRef.current, audioARef, audioBRef);
     const incoming = bufferElement(nextPreloadSlot(activeBufferRef.current), audioARef, audioBRef);
@@ -123,11 +188,21 @@ export default function Player() {
       incoming.src = next.audio_url;
       if (hasStartedRef.current) {
         seekToLiveOffset(incoming, next);
+        incoming.volume = transition === "crossfade" ? 0 : 1;
         void incoming.play();
       }
     }
     if (hasStartedRef.current) {
-      outgoing?.pause();
+      if (transition === "crossfade" && incoming && outgoing) {
+        rampVolume(outgoing, "outgoing", CROSSFADE_DURATION_MS, () => {
+          outgoing.pause();
+          outgoing.volume = 1;
+        });
+        rampVolume(incoming, "incoming", CROSSFADE_DURATION_MS);
+      } else {
+        outgoing?.pause();
+        if (outgoing) outgoing.volume = 1;
+      }
     }
     activeBufferRef.current = nextPreloadSlot(activeBufferRef.current);
   }, []);
@@ -144,6 +219,7 @@ export default function Player() {
     };
     const handleIdle = () => {
       prevPlaybackIdRef.current = null;
+      prevPointerRef.current = null;
       setState({ status: "idle" });
     };
 
@@ -177,6 +253,7 @@ export default function Player() {
       applyPlaying(next);
     } else {
       prevPlaybackIdRef.current = null;
+      prevPointerRef.current = null;
       setState(next);
     }
   };

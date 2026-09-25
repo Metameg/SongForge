@@ -40,9 +40,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import get_settings
 from songforge.logging_setup import get_logger
-from songforge.metrics import radio_advances_total, radio_pointer_events_published_total
-from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState, Song, SOURCE_STATIC
+from songforge.metrics import (
+    radio_advances_total,
+    radio_interrupts_total,
+    radio_pointer_events_published_total,
+)
+from songforge.models import (
+    RADIO_STATE_SINGLETON_ID,
+    PlaybackQueue,
+    RadioState,
+    Song,
+    Source,
+    SOURCE_GENERATED,
+    SOURCE_STATIC,
+)
 from songforge.radio.pointer_cache import PointerRecord
+from songforge.radio.queue import pop_next_user_song
 from songforge.radio.selection import pick_static
 from songforge.radio.state import NowPlayingView
 from songforge.storage import get_storage
@@ -132,7 +145,14 @@ async def initialize_if_absent(
     if existing is not None:
         return False
 
-    songs = list((await session.scalars(select(Song))).all())
+    # Issue #14 must-fix: static and generated songs share the `songs` table (spec
+    # #48) -- the STATIC-candidate query must filter to `source == 'static'`, or a
+    # generated song sitting in the catalog (already played once, or never queued at
+    # all) could leak into the plain static rotation outside of ever being explicitly
+    # queued and popped.
+    songs = list(
+        (await session.scalars(select(Song).where(Song.source == SOURCE_STATIC))).all()
+    )
     if not songs:
         log.info("radio_library_empty")
         return False
@@ -196,9 +216,24 @@ async def advance(
     ``redis`` is optional and backward-compatible, keyword-only (issue #9, design D2):
     when given, an *applied* CAS (never a lost race) best-effort writes the resolved
     pointer view to the Redis pointer key after the Postgres commit.
+
+    Issue #14, criterion #2: a waiting user song takes priority over static filler --
+    the user queue is peeked FIRST, and only an empty queue falls through to the
+    static ``pick_static`` path below (unchanged from issue #8/#9/#10).
     """
+    queue_row = await pop_next_user_song(session)
+    if queue_row is not None:
+        return await _advance_to_user_song(
+            session, queue_row, expected_version=expected_version, redis=redis
+        )
+
     settings = get_settings()
-    songs = list((await session.scalars(select(Song))).all())
+    # Issue #14 must-fix: see the matching comment in `initialize_if_absent` -- the
+    # static-candidate query must filter to `source == 'static'` so a generated song
+    # sitting in the catalog never leaks into the plain static rotation.
+    songs = list(
+        (await session.scalars(select(Song).where(Song.source == SOURCE_STATIC))).all()
+    )
     if not songs:
         log.info("radio_library_empty")
         return False
@@ -254,3 +289,145 @@ async def advance(
             version=expected_version + 1,
         )
     return True
+
+
+# ── Interrupt: a fresh user song cuts a currently-playing static filler ──────────
+#
+# Issue #14, criterion #3.
+#
+# `should_interrupt` is the PURE decision at the heart of criterion #3: a freshly-
+# ready user song may interrupt the currently-playing song IFF the current pointer's
+# `source` is `'static'` -- never a `'generated'` (user) song. This single guard gives
+# both "never interrupts a user song" AND "at most once per static song" for free: an
+# applied interrupt flips `source` to `'generated'`, so a subsequent wake finds
+# `source != 'static'` and does not fire again until the NEXT static song is chosen at
+# a boundary. Kept as a plain sync predicate (mirrors `radio.selection.pick_static`)
+# so it is trivially unit-testable with no DB/session at all.
+#
+# `attempt_interrupt` is the async DB-wired counterpart `worker/radio_coordinator.py`
+# calls on a `song_ready` LISTEN wake that is NOT the boundary timer: reads the current
+# pointer, applies `should_interrupt`, and -- only when both that guard AND a non-empty
+# user queue hold -- performs the same version-CAS `advance` uses (same
+# `expected_version` convention: the coordinator's own prior read, never client-
+# supplied), setting `source='generated'`, `started_at=now()`, and consuming the
+# popped `PlaybackQueue` row ONLY on an applied CAS (a lost race leaves it unconsumed,
+# mirroring `advance`'s own queue-consumption contract). Never touches
+# `history.record` -- anti-repeat is a static-only concern (mirrors `advance`'s
+# generated-song branch). `redis` is optional/best-effort, exactly like `advance`.
+
+
+async def _advance_to_user_song(
+    session: AsyncSession,
+    queue_row: PlaybackQueue,
+    *,
+    expected_version: int,
+    redis: Redis | None,
+) -> bool:
+    """CAS the pointer onto a queued user song (``source='generated'``) and, ONLY on
+    an applied CAS, consume the queue row + best-effort publish. Shared by the
+    boundary advance (criterion #2, ``advance``) and the off-boundary interrupt
+    (criterion #3, ``attempt_interrupt``) -- both go through the exact same
+    version-CAS, so a wake racing a boundary tick can never double-advance (whichever
+    commits first wins; the other sees ``rowcount == 0``).
+
+    On a lost CAS the queue row is left unconsumed for the winner (design D1/D4), and
+    no static anti-repeat record is written -- a generated advance is not a
+    static-repeat concern.
+    """
+    song = await session.get(Song, queue_row.song_id)
+    if song is None:
+        # The FK guarantees the song exists; defensively skip rather than crash the
+        # coordinator loop on an unexpected inconsistency.
+        log.error("radio_queue_row_missing_song", song_id=queue_row.song_id)
+        return False
+
+    settings = get_settings()
+    duration = song.duration_seconds or settings.radio_default_track_seconds
+    now = datetime.now(timezone.utc)
+    ends_at = now + timedelta(seconds=duration)
+    new_playback_id = str(uuid4())
+    result = await session.execute(
+        update(RadioState)
+        .where(
+            RadioState.id == RADIO_STATE_SINGLETON_ID,
+            RadioState.version == expected_version,
+        )
+        .values(
+            song_id=song.id,
+            playback_id=new_playback_id,
+            source=SOURCE_GENERATED,
+            started_at=now,
+            ends_at=ends_at,
+            version=RadioState.version + 1,
+        )
+    )
+    if cast("CursorResult[Any]", result).rowcount == 0:
+        await session.commit()
+        log.info("radio_advance_lost_race", expected_version=expected_version)
+        return False
+
+    # Consume the queue row ONLY now that the CAS is known applied (design D1/D4).
+    queue_row.played_at = now
+    await session.commit()
+    radio_advances_total.inc()
+    log.info(
+        "radio_advanced_generated",
+        song_id=song.id,
+        playback_id=new_playback_id,
+        version=expected_version + 1,
+    )
+    if redis is not None:
+        await _write_pointer_best_effort(
+            redis,
+            song=song,
+            playback_id=new_playback_id,
+            started_at=now,
+            ends_at=ends_at,
+            version=expected_version + 1,
+        )
+    return True
+
+
+def should_interrupt(current_source: Source) -> bool:
+    """Whether a freshly-ready user song may interrupt the currently-playing song.
+
+    Criterion #3: only when the current pointer is playing a STATIC filler --
+    interrupting another user's song is never allowed. See the module-level note
+    above for how this single guard also yields "at most once per static song".
+    """
+    return current_source == SOURCE_STATIC
+
+
+async def attempt_interrupt(
+    session: AsyncSession,
+    history: RecentHistoryStore,
+    *,
+    expected_version: int,
+    redis: Redis | None = None,
+) -> bool:
+    """Interrupt the currently-playing STATIC song with the oldest queued user song,
+    via the same version-CAS `advance` uses (criterion #3).
+
+    Returns True only if an interrupt was actually applied (guard passed AND the CAS
+    applied); False on any no-op (current song isn't static, the user queue is empty,
+    or the CAS lost a race) -- the caller (`worker/radio_coordinator.py`'s wake
+    handler) never double-advances or crashes on a False return, mirroring `advance`.
+
+    ``history`` is accepted for signature symmetry with `advance` (both funnel through
+    `_advance_to_user_song`, which never touches it -- anti-repeat is a static-only
+    concern, design D4).
+    """
+    pointer = await session.get(RadioState, RADIO_STATE_SINGLETON_ID)
+    if pointer is None or pointer.source is None or not should_interrupt(pointer.source):
+        return False
+
+    queue_row = await pop_next_user_song(session)
+    if queue_row is None:
+        return False
+
+    interrupted = await _advance_to_user_song(
+        session, queue_row, expected_version=expected_version, redis=redis
+    )
+    if interrupted:
+        radio_interrupts_total.inc()
+    return interrupted

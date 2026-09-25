@@ -22,18 +22,27 @@ session and a plain in-process fake `ObjectStorage` sink (storage's own contract
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import itertools
+from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.config import Settings
 from songforge.jobs.generation_client import HttpGenerationClient
 from songforge.jobs.ingest import HttpAudioDownloader, ingest_claimed_job
-from songforge.models import JOB_STATE_INGEST_PENDING, JOB_STATE_READY, Base, Job, Song
+from songforge.models import (
+    JOB_STATE_INGEST_PENDING,
+    JOB_STATE_READY,
+    Base,
+    Job,
+    PlaybackQueue,
+    Song,
+)
 from songforge.simulator.app import create_app as create_sim_app
 from songforge.simulator.app import wait_for_pending_webhooks
 from songforge.simulator.faults import FAULT_HEADER, Fault
@@ -61,6 +70,25 @@ class _FakeStorage:
     def put(self, key: str, data: bytes, content_type: str = "audio/mpeg") -> str:
         self._objects[key] = data
         return f"https://cdn.test/{key}"
+
+
+# Issue #14: `_finalize_ready` now also enqueues a `playback_queue` row on every path
+# that reaches READY below. SQLite `create_all` doesn't auto-populate a `BigInteger`
+# `Identity()` PK (see `tests/test_radio_queue.py`'s matching comment) -- install the
+# same `before_insert` shim so the real-download-reaches-READY tests here keep working.
+_ids = itertools.count(1)
+
+
+def _assign_id(mapper: object, connection: object, target: PlaybackQueue) -> None:
+    if target.id is None:
+        target.id = next(_ids)
+
+
+@pytest.fixture(autouse=True)
+def _sqlite_id_shim() -> Iterator[None]:
+    event.listen(PlaybackQueue, "before_insert", _assign_id)
+    yield
+    event.remove(PlaybackQueue, "before_insert", _assign_id)
 
 
 @pytest.fixture()

@@ -76,6 +76,12 @@ async def conn() -> AsyncIterator[Any]:
 
     async def _clean() -> None:
         try:
+            # Issue #14: `playback_queue.job_id` FKs `jobs.job_id`
+            # (`fk_playback_queue_job_id_jobs`) -- delete those rows first, or the
+            # `jobs` delete below is rejected once any queue row exists.
+            await connection.execute(
+                "DELETE FROM playback_queue WHERE job_id LIKE $1", f"{_TEST_JOB_PREFIX}%"
+            )
             await connection.execute(
                 "DELETE FROM jobs WHERE job_id LIKE $1", f"{_TEST_JOB_PREFIX}%"
             )
@@ -368,6 +374,10 @@ async def test_ingest_claimed_job_finalize_ready_against_real_postgres_fk(
             assert song is not None
             assert song.object_key.endswith(f"{conversion_id}.mp3")
     finally:
+        # Issue #14: this job reaching READY enqueued a `playback_queue` row --
+        # delete it FIRST, or `fk_playback_queue_job_id_jobs`/
+        # `fk_playback_queue_song_id_songs` reject the `jobs`/`songs` deletes below.
+        await conn.execute("DELETE FROM playback_queue WHERE job_id = $1", job_id)
         # Delete the `jobs` row FIRST -- it FK-references the `songs` row this test
         # creates, so the song can't be deleted while the job still points at it.
         # The `conn` fixture's own teardown also deletes `jobs` rows by prefix, but

@@ -199,6 +199,13 @@ class Settings(BaseSettings):
     # same way a network error would (bounded retry -> requeue/FAILED).
     ingest_max_download_bytes: int = 100 * 1024 * 1024
 
+    # ── User-song queue + interrupt (issue #14) ──────────────────────────────
+    # Postgres LISTEN/NOTIFY channel a freshly-enqueued READY song is announced on
+    # (fired post-commit from the ingest worker's commit path) so the radio
+    # coordinator's loop can wake and interrupt a currently-playing static filler
+    # (criterion #3) instead of waiting for the poll/boundary timer.
+    radio_ready_channel: str = "song_ready"
+
     # ── SSE + pub/sub (issue #10: push + gapless transitions) ───────────────
     # Redis pub/sub channel the coordinator publishes the resolved pointer to on
     # every genuine init/advance, and that each app instance's `PointerBroadcaster`

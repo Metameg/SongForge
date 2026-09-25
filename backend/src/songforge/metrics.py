@@ -120,6 +120,20 @@ ingest_requeued_total = Counter(
     "the in-claim refresh-and-retry didn't resolve.",
     registry=REGISTRY,
 )
+
+# ── User-song queue: fallback + interrupts (issue #14) ───────────────────────────
+playback_queue_enqueued_total = Counter(
+    "songforge_playback_queue_enqueued_total",
+    "READY user songs enqueued onto the authoritative playback queue (criterion #1).",
+    registry=REGISTRY,
+)
+
+radio_interrupts_total = Counter(
+    "songforge_radio_interrupts_total",
+    "Off-boundary interrupt-advances that replaced a static filler with a fresh user "
+    "song (criterion #3).",
+    registry=REGISTRY,
+)
 # ── SSE + pub/sub (issue #10) — organized by load driver: listener count ────────
 #
 # The direct observable proof that listener count is decoupled from datastore load:
