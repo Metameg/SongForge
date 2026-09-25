@@ -321,7 +321,12 @@ async def sweep_terminal_failures(job: Job) -> TerminalFailureIntent | None:
 # -- the decision (`sweep_*`) differs by outcome, so the claim only locks + selects.
 
 
-async def claim_waiting_overdue_job(session: AsyncSession, settings: Settings) -> Job | None:
+async def claim_waiting_overdue_job(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    exclude_job_ids: set[str] | None = None,
+) -> Job | None:
     """Claim the oldest overdue `WAITING_FOR_WEBHOOK` job: design D5's
     `updated_at + eta + buffer <= now`. `eta` (seconds) varies per row, so this isn't
     a single portable SQL predicate across SQLite (unit tests) and Postgres
@@ -329,12 +334,26 @@ async def claim_waiting_overdue_job(session: AsyncSession, settings: Settings) -
     LOCKED` (so concurrent sweeps never contend on the same rows even while
     scanning), then apply the precise per-row check in Python and hand back the
     first match.
+
+    `exclude_job_ids` (non-termination-bug fix, phase 5): `sweep_waiting_overdue`
+    deliberately does NOT mutate a still-IN_QUEUE row, or one whose `/byId` poll
+    itself failed (F1) -- it stays WAITING with `updated_at` untouched (bumping it
+    would push the next overdue check out a full `eta` window, wrong once already
+    overdue -- see `sweep_waiting_overdue`'s docstring). Without this exclusion,
+    `worker.watchdog._drain_waiting_overdue`'s drain-to-exhaustion loop would
+    re-claim that SAME unmutated row on every subsequent iteration of the SAME tick,
+    forever -- an infinite loop hammering `/byId` and starving the other three
+    sweeps. The caller accumulates the job_ids it has already examined this tick and
+    passes them here so each is polled at most once per tick; a row that actually
+    transitions out of WAITING_FOR_WEBHOOK (COMPLETED/ERROR/FAILED) never needs the
+    exclusion -- it simply stops matching the state predicate on its own.
     """
     now = datetime.now(timezone.utc)
+    stmt = select(Job).where(Job.state == JOB_STATE_WAITING_FOR_WEBHOOK)
+    if exclude_job_ids:
+        stmt = stmt.where(Job.job_id.notin_(exclude_job_ids))
     stmt = (
-        select(Job)
-        .where(Job.state == JOB_STATE_WAITING_FOR_WEBHOOK)
-        .order_by(Job.updated_at)
+        stmt.order_by(Job.updated_at)
         .limit(settings.watchdog_claim_batch_size)
         .with_for_update(skip_locked=True)
     )

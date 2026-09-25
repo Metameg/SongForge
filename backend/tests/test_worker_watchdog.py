@@ -22,6 +22,17 @@ fix pass:
   the ordering (commit happens before the spy sees the intent fired) and that each
   sweep's specific side effect is threaded to the right hook.
 
+Phase-5 RE-REVIEW fix: F2's drain-to-exhaustion loop combined with F1's "leave the
+job WAITING untouched on a still-IN_QUEUE poll or a `/byId` exception" behavior was a
+non-termination bug -- `_drain_waiting_overdue`'s `while True` re-claimed the SAME
+unmutated row forever within one tick, since nothing about it ever changes
+(`updated_at` is deliberately not bumped). The `TestDrainWaitingOverdueTermination`
+class below drives the REAL `claim_waiting_overdue_job` (not a monkeypatched one, the
+gap that let the bug through review) against a real in-memory SQLite session to prove
+the fix (`claim_waiting_overdue_job`'s `exclude_job_ids` param, accumulated per-tick
+by `_drain_waiting_overdue`) actually terminates for both the still-pending and the
+poll-failure cases, while still draining a batch of genuinely-recoverable rows fully.
+
 `run_watchdog` itself (the real asyncpg/Redis wiring and its poll-backstop outer loop)
 is intentionally left untested, matching `run_dispatch`/`run_ingest`'s established
 precedent -- resilience, not a dedicated unit test, is its correctness property.
@@ -29,11 +40,30 @@ precedent -- resilience, not a dedicated unit test, is its correctness property.
 
 from __future__ import annotations
 
+import asyncio
+import itertools
+from collections.abc import AsyncIterator, Iterator
+from datetime import datetime, timedelta, timezone
+
 import pytest
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.config import Settings
+from songforge.jobs.generation_client import (
+    GENERATION_STATUS_COMPLETED,
+    GENERATION_STATUS_IN_QUEUE,
+    GenerationStatus,
+    GenerationTransientError,
+)
+from songforge.models import (
+    JOB_STATE_INGEST_PENDING,
+    JOB_STATE_WAITING_FOR_WEBHOOK,
+    Base,
+    Job,
+)
 from songforge.web.rate_limit import Identity
-from songforge.worker.watchdog import _run_sweeps
+from songforge.worker.watchdog import _drain_waiting_overdue, _run_sweeps
 
 
 def _settings() -> Settings:
@@ -107,7 +137,7 @@ def _once_then_none(label: str, calls: list[str], job_id: str):  # type: ignore[
     nothing, stop" cycle without looping forever."""
     claimed = {"done": False}
 
-    async def _claim(*_args: object) -> _FakeJob | None:
+    async def _claim(*_args: object, **_kwargs: object) -> _FakeJob | None:
         if claimed["done"]:
             return None
         claimed["done"] = True
@@ -244,7 +274,9 @@ async def test_run_sweeps_skips_sweep_and_commit_when_nothing_is_claimable(
     calls: list[str] = []
     commits: list[str] = []
 
-    async def _fake_claim_none_two_args(session: object, settings: Settings) -> None:
+    async def _fake_claim_none_two_args(
+        session: object, settings: Settings, **_kwargs: object
+    ) -> None:
         return None
 
     async def _fake_claim_none_one_arg(session: object) -> None:
@@ -321,7 +353,9 @@ async def test_run_sweeps_drains_each_sweep_type_to_exhaustion(
     claim_calls = 0
     sweep_calls = 0
 
-    async def _fake_claim_waiting(session: object, settings: Settings) -> _FakeJob | None:
+    async def _fake_claim_waiting(
+        session: object, settings: Settings, **_kwargs: object
+    ) -> _FakeJob | None:
         nonlocal claim_calls
         claim_calls += 1
         if claim_calls > 3:
@@ -333,7 +367,9 @@ async def test_run_sweeps_drains_each_sweep_type_to_exhaustion(
         sweep_calls += 1
         return None
 
-    async def _fake_claim_none_two_args(session: object, settings: Settings) -> None:
+    async def _fake_claim_none_two_args(
+        session: object, settings: Settings, **_kwargs: object
+    ) -> None:
         return None
 
     async def _fake_claim_none_one_arg(session: object) -> None:
@@ -375,3 +411,284 @@ async def test_run_sweeps_drains_each_sweep_type_to_exhaustion(
     assert claim_calls == 4
     assert sweep_calls == 3
     assert commits == ["commit", "commit", "commit"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Non-termination-bug fix (phase 5 re-review): `_drain_waiting_overdue` against a REAL
+# `claim_waiting_overdue_job` + in-memory SQLite session -- the monkeypatched-claim
+# tests above can't catch this class of bug because a fake claim function that returns
+# `None` after N calls can never reproduce "the real claim query keeps re-selecting
+# the same unmutated row forever." These tests seed genuine `Job` rows and drive the
+# real claim/sweep/commit loop end to end.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+_seq_counter = itertools.count(1)
+
+
+def _assign_test_seq(mapper: object, connection: object, target: Job) -> None:
+    if target.seq is None:
+        target.seq = next(_seq_counter)
+
+
+@pytest.fixture(autouse=True)
+def _sqlite_seq_shim() -> Iterator[None]:
+    """See `tests/test_create_route.py`'s module docstring: SQLite can't server-
+    generate `Job.seq` (a Postgres `Identity`), so this fills it in for this file's
+    tests only."""
+    event.listen(Job, "before_insert", _assign_test_seq)
+    yield
+    event.remove(Job, "before_insert", _assign_test_seq)
+
+
+@pytest.fixture()
+async def real_sessionmaker() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """A genuine in-memory SQLite engine + sessionmaker (unlike `_sessionmaker_factory`
+    above, which never touches a real database) -- `_drain_waiting_overdue` opens
+    several sessions off this across one call, exactly like it would against the real
+    app-wide sessionmaker in production."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    yield sessionmaker
+    await engine.dispose()
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _seed_waiting_job(**overrides: object) -> Job:
+    """A genuinely-overdue `WAITING_FOR_WEBHOOK` row (mirrors `tests/test_watchdog.py::
+    _waiting_job`): `eta=60` + the default `watchdog_waiting_overdue_buffer_seconds`
+    is comfortably exceeded by `updated_at` being 600s in the past."""
+    defaults: dict[str, object] = dict(
+        job_id="job-1",
+        user_id="user-1",
+        prompt="p",
+        state=JOB_STATE_WAITING_FOR_WEBHOOK,
+        task_id="task-1",
+        conversion_id_1="conv-1",
+        conversion_id_2="conv-2",
+        eta=60,
+        credit_estimate=1.0,
+        available_at=_now(),
+        updated_at=_now() - timedelta(seconds=600),
+        client_ip="203.0.113.5",
+        is_authenticated=False,
+    )
+    defaults.update(overrides)
+    return Job(**defaults)  # type: ignore[arg-type]
+
+
+class _AlwaysStatusClient:
+    """File-local fake `GenerationClient`: `get_status_by_id` always returns (or
+    raises) the SAME fixed outcome, no matter which/how many `task_id`s are polled --
+    exactly the "nothing about this row will ever change" scenario the non-termination
+    bug needed. Counts calls so a test can assert a bound on how many times it was
+    actually invoked (proving "polled once per tick", not "never hammered")."""
+
+    def __init__(self, outcome: GenerationStatus | Exception) -> None:
+        self._outcome = outcome
+        self.calls = 0
+
+    async def create(self, **kwargs: object) -> None:
+        raise AssertionError("the watchdog must never call create() -- no re-charging")
+
+    async def get_audio_url_by_id(self, task_id: str) -> str:
+        raise AssertionError("sweep_waiting_overdue must use get_status_by_id, not this")
+
+    async def get_status_by_id(self, task_id: str) -> GenerationStatus:
+        self.calls += 1
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+
+class TestDrainWaitingOverdueTermination:
+    async def test_terminates_when_a_row_stays_in_queue(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The bug: a still-IN_QUEUE row is left WAITING untouched by
+        `sweep_waiting_overdue` (no state change, `updated_at` not bumped), so the
+        real claim query would re-select it on every loop iteration forever without
+        the `exclude_job_ids` fix. Bounded by `asyncio.wait_for` so a regression fails
+        the test on a timeout rather than hanging the suite; the call is also
+        expected to complete well within that bound when the fix is in place."""
+        async with real_sessionmaker() as session:
+            session.add(_seed_waiting_job(job_id="stuck-in-queue"))
+            await session.commit()
+
+        client = _AlwaysStatusClient(
+            GenerationStatus(
+                status=GENERATION_STATUS_IN_QUEUE, audio_url=None, duration=None, title=None
+            )
+        )
+        settings = _settings()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify),
+            timeout=5.0,
+        )
+
+        # Polled exactly once THIS tick -- not hammered, not skipped.
+        assert client.calls == 1
+
+        async with real_sessionmaker() as session:
+            row = await session.get(Job, "stuck-in-queue")
+            assert row is not None
+            assert row.state == JOB_STATE_WAITING_FOR_WEBHOOK  # still untouched
+
+    async def test_terminates_when_the_byid_poll_keeps_failing(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """F1's exception-safety path has the exact same non-termination exposure as
+        the IN_QUEUE case: the job is left WAITING untouched on every poll attempt."""
+        async with real_sessionmaker() as session:
+            session.add(_seed_waiting_job(job_id="stuck-erroring"))
+            await session.commit()
+
+        client = _AlwaysStatusClient(GenerationTransientError("byId returned 503"))
+        settings = _settings()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify),
+            timeout=5.0,
+        )
+
+        assert client.calls == 1
+
+        async with real_sessionmaker() as session:
+            row = await session.get(Job, "stuck-erroring")
+            assert row is not None
+            assert row.state == JOB_STATE_WAITING_FOR_WEBHOOK
+
+    async def test_still_drains_multiple_genuinely_recoverable_rows_to_exhaustion(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The fix must not regress F2: rows that actually transition (COMPLETED
+        here) keep draining fully in one call -- the exclusion set only matters for
+        rows that DON'T transition."""
+        async with real_sessionmaker() as session:
+            for i in range(3):
+                session.add(
+                    _seed_waiting_job(
+                        job_id=f"recoverable-{i}",
+                        task_id=f"task-{i}",
+                        updated_at=_now() - timedelta(seconds=600 + i),
+                    )
+                )
+            await session.commit()
+
+        client = _AlwaysStatusClient(
+            GenerationStatus(
+                status=GENERATION_STATUS_COMPLETED,
+                audio_url="http://musicgpt.test/audio/recovered",
+                duration=180.0,
+                title="Recovered",
+            )
+        )
+        settings = _settings()
+        notified: list[tuple[str, str]] = []
+
+        async def _notify(channel: str, payload: str) -> None:
+            notified.append((channel, payload))
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify),
+            timeout=5.0,
+        )
+
+        assert client.calls == 3  # all three rows polled, none skipped
+        assert len(notified) == 3  # one ingest-wake NOTIFY per recovered row
+
+        async with real_sessionmaker() as session:
+            for i in range(3):
+                row = await session.get(Job, f"recoverable-{i}")
+                assert row is not None
+                assert row.state == JOB_STATE_INGEST_PENDING
+
+    async def test_terminates_with_a_mix_of_stuck_and_recoverable_rows(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The realistic mixed scenario: one row will never transition this tick
+        (IN_QUEUE), another genuinely recovers (COMPLETED). Both distinct `task_id`s
+        are routed to the SAME fake client instance, which branches on `task_id` --
+        proving the exclusion set lets the drain move PAST a stuck row to reach a
+        later, genuinely-claimable one, rather than either looping forever on the
+        stuck row or stopping early and never reaching the recoverable one."""
+
+        class _ByTaskIdClient:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def create(self, **kwargs: object) -> None:
+                raise AssertionError("must never re-charge")
+
+            async def get_audio_url_by_id(self, task_id: str) -> str:
+                raise AssertionError("must use get_status_by_id")
+
+            async def get_status_by_id(self, task_id: str) -> GenerationStatus:
+                self.calls.append(task_id)
+                if task_id == "task-stuck":
+                    return GenerationStatus(
+                        status=GENERATION_STATUS_IN_QUEUE,
+                        audio_url=None,
+                        duration=None,
+                        title=None,
+                    )
+                return GenerationStatus(
+                    status=GENERATION_STATUS_COMPLETED,
+                    audio_url="http://musicgpt.test/audio/recovered",
+                    duration=180.0,
+                    title="Recovered",
+                )
+
+        async with real_sessionmaker() as session:
+            # Oldest first: the stuck row would be re-claimed first on every
+            # iteration if the exclusion set didn't move it out of the way.
+            session.add(
+                _seed_waiting_job(
+                    job_id="stuck",
+                    task_id="task-stuck",
+                    updated_at=_now() - timedelta(seconds=700),
+                )
+            )
+            session.add(
+                _seed_waiting_job(
+                    job_id="recoverable",
+                    task_id="task-recoverable",
+                    updated_at=_now() - timedelta(seconds=600),
+                )
+            )
+            await session.commit()
+
+        client = _ByTaskIdClient()
+        settings = _settings()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify),
+            timeout=5.0,
+        )
+
+        # Each row polled exactly once -- the stuck row wasn't hammered, and the
+        # recoverable row wasn't starved by it.
+        assert client.calls.count("task-stuck") == 1
+        assert client.calls.count("task-recoverable") == 1
+
+        async with real_sessionmaker() as session:
+            stuck = await session.get(Job, "stuck")
+            recovered = await session.get(Job, "recoverable")
+            assert stuck is not None
+            assert stuck.state == JOB_STATE_WAITING_FOR_WEBHOOK
+            assert recovered is not None
+            assert recovered.state == JOB_STATE_INGEST_PENDING

@@ -118,12 +118,31 @@ async def _drain_waiting_overdue(
     """Claim + poll + commit every currently-overdue `WAITING_FOR_WEBHOOK` row, one at
     a time, until none remain (F2) -- mirrors `_drain_ready_jobs`'s "one short-lived
     session per claimed row" shape. A recovered row's ingest-wake NOTIFY fires only
-    after that row's own commit succeeds (F4)."""
+    after that row's own commit succeeds (F4).
+
+    Non-termination-bug fix (phase 5 re-review): a claimed row `sweep_waiting_overdue`
+    leaves WAITING untouched -- still IN_QUEUE, or an F1 `/byId` exception -- makes NO
+    state change and deliberately does not bump `updated_at`, so without tracking it,
+    `claim_waiting_overdue_job` would re-select that SAME row on every following
+    iteration of this `while True` loop: an infinite loop within one tick, hammering
+    `/byId` and starving `_drain_submitting_stuck`/`_drain_ingest_overdue`/
+    `_drain_terminal_failures`, which only run after this one returns. `examined`
+    accumulates every job_id claimed this call and is passed as `exclude_job_ids` on
+    the next claim, so a still-pending or erroring row is polled AT MOST ONCE per
+    tick (the pre-drain-to-exhaustion cadence) while a row that actually transitions
+    (COMPLETED/ERROR/FAILED) keeps draining normally in the same loop -- it never
+    needs the exclusion, since its state change alone removes it from the claim
+    query. A fresh, empty `examined` set starts on every call (i.e. every tick).
+    """
+    examined: set[str] = set()
     while True:
         async with sessionmaker() as session:
-            job = await claim_waiting_overdue_job(session, settings)
+            job = await claim_waiting_overdue_job(
+                session, settings, exclude_job_ids=examined
+            )
             if job is None:
                 return
+            examined.add(job.job_id)
             intent = await sweep_waiting_overdue(job, client=client, settings=settings)
             await session.commit()
 
