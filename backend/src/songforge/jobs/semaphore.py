@@ -94,6 +94,13 @@ class SemaphoreBackend(Protocol):
         """Atomically set ``key`` to ``value`` (used by ``reconcile_from_active_count``)."""
         ...
 
+    async def scan_keys(self, match: str) -> list[str]:
+        """Enumerate every key matching ``match`` (a ``<prefix>*`` glob) -- the
+        watchdog reconcile backstop's (issue #16) way of discovering which per-user
+        semaphore keys currently exist, without needing a separate index of every
+        user id that has ever acquired a slot."""
+        ...
+
 
 class RedisSemaphoreBackend:
     """Real backend: Redis-native atomic ops via Lua scripts (cross-process atomicity).
@@ -117,6 +124,13 @@ class RedisSemaphoreBackend:
     async def set_value(self, key: str, value: int) -> None:
         await self._redis.set(key, value)
 
+    async def scan_keys(self, match: str) -> list[str]:
+        # `SCAN`-based (via `scan_iter`), not `KEYS` -- `KEYS` blocks the single
+        # Redis event loop for the duration of a full-keyspace scan (a real
+        # production hazard at any nontrivial key count), where `SCAN` walks the
+        # keyspace in small cursor-driven steps.
+        return [key async for key in self._redis.scan_iter(match=match)]
+
 
 class Semaphore(Protocol):
     """Cap-decision interface ``songforge.jobs.dispatch`` depends on."""
@@ -133,6 +147,19 @@ class Semaphore(Protocol):
     async def reconcile_from_active_count(self, count: int) -> None:
         """Reset the global counter to ``count`` (a fresh count of active-state job
         rows) — the 429 path's way of correcting semaphore drift from Postgres truth."""
+        ...
+
+    async def scan_user_ids(self) -> list[str]:
+        """List every user id with a per-user semaphore key currently in Redis (the
+        watchdog reconcile backstop's discovery step, issue #16) -- a key exists for
+        any user who has ever acquired a slot, since ``release``/``decrement`` floor
+        at 0 rather than deleting the key."""
+        ...
+
+    async def reconcile_user_from_active_count(self, user_id: str, count: int) -> None:
+        """Reset ``user_id``'s per-user counter to ``count`` (a fresh count of that
+        user's active-state job rows) -- the per-user counterpart to
+        ``reconcile_from_active_count``, called once per id ``scan_user_ids`` finds."""
         ...
 
 
@@ -176,3 +203,12 @@ class RedisSemaphore:
     async def reconcile_from_active_count(self, count: int) -> None:
         await self._backend.set_value(global_key(self._settings), count)
         log.info("semaphore_reconciled", active_count=count)
+
+    async def scan_user_ids(self) -> list[str]:
+        prefix = self._settings.semaphore_user_key_prefix
+        keys = await self._backend.scan_keys(f"{prefix}*")
+        return [key[len(prefix) :] for key in keys]
+
+    async def reconcile_user_from_active_count(self, user_id: str, count: int) -> None:
+        await self._backend.set_value(user_key(self._settings, user_id), count)
+        log.info("semaphore_user_reconciled", user_id=user_id, active_count=count)

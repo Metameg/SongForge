@@ -50,20 +50,30 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.config import Settings
+from songforge.jobs.dispatch import count_active_jobs, count_active_jobs_by_user
 from songforge.jobs.generation_client import (
     GENERATION_STATUS_COMPLETED,
+    GENERATION_STATUS_ERROR,
     GENERATION_STATUS_IN_QUEUE,
     GenerationStatus,
     GenerationTransientError,
 )
 from songforge.models import (
+    JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
+    JOB_STATE_QUEUED,
+    JOB_STATE_SUBMITTING,
     JOB_STATE_WAITING_FOR_WEBHOOK,
     Base,
     Job,
 )
 from songforge.web.rate_limit import Identity
-from songforge.worker.watchdog import _drain_waiting_overdue, _run_sweeps
+from songforge.worker.watchdog import (
+    _drain_ingest_overdue,
+    _drain_submitting_stuck,
+    _drain_waiting_overdue,
+    _run_sweeps,
+)
 
 
 def _settings() -> Settings:
@@ -692,3 +702,496 @@ class TestDrainWaitingOverdueTermination:
             assert stuck.state == JOB_STATE_WAITING_FOR_WEBHOOK
             assert recovered is not None
             assert recovered.state == JOB_STATE_INGEST_PENDING
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Generation semaphore release + reconcile (issue #16 slot-leak fix)
+#
+# `dispatch_claimed_job` acquires the semaphore before the API call and only releases
+# it on ITS OWN failure paths -- a job the watchdog recovers or requeues also needs
+# its slot released whenever the sweep moves it OUT of `ACTIVE_JOB_STATES` (or, for
+# `_drain_submitting_stuck`, out of the SUBMITTING lease a dead worker held). These
+# tests drive the REAL claim/sweep/commit loop against `real_sessionmaker` (mirrors
+# `TestDrainWaitingOverdueTermination` above), with a file-local fake `Semaphore`
+# standing in for Redis.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+
+class _RecordingSemaphore:
+    """File-local fake ``Semaphore`` (mirrors ``tests/test_dispatch.py``'s
+    ``_RecordingSemaphore``): records every ``release``/``reconcile_from_active_count``/
+    ``reconcile_user_from_active_count`` call; ``scan_user_ids`` returns a preset,
+    test-supplied list (the reconcile backstop's Redis-discovery step -- there's no
+    real Redis here to scan)."""
+
+    def __init__(self, user_ids: list[str] | None = None) -> None:
+        self._user_ids = user_ids or []
+        self.released_with: list[str] = []
+        self.reconciled_global_with: list[int] = []
+        self.reconciled_user_with: list[tuple[str, int]] = []
+
+    async def acquire(self, user_id: str) -> bool:
+        raise AssertionError("watchdog sweeps must never acquire a slot")
+
+    async def release(self, user_id: str) -> None:
+        self.released_with.append(user_id)
+
+    async def reconcile_from_active_count(self, count: int) -> None:
+        self.reconciled_global_with.append(count)
+
+    async def scan_user_ids(self) -> list[str]:
+        return list(self._user_ids)
+
+    async def reconcile_user_from_active_count(self, user_id: str, count: int) -> None:
+        self.reconciled_user_with.append((user_id, count))
+
+
+def _seed_submitting_job(**overrides: object) -> Job:
+    """A genuinely lease-expired `SUBMITTING` row (crashed-worker-mid-submit case):
+    no `task_id`, `updated_at` well past `watchdog_submitting_lease_seconds`."""
+    defaults: dict[str, object] = dict(
+        job_id="job-1",
+        user_id="user-1",
+        prompt="p",
+        state=JOB_STATE_SUBMITTING,
+        task_id=None,
+        attempts=0,
+        available_at=_now(),
+        updated_at=_now() - timedelta(seconds=300),
+    )
+    defaults.update(overrides)
+    return Job(**defaults)  # type: ignore[arg-type]
+
+
+def _seed_ingest_overdue_job(**overrides: object) -> Job:
+    """A genuinely overdue `INGEST_PENDING` row (well past
+    `watchdog_ingest_overdue_seconds`)."""
+    defaults: dict[str, object] = dict(
+        job_id="job-1",
+        user_id="user-1",
+        prompt="p",
+        state=JOB_STATE_INGEST_PENDING,
+        conversion_id_1="conv-1",
+        audio_url="http://musicgpt.test/audio/hint",
+        task_id="task-1",
+        ingest_attempts=0,
+        available_at=_now(),
+        updated_at=_now() - timedelta(seconds=900),
+    )
+    defaults.update(overrides)
+    return Job(**defaults)  # type: ignore[arg-type]
+
+
+class TestDrainWaitingOverdueSemaphoreRelease:
+    async def test_releases_when_the_row_becomes_failed(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async with real_sessionmaker() as session:
+            session.add(_seed_waiting_job(job_id="terminal", user_id="user-9"))
+            await session.commit()
+
+        client = _AlwaysStatusClient(
+            GenerationStatus(
+                status=GENERATION_STATUS_ERROR, audio_url=None, duration=None, title=None
+            )
+        )
+        settings = _settings()
+        semaphore = _RecordingSemaphore()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify, semaphore),
+            timeout=5.0,
+        )
+
+        assert semaphore.released_with == ["user-9"]
+
+    async def test_does_not_release_when_the_row_recovers_to_ingest_pending(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async with real_sessionmaker() as session:
+            session.add(_seed_waiting_job(job_id="recovered", user_id="user-9"))
+            await session.commit()
+
+        client = _AlwaysStatusClient(
+            GenerationStatus(
+                status=GENERATION_STATUS_COMPLETED,
+                audio_url="http://musicgpt.test/audio/recovered",
+                duration=180.0,
+                title="Recovered",
+            )
+        )
+        settings = _settings()
+        semaphore = _RecordingSemaphore()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify, semaphore),
+            timeout=5.0,
+        )
+
+        assert semaphore.released_with == []  # still active (INGEST_PENDING now)
+
+    async def test_does_not_release_when_left_waiting(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async with real_sessionmaker() as session:
+            session.add(_seed_waiting_job(job_id="stuck", user_id="user-9"))
+            await session.commit()
+
+        client = _AlwaysStatusClient(
+            GenerationStatus(
+                status=GENERATION_STATUS_IN_QUEUE, audio_url=None, duration=None, title=None
+            )
+        )
+        settings = _settings()
+        semaphore = _RecordingSemaphore()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify, semaphore),
+            timeout=5.0,
+        )
+
+        assert semaphore.released_with == []
+
+    async def test_semaphore_is_optional_and_backward_compatible(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Omitting ``semaphore`` (every pre-existing test above) must not raise, even
+        on a row that becomes FAILED."""
+        async with real_sessionmaker() as session:
+            session.add(_seed_waiting_job(job_id="terminal", user_id="user-9"))
+            await session.commit()
+
+        client = _AlwaysStatusClient(
+            GenerationStatus(
+                status=GENERATION_STATUS_ERROR, audio_url=None, duration=None, title=None
+            )
+        )
+        settings = _settings()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_waiting_overdue(real_sessionmaker, client, settings, _notify),
+            timeout=5.0,
+        )
+
+
+class TestDrainSubmittingStuckSemaphoreRelease:
+    async def test_always_releases_the_reclaimed_crash_orphaned_slot(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async with real_sessionmaker() as session:
+            session.add(_seed_submitting_job(job_id="crashed", user_id="user-7"))
+            await session.commit()
+
+        settings = _settings()
+        semaphore = _RecordingSemaphore()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_submitting_stuck(real_sessionmaker, settings, _notify, semaphore),
+            timeout=5.0,
+        )
+
+        assert semaphore.released_with == ["user-7"]
+
+        async with real_sessionmaker() as session:
+            row = await session.get(Job, "crashed")
+            assert row is not None
+            assert row.state == JOB_STATE_QUEUED
+
+    async def test_semaphore_is_optional_and_backward_compatible(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async with real_sessionmaker() as session:
+            session.add(_seed_submitting_job(job_id="crashed", user_id="user-7"))
+            await session.commit()
+
+        settings = _settings()
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _drain_submitting_stuck(real_sessionmaker, settings, _notify),
+            timeout=5.0,
+        )
+
+
+class TestDrainIngestOverdueSemaphoreRelease:
+    async def test_releases_on_escalation_to_failed(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        settings = _settings()
+        async with real_sessionmaker() as session:
+            session.add(
+                _seed_ingest_overdue_job(
+                    job_id="exhausted",
+                    user_id="user-3",
+                    ingest_attempts=settings.ingest_max_attempts,
+                )
+            )
+            await session.commit()
+
+        semaphore = _RecordingSemaphore()
+
+        await asyncio.wait_for(
+            _drain_ingest_overdue(real_sessionmaker, settings, semaphore),
+            timeout=5.0,
+        )
+
+        assert semaphore.released_with == ["user-3"]
+
+        async with real_sessionmaker() as session:
+            row = await session.get(Job, "exhausted")
+            assert row is not None
+            assert row.state == JOB_STATE_FAILED
+
+    async def test_does_not_release_on_a_nudge(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        settings = _settings()
+        async with real_sessionmaker() as session:
+            session.add(
+                _seed_ingest_overdue_job(
+                    job_id="nudged", user_id="user-3", ingest_attempts=0
+                )
+            )
+            await session.commit()
+
+        semaphore = _RecordingSemaphore()
+
+        await asyncio.wait_for(
+            _drain_ingest_overdue(real_sessionmaker, settings, semaphore),
+            timeout=5.0,
+        )
+
+        assert semaphore.released_with == []
+
+        async with real_sessionmaker() as session:
+            row = await session.get(Job, "nudged")
+            assert row is not None
+            assert row.state == JOB_STATE_INGEST_PENDING  # still active, requeued
+
+    async def test_semaphore_is_optional_and_backward_compatible(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        settings = _settings()
+        async with real_sessionmaker() as session:
+            session.add(
+                _seed_ingest_overdue_job(
+                    job_id="exhausted",
+                    user_id="user-3",
+                    ingest_attempts=settings.ingest_max_attempts,
+                )
+            )
+            await session.commit()
+
+        await asyncio.wait_for(
+            _drain_ingest_overdue(real_sessionmaker, settings),
+            timeout=5.0,
+        )
+
+
+class TestRunSweepsSemaphoreReconcile:
+    """`_run_sweeps`' reconcile backstop (Part B): once per tick, AFTER the four
+    drains, snap the global counter and every per-user counter Redis currently has a
+    key for back to a fresh Postgres count of `ACTIVE_JOB_STATES` rows. Drives the
+    REAL `count_active_jobs`/`count_active_jobs_by_user` queries against seeded rows
+    (not monkeypatched) so the counts asserted below are the actual Postgres truth,
+    not a fake's guess at it."""
+
+    async def test_reconciles_global_and_per_user_counters_after_the_drains(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        async with real_sessionmaker() as session:
+            # user-a: 2 active rows. user-b: 1 active row. user-c: 0 active rows (a
+            # fully-released, leaked-key scenario -- must snap to 0, not be skipped).
+            session.add(
+                Job(  # type: ignore[arg-type]
+                    job_id="a1",
+                    user_id="user-a",
+                    prompt="p",
+                    state=JOB_STATE_WAITING_FOR_WEBHOOK,
+                    task_id="t-a1",
+                    eta=600,  # not overdue -- must not be claimed by any sweep
+                    available_at=_now(),
+                    updated_at=_now(),
+                )
+            )
+            session.add(
+                Job(  # type: ignore[arg-type]
+                    job_id="a2",
+                    user_id="user-a",
+                    prompt="p",
+                    state=JOB_STATE_INGEST_PENDING,
+                    available_at=_now(),
+                    updated_at=_now(),  # fresh -- not overdue
+                )
+            )
+            session.add(
+                Job(  # type: ignore[arg-type]
+                    job_id="b1",
+                    user_id="user-b",
+                    prompt="p",
+                    state=JOB_STATE_SUBMITTING,
+                    task_id="already-submitted",  # not the lease-expiry shape
+                    available_at=_now(),
+                    updated_at=_now(),
+                )
+            )
+            # A terminal row -- not active, must not count toward either total.
+            session.add(
+                Job(  # type: ignore[arg-type]
+                    job_id="done",
+                    user_id="user-a",
+                    prompt="p",
+                    state=JOB_STATE_FAILED,
+                    available_at=_now(),
+                    updated_at=_now(),
+                )
+            )
+            await session.commit()
+
+        # Confirm the Postgres truth this test asserts against, rather than
+        # hardcoding numbers the seed data above might drift out of sync with.
+        async with real_sessionmaker() as session:
+            expected_global = await count_active_jobs(session)
+            expected_by_user = await count_active_jobs_by_user(session)
+        assert expected_global == 3
+        assert expected_by_user == {"user-a": 2, "user-b": 1}
+
+        async def _claim_none_two_args(
+            session: object, settings: Settings, **_kwargs: object
+        ) -> None:
+            return None
+
+        async def _claim_none_one_arg(session: object) -> None:
+            return None
+
+        # Redis currently has keys for user-a, user-b, AND user-c (the leaked-key
+        # scenario for a user with zero active rows left).
+        semaphore = _RecordingSemaphore(user_ids=["user-a", "user-b", "user-c"])
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        async def _publish_user_event(user_id: str, message: str) -> None:
+            return None
+
+        import songforge.worker.watchdog as watchdog_module
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(watchdog_module, "claim_waiting_overdue_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_submitting_stuck_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_ingest_overdue_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_terminal_failure_job", _claim_none_one_arg)
+
+            await _run_sweeps(
+                real_sessionmaker,
+                object(),  # client
+                object(),  # rate_limiter
+                _settings(),
+                _notify,
+                _publish_user_event,
+                semaphore,
+            )
+
+        assert semaphore.reconciled_global_with == [3]
+        assert sorted(semaphore.reconciled_user_with) == [
+            ("user-a", 2),
+            ("user-b", 1),
+            ("user-c", 0),
+        ]
+
+    async def test_reconcile_is_skipped_entirely_when_no_semaphore_is_supplied(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Every pre-existing `_run_sweeps` test omits `semaphore` -- must remain a
+        true no-op for the reconcile step (no exception, and nothing to assert on)."""
+
+        async def _claim_none_two_args(
+            session: object, settings: Settings, **_kwargs: object
+        ) -> None:
+            return None
+
+        async def _claim_none_one_arg(session: object) -> None:
+            return None
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        async def _publish_user_event(user_id: str, message: str) -> None:
+            return None
+
+        import songforge.worker.watchdog as watchdog_module
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(watchdog_module, "claim_waiting_overdue_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_submitting_stuck_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_ingest_overdue_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_terminal_failure_job", _claim_none_one_arg)
+
+            await _run_sweeps(
+                real_sessionmaker,
+                object(),
+                object(),
+                _settings(),
+                _notify,
+                _publish_user_event,
+            )
+
+    async def test_a_reconcile_failure_is_swallowed_and_does_not_crash_the_tick(
+        self, real_sessionmaker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Best-effort: a raising `reconcile_from_active_count` (e.g. a Redis blip)
+        must be swallowed -- the tick as a whole must not raise."""
+
+        class _ExplodingSemaphore(_RecordingSemaphore):
+            async def reconcile_from_active_count(self, count: int) -> None:
+                raise ConnectionError("redis blip during reconcile")
+
+        async def _claim_none_two_args(
+            session: object, settings: Settings, **_kwargs: object
+        ) -> None:
+            return None
+
+        async def _claim_none_one_arg(session: object) -> None:
+            return None
+
+        async def _notify(channel: str, payload: str) -> None:
+            return None
+
+        async def _publish_user_event(user_id: str, message: str) -> None:
+            return None
+
+        import songforge.worker.watchdog as watchdog_module
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(watchdog_module, "claim_waiting_overdue_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_submitting_stuck_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_ingest_overdue_job", _claim_none_two_args)
+            mp.setattr(watchdog_module, "claim_terminal_failure_job", _claim_none_one_arg)
+
+            # Must not raise.
+            await _run_sweeps(
+                real_sessionmaker,
+                object(),
+                object(),
+                _settings(),
+                _notify,
+                _publish_user_event,
+                _ExplodingSemaphore(),
+            )

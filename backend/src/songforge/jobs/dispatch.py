@@ -234,3 +234,16 @@ async def count_active_jobs(session: AsyncSession) -> int:
         select(func.count()).select_from(Job).where(Job.state.in_(ACTIVE_JOB_STATES))
     )
     return int(result or 0)
+
+
+async def count_active_jobs_by_user(session: AsyncSession) -> dict[str, int]:
+    """Fresh per-user counts of active-state job rows (the watchdog reconcile
+    backstop's Postgres truth for the per-user semaphore legs, issue #16). A user
+    with no active rows simply has no entry -- the caller treats a missing key as 0
+    (see ``worker/watchdog.py``'s reconcile loop)."""
+    result = await session.execute(
+        select(Job.user_id, func.count())
+        .where(Job.state.in_(ACTIVE_JOB_STATES))
+        .group_by(Job.user_id)
+    )
+    return {user_id: int(count) for user_id, count in result.all()}

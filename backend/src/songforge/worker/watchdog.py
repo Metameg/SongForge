@@ -42,7 +42,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from songforge.config import Settings
 from songforge.db import get_sessionmaker
+from songforge.jobs.dispatch import count_active_jobs, count_active_jobs_by_user
 from songforge.jobs.generation_client import GenerationClient, HttpGenerationClient
+from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
 from songforge.jobs.watchdog import (
     NotifyIntent,
     claim_ingest_overdue_job,
@@ -55,7 +57,13 @@ from songforge.jobs.watchdog import (
     sweep_waiting_overdue,
 )
 from songforge.logging_setup import get_logger
-from songforge.metrics import quota_refunded_total, user_notifications_total
+from songforge.metrics import (
+    quota_refunded_total,
+    semaphore_reconciled_total,
+    semaphore_released_total,
+    user_notifications_total,
+)
+from songforge.models import JOB_STATE_FAILED
 from songforge.radio.user_events import user_channel
 from songforge.redis_client import get_redis
 from songforge.web.rate_limit import Identity, RateLimiter, RedisRateLimitBackend
@@ -109,16 +117,72 @@ async def _safe_publish_user_event(
         log.exception("watchdog_publish_user_event_failed", user_id=user_id)
 
 
+async def _safe_release_semaphore(semaphore: Semaphore, user_id: str) -> None:
+    """Best-effort generation-semaphore release (issue #16 slot-leak fix, mirrors
+    `jobs.dispatch._safe_release`): fired only after a sweep's own commit has already
+    succeeded -- a Redis blip here must never surface, and worst case is corrected
+    later by `_safe_reconcile_semaphore`'s per-tick backstop below."""
+    try:
+        await semaphore.release(user_id)
+        semaphore_released_total.labels(site="watchdog").inc()
+    except Exception:
+        log.exception("semaphore_release_failed", site="watchdog", user_id=user_id)
+
+
+async def _safe_reconcile_semaphore(
+    sessionmaker: async_sessionmaker[AsyncSession], semaphore: Semaphore
+) -> None:
+    """Reconcile backstop (Part B, issue #16): once per tick, snap the global counter
+    and every per-user counter Redis currently holds a key for back to a fresh
+    Postgres count of `ACTIVE_JOB_STATES` rows -- Postgres is the source of truth, and
+    this recovers any slot a release site above never got to fire for (e.g. the
+    process was killed between a sweep's commit and its post-commit release).
+
+    Race note: this is read-count-then-set, so a slot acquired between the count and
+    the `set_value` is momentarily invisible to this snap. Safe (not a double-spend):
+    the generation API's own 429 backstop (PRD #18) is the AUTHORITATIVE cap over the
+    best-effort Redis semaphore -- a drifted/reconciled counter can only bounce a few
+    extra requests as 429s, never let the true in-flight count exceed the real cap.
+
+    Wrapped as a whole in log+swallow: a Redis outage during reconcile (the global
+    set, the per-user SCAN, or any one per-user set) must never crash the tick --
+    partial progress from an already-applied set is left as-is rather than rolled
+    back, exactly like a partial drain would be.
+    """
+    try:
+        async with sessionmaker() as session:
+            active_count = await count_active_jobs(session)
+            active_by_user = await count_active_jobs_by_user(session)
+
+        await semaphore.reconcile_from_active_count(active_count)
+        semaphore_reconciled_total.labels(scope="global").inc()
+
+        user_ids = await semaphore.scan_user_ids()
+        for user_id in user_ids:
+            await semaphore.reconcile_user_from_active_count(
+                user_id, active_by_user.get(user_id, 0)
+            )
+            semaphore_reconciled_total.labels(scope="user").inc()
+    except Exception:
+        log.exception("watchdog_semaphore_reconcile_failed")
+
+
 async def _drain_waiting_overdue(
     sessionmaker: async_sessionmaker[AsyncSession],
     client: GenerationClient,
     settings: Settings,
     notify: NotifyFn,
+    semaphore: Semaphore | None = None,
 ) -> None:
     """Claim + poll + commit every currently-overdue `WAITING_FOR_WEBHOOK` row, one at
     a time, until none remain (F2) -- mirrors `_drain_ready_jobs`'s "one short-lived
     session per claimed row" shape. A recovered row's ingest-wake NOTIFY fires only
     after that row's own commit succeeds (F4).
+
+    `semaphore` is optional/backward-compatible (issue #16 slot-leak fix): when a row
+    becomes FAILED (the `/byId` ERROR/FAILED branch), it has left `ACTIVE_JOB_STATES`
+    without ever reaching ingest, so its slot is released, post-commit, best-effort.
+    A row recovered to INGEST_PENDING (still active) or left WAITING must NOT release.
 
     Non-termination-bug fix (phase 5 re-review): a claimed row `sweep_waiting_overdue`
     leaves WAITING untouched -- still IN_QUEUE, or an F1 `/byId` exception -- makes NO
@@ -145,20 +209,38 @@ async def _drain_waiting_overdue(
             examined.add(job.job_id)
             intent = await sweep_waiting_overdue(job, client=client, settings=settings)
             await session.commit()
+            # Only touch `job.state`/`job.user_id` when a `semaphore` was actually
+            # supplied -- mirrors `worker/ingest.py::_drain_ingest_pending`'s
+            # `ready_song_id`/`release_user_id` capture-inside-the-session-block
+            # pattern (never touch `job.*` after the session has closed).
+            release_user_id = (
+                job.user_id
+                if semaphore is not None and job.state == JOB_STATE_FAILED
+                else None
+            )
 
         if intent is not None:
             channel, payload = intent
             await _safe_notify(notify, channel, payload)
+        if semaphore is not None and release_user_id is not None:
+            await _safe_release_semaphore(semaphore, release_user_id)
 
 
 async def _drain_submitting_stuck(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
     notify: NotifyFn,
+    semaphore: Semaphore | None = None,
 ) -> None:
     """Claim + requeue + commit every currently lease-expired `SUBMITTING` row, one at
     a time, until none remain (F2). The new-job-wake NOTIFY fires only after each row's
-    own commit succeeds (F4)."""
+    own commit succeeds (F4).
+
+    `semaphore` is optional/backward-compatible (issue #16 slot-leak fix): a claimed
+    row here is UNCONDITIONALLY requeued to QUEUED (out of `ACTIVE_JOB_STATES`), so
+    the slot the crashed worker's dispatch acquired is always released -- unlike the
+    other two drains, there is no "left active" branch to guard against.
+    """
     while True:
         async with sessionmaker() as session:
             job = await claim_submitting_stuck_job(session, settings)
@@ -166,19 +248,29 @@ async def _drain_submitting_stuck(
                 return
             intent: NotifyIntent = await sweep_submitting_stuck(job, settings=settings)
             await session.commit()
+            release_user_id = job.user_id if semaphore is not None else None
 
         channel, payload = intent
         await _safe_notify(notify, channel, payload)
+        if semaphore is not None and release_user_id is not None:
+            await _safe_release_semaphore(semaphore, release_user_id)
 
 
 async def _drain_ingest_overdue(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: Settings,
+    semaphore: Semaphore | None = None,
 ) -> None:
     """Claim + nudge/escalate + commit every currently-overdue `INGEST_PENDING` row,
     one at a time, until none remain (F2). No NOTIFY: the ingest loop's own poll
     backstop picks up the nudged `available_at` (see `jobs.watchdog.
-    sweep_ingest_overdue`'s docstring)."""
+    sweep_ingest_overdue`'s docstring).
+
+    `semaphore` is optional/backward-compatible (issue #16 slot-leak fix): a row
+    escalated to FAILED (ingest_attempts already at the ceiling) has left
+    `ACTIVE_JOB_STATES`, so its slot is released, post-commit, best-effort. A nudged
+    row (still INGEST_PENDING) must NOT release.
+    """
     while True:
         async with sessionmaker() as session:
             job = await claim_ingest_overdue_job(session, settings)
@@ -186,6 +278,14 @@ async def _drain_ingest_overdue(
                 return
             await sweep_ingest_overdue(job, settings=settings)
             await session.commit()
+            release_user_id = (
+                job.user_id
+                if semaphore is not None and job.state == JOB_STATE_FAILED
+                else None
+            )
+
+        if semaphore is not None and release_user_id is not None:
+            await _safe_release_semaphore(semaphore, release_user_id)
 
 
 async def _drain_terminal_failures(
@@ -221,14 +321,20 @@ async def _run_sweeps(
     settings: Settings,
     notify: NotifyFn,
     publish_user_event: PublishUserEventFn,
+    semaphore: Semaphore | None = None,
 ) -> None:
     """One tick: drain each of the four sweeps to exhaustion in turn (F2), each row's
     commit-then-best-effort-side-effect ordering handled by its own `_drain_*` helper
-    (F4)."""
-    await _drain_waiting_overdue(sessionmaker, client, settings, notify)
-    await _drain_submitting_stuck(sessionmaker, settings, notify)
-    await _drain_ingest_overdue(sessionmaker, settings)
+    (F4); then, if a `semaphore` was supplied, reconcile it from Postgres truth (Part
+    B, issue #16 slot-leak fix) -- a backstop for any slot a release site above never
+    got to fire for. `semaphore` is optional/backward-compatible, mirroring every
+    other DI hook in this module."""
+    await _drain_waiting_overdue(sessionmaker, client, settings, notify, semaphore)
+    await _drain_submitting_stuck(sessionmaker, settings, notify, semaphore)
+    await _drain_ingest_overdue(sessionmaker, settings, semaphore)
     await _drain_terminal_failures(sessionmaker, rate_limiter, publish_user_event)
+    if semaphore is not None:
+        await _safe_reconcile_semaphore(sessionmaker, semaphore)
 
 
 async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
@@ -236,6 +342,11 @@ async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
     sessionmaker = get_sessionmaker()
     redis = get_redis()
     rate_limiter = RateLimiter(RedisRateLimitBackend(redis), settings)
+    # Issue #16 slot-leak fix: the same Redis connection built above, wired into a
+    # decision-layer `Semaphore` for this loop's release sites + reconcile backstop
+    # (mirrors `worker/dispatch.py::run_dispatch` / `worker/ingest.py::run_ingest`'s
+    # own semaphore wiring).
+    semaphore = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
     # asyncpg wants a plain postgres DSN; the app-wide URL carries the `+asyncpg`
     # SQLAlchemy driver tag, which asyncpg.connect() doesn't understand (mirrors
     # `worker/dispatch.py::run_dispatch`).
@@ -266,6 +377,7 @@ async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
                             settings,
                             _notify,
                             _publish_user_event,
+                            semaphore,
                         )
                         try:
                             await asyncio.wait_for(
