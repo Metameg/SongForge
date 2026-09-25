@@ -101,7 +101,7 @@ class RadioState(Base):
 # or straight to FAILED on a terminal 4xx). Issue #13 drives WAITING_FOR_WEBHOOK ->
 # INGEST_PENDING (the webhook handler, songforge.web.routes.webhook) and
 # INGEST_PENDING -> READY / FAILED (the async ingest worker, songforge.jobs.ingest).
-# Playback-queue enqueue on READY is a later ticket.
+# Playback-queue enqueue on READY (issue #14, criterion #1) -- see PlaybackQueue below.
 JobState = Literal[
     "QUEUED",
     "SUBMITTING",
@@ -208,4 +208,39 @@ class Job(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+
+class PlaybackQueue(Base):
+    """FIFO queue of READY user songs awaiting air time (issue #14, criterion #1).
+
+    ``id`` is the monotonic FIFO ordering key -- a Postgres ``Identity`` column, same
+    convention as ``Job.seq`` (see that docstring): NOT portable to SQLite
+    ``create_all``'s server-side generation, so unit tests that don't need a genuine
+    generated id set it explicitly (mirrors ``tests/test_create_route.py``'s
+    ``before_insert`` shim pattern), and tests that must observe genuine
+    Postgres-generated FIFO ordering run against real Postgres
+    (``@pytest.mark.integration``).
+
+    ``played_at`` is NULL while the row is waiting its turn; it is set only when this
+    row is popped onto the air by an APPLIED version-CAS (``radio.coordinator.advance``
+    for a boundary pop, ``radio.coordinator.attempt_interrupt`` for a mid-song
+    interrupt) -- never on a lost CAS race, so a lost-race row stays poppable by
+    whichever leader wins next (see ``radio.queue.pop_next_user_song``).
+    """
+
+    __tablename__ = "playback_queue"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    song_id: Mapped[str] = mapped_column(String(64), ForeignKey("songs.id"), nullable=False)
+    # Nullable: traceability back to the originating job when known, but the queue
+    # itself only needs `song_id` to hand a playable song to the coordinator.
+    job_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("jobs.job_id"), nullable=True
+    )
+    enqueued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    played_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

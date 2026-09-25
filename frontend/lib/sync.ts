@@ -134,3 +134,65 @@ export type PreloadSlot = "a" | "b";
 export function nextPreloadSlot(current: PreloadSlot): PreloadSlot {
   return current === "a" ? "b" : "a";
 }
+
+/**
+ * Issue #14 (user-song queue: fallback + interrupts), criterion #3's client seam: a
+ * fresh user song can arrive as a `song-change` push MID-static-song (an interrupt),
+ * not just at the natural boundary. `Player.tsx` needs to (a) tell an interrupt apart
+ * from an ordinary boundary change so it can crossfade instead of hard-cutting, and
+ * (b) compute the crossfade gain schedule. Kept pure (mirrors every other seam in this
+ * file) so `Player.tsx` only wires DOM/`<audio>` volume to these, per the PRD testing
+ * decision to keep sync/playback math unit-testable without a DOM.
+ *
+ * Deliberately NOT a wire-contract change (`.orchestrator/CONTEXT.md`'s stated
+ * preference): whether an arriving pointer is an interrupt is inferred purely
+ * client-side from "is the outgoing buffer's song not actually finished yet?", using
+ * data the client already has (its own `computeExpectedOffsetSeconds` reading plus the
+ * outgoing song's known duration) rather than a new payload field.
+ *
+ * Issue #14, phase 3 (green) implementation.
+ */
+
+/** Default crossfade duration for an interrupt transition, in ms. */
+export const CROSSFADE_DURATION_MS = 1500;
+
+/** The two `<audio>` buffers' gain (volume, 0..1) at a given point in a crossfade. */
+export interface CrossfadeGains {
+  outgoingGain: number;
+  incomingGain: number;
+}
+
+/**
+ * Whether an arriving `song-change` pointer is an INTERRUPT (the outgoing buffer's
+ * current song hasn't actually reached its own duration yet) rather than an ordinary
+ * boundary change (the outgoing song finished on schedule).
+ *
+ * True when the outgoing song still has at least `epsilonSeconds` of runway left
+ * (`outgoingDurationSeconds - offsetIntoOutgoingSeconds >= epsilonSeconds`) — a
+ * genuine boundary has ~0 remaining, an interrupt has substantial remaining. Defaults
+ * `epsilonSeconds` to {@link DEADBAND_SECONDS} (the same 1s tolerance `decideDrift`
+ * uses elsewhere in this file) so ordinary clock jitter around a real boundary never
+ * reads as an interrupt.
+ */
+export function isInterruptArrival(
+  offsetIntoOutgoingSeconds: number,
+  outgoingDurationSeconds: number,
+  epsilonSeconds: number = DEADBAND_SECONDS,
+): boolean {
+  const remainingSeconds = outgoingDurationSeconds - offsetIntoOutgoingSeconds;
+  return remainingSeconds >= epsilonSeconds;
+}
+
+/**
+ * Linear crossfade gain schedule: at `elapsedMs` since the interrupt began (clamped to
+ * `[0, durationMs]`), the outgoing buffer fades from 1 to 0 while the incoming buffer
+ * fades from 0 to 1 — `outgoingGain + incomingGain === 1` at every point.
+ */
+export function crossfadeGains(
+  elapsedMs: number,
+  durationMs: number = CROSSFADE_DURATION_MS,
+): CrossfadeGains {
+  const clampedMs = Math.min(Math.max(elapsedMs, 0), durationMs);
+  const t = durationMs === 0 ? 1 : clampedMs / durationMs;
+  return { outgoingGain: 1 - t, incomingGain: t };
+}

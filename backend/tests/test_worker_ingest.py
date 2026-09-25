@@ -106,6 +106,127 @@ async def test_drain_returns_immediately_when_nothing_is_pending(
     assert ingest_calls == 0
 
 
+# ── `notify_ready` (issue #14, criterion #3's enqueue-time `song_ready` wake) ──────
+#
+# RED phase: `_drain_ingest_pending` accepts the new optional `notify_ready` keyword
+# (a phase-1 skeleton addition -- see `songforge/worker/ingest.py`) but does not yet
+# call it. Mirrors the create/webhook notifier tests' spy pattern
+# (`tests/test_create_route.py`, `tests/test_webhook_route.py`).
+
+
+class _FakeReadyJob:
+    """A fake claimed job whose `ingest_claimed_job` call (monkeypatched below)
+    mutates it to READY with a `song_id` -- unlike `_FakeJob` above, which only ever
+    needs `job_id` for the claim-loop-count tests."""
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self.state = "INGEST_PENDING"
+        self.song_id: str | None = None
+
+
+async def test_drain_notifies_song_ready_after_commit_when_a_job_reaches_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = "song-xyz"
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    notified: list[str] = []
+
+    async def _notify_ready(song_id: str) -> None:
+        notified.append(song_id)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        notify_ready=_notify_ready,
+    )
+
+    assert notified == ["song-xyz"]
+
+
+async def test_notify_failure_does_not_raise_and_still_drains_the_next_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review Focus #5: `song_ready` NOTIFY is best-effort -- a raising `notify_ready`
+    (e.g. a dropped connection) must be swallowed by `_safe_notify_ready`, never
+    propagate out of `_drain_ingest_pending`, and never block the loop from draining a
+    SECOND already-claimable job. The READY commit already happened; worst case is the
+    coordinator's poll/boundary latency, never a lost or duplicated ingest."""
+    remaining = iter(["job-1", "job-2", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = f"song-for-{job.job_id}"
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    async def _boom(song_id: str) -> None:
+        raise RuntimeError("notify connection dropped")
+
+    # Must not raise -- and must still process both claimable jobs.
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        notify_ready=_boom,
+    )
+
+
+async def test_drain_does_not_notify_when_the_job_does_not_reach_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requeued/failed job never enqueued a song -- nothing to wake the radio
+    coordinator about."""
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "INGEST_PENDING"  # requeued, not READY
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    notified: list[str] = []
+
+    async def _notify_ready(song_id: str) -> None:
+        notified.append(song_id)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        notify_ready=_notify_ready,
+    )
+
+    assert notified == []
+
+
 # ── `run_ingest`'s poll backstop (mirrors `test_worker_dispatch.py`'s equivalent) ──
 
 
@@ -134,7 +255,7 @@ async def test_run_ingest_poll_backstop_redrains_when_no_notify_ever_arrives(
 
     async def _fake_drain(
         sessionmaker: object, storage: object, generation_client: object,
-        downloader: object, settings: Settings,
+        downloader: object, settings: Settings, notify_ready: object = None,
     ) -> None:
         nonlocal drain_calls
         drain_calls += 1

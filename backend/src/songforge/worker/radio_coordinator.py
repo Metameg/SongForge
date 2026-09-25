@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+import asyncpg
 from redis.asyncio import Redis
 from sqlalchemy import text
 
@@ -27,11 +28,29 @@ from songforge.config import Settings
 from songforge.db import get_engine, get_sessionmaker
 from songforge.logging_setup import get_logger
 from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState
-from songforge.radio.coordinator import RecentHistoryStore, advance, initialize_if_absent
+from songforge.radio.coordinator import (
+    RecentHistoryStore,
+    advance,
+    attempt_interrupt,
+    initialize_if_absent,
+)
 from songforge.radio.history import RedisRecentHistoryStore
 from songforge.redis_client import get_redis
 
 log = get_logger(__name__)
+
+
+async def _wait_any(stop: asyncio.Event, wake: asyncio.Event) -> None:
+    """Race two events, cancelling whichever didn't win (mirrors
+    `worker/ingest.py`/`worker/dispatch.py`)."""
+    stop_task = asyncio.ensure_future(stop.wait())
+    wake_task = asyncio.ensure_future(wake.wait())
+    try:
+        await asyncio.wait([stop_task, wake_task], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (stop_task, wake_task):
+            if not task.done():
+                task.cancel()
 
 
 async def _tick(settings: Settings, history: RecentHistoryStore, redis: Redis) -> float:
@@ -83,6 +102,10 @@ async def run_radio_coordinator(settings: Settings, stop: asyncio.Event) -> None
         redis, max_len=settings.radio_recent_history_size
     )
 
+    # asyncpg wants a plain postgres DSN; the app-wide URL carries the `+asyncpg`
+    # SQLAlchemy driver tag, which asyncpg.connect() doesn't understand.
+    dsn = settings.database_url.replace("+asyncpg", "")
+
     while not stop.is_set():
         try:
             engine = get_engine()
@@ -93,12 +116,58 @@ async def run_radio_coordinator(settings: Settings, stop: asyncio.Event) -> None
                 )
                 log.info("radio_leader_acquired", key=settings.radio_advisory_lock_key)
                 try:
-                    while not stop.is_set():
-                        sleep_for = await _tick(settings, history, redis)
-                        try:
-                            await asyncio.wait_for(stop.wait(), timeout=sleep_for)
-                        except asyncio.TimeoutError:
-                            pass  # boundary reached (or idle backoff) — tick again
+                    # Issue #14, criterion #3: a SEPARATE asyncpg connection carries
+                    # the `song_ready` LISTEN -- deliberately NOT the advisory-lock
+                    # connection above (`lock_conn`), which must stay dedicated to
+                    # holding that lock for the leader's lifetime (mirrors
+                    # `worker/ingest.py`/`worker/dispatch.py`'s own direct-connection
+                    # LISTEN pattern).
+                    listen_conn = await asyncpg.connect(dsn)
+                    try:
+                        wake = asyncio.Event()
+
+                        def _on_wake(*_args: object) -> None:
+                            wake.set()
+
+                        await listen_conn.add_listener(
+                            settings.radio_ready_channel, _on_wake
+                        )
+                        log.info(
+                            "radio_listening", channel=settings.radio_ready_channel
+                        )
+                        while not stop.is_set():
+                            sleep_for = await _tick(settings, history, redis)
+                            wake.clear()
+                            try:
+                                await asyncio.wait_for(
+                                    _wait_any(stop, wake), timeout=sleep_for
+                                )
+                            except asyncio.TimeoutError:
+                                continue  # boundary reached (or idle backoff) — tick again
+                            if stop.is_set():
+                                break
+                            # A `song_ready` wake (not the boundary): consider
+                            # interrupting a static filler. Both this and `_tick`'s
+                            # boundary advance funnel through the same version-CAS
+                            # (`radio.coordinator._advance_to_user_song`), so a wake
+                            # racing a boundary tick can never double-advance -- the
+                            # loser just sees `rowcount == 0` and no-ops. If the
+                            # pointer is already a generated song (or the queue is
+                            # empty), `attempt_interrupt` itself is a no-op; either
+                            # way we loop and `_tick` recomputes the sleep for
+                            # whatever is now playing.
+                            sessionmaker = get_sessionmaker()
+                            async with sessionmaker() as session:
+                                pointer = await session.get(RadioState, RADIO_STATE_SINGLETON_ID)
+                                if pointer is not None:
+                                    await attempt_interrupt(
+                                        session,
+                                        history,
+                                        expected_version=pointer.version,
+                                        redis=redis,
+                                    )
+                    finally:
+                        await listen_conn.close()
                 finally:
                     await lock_conn.execute(
                         text("SELECT pg_advisory_unlock(:key)"),

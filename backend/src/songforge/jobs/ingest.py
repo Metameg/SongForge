@@ -31,9 +31,9 @@ the READY commit skips the download and upload entirely, and a re-claim after th
 Song row was already created (but before the job's own READY commit) does not
 attempt a duplicate insert.
 
-Playback-queue enqueue on READY is a later ticket (see ``.orchestrator/CONTEXT.md``
-OUT-of-scope) -- this module stops at a READY job with an ordinary playable ``Song``
-row.
+Playback-queue enqueue on READY (issue #14, criterion #1): ``_finalize_ready`` also
+stages a ``PlaybackQueue`` row for the now-playable ``Song``, idempotently per
+``job_id``, in the same transaction as the READY flip -- see that function's docstring.
 
 Robustness (phase-5 review hardening): the whole decision body below the
 ``conversion_id_1`` guard runs under a catch-all (mirrors
@@ -68,6 +68,7 @@ from songforge.metrics import (
     ingest_completed_total,
     ingest_failed_total,
     ingest_requeued_total,
+    playback_queue_enqueued_total,
 )
 from songforge.models import (
     JOB_STATE_FAILED,
@@ -75,8 +76,10 @@ from songforge.models import (
     JOB_STATE_READY,
     SOURCE_GENERATED,
     Job,
+    PlaybackQueue,
     Song,
 )
+from songforge.radio.queue import enqueue_song
 from songforge.storage import ObjectStorage, audio_key
 
 log = get_logger(__name__)
@@ -196,7 +199,9 @@ async def _download_with_refresh(
 async def _finalize_ready(session: AsyncSession, job: Job, song_id: str, key: str) -> None:
     """Set the job READY + song_id, creating the ``Song`` row if it doesn't already
     exist (idempotent re-claim: a crash before the READY commit but after the Song
-    insert must not attempt a duplicate insert).
+    insert must not attempt a duplicate insert), and enqueue the now-playable song
+    onto the authoritative playback queue (issue #14, criterion #1) -- in the SAME
+    transaction that flips the job READY, so "READY" and "enqueued" commit atomically.
 
     Flushes the staged ``Song`` INSERT *before* mutating ``job.state``/``job.song_id``
     (prod-validation CRITICAL finding): ``Job.song_id`` and ``Song`` have no declared
@@ -206,7 +211,15 @@ async def _finalize_ready(session: AsyncSession, job: Job, song_id: str, key: st
     trip the ``fk_jobs_song_id_songs`` FK constraint on real Postgres -- reproduced
     deterministically against a live database. SQLite does not enforce foreign keys by
     default, so every ingest test running against an in-memory SQLite session was
-    blind to this."""
+    blind to this.
+
+    Enqueue idempotency (Review Focus #1): a crash-replay re-claim that reaches this
+    function again for the same job (Song already present, self-heal branch) must not
+    double-enqueue -- checked with a pre-insert query on ``job_id`` (``playback_queue``
+    has no DB-level unique constraint on ``job_id`` to backstop this, so the pre-check
+    IS the idempotency guard; safe because ingest's own ``FOR UPDATE SKIP LOCKED``
+    claim already serializes concurrent re-claims of the same job).
+    """
     existing_song = await session.get(Song, song_id)
     if existing_song is None:
         duration = round(job.audio_duration) if job.audio_duration is not None else None
@@ -222,6 +235,13 @@ async def _finalize_ready(session: AsyncSession, job: Job, song_id: str, key: st
         await session.flush()
     job.state = JOB_STATE_READY
     job.song_id = song_id
+
+    already_enqueued = await session.scalars(
+        select(PlaybackQueue.id).where(PlaybackQueue.job_id == job.job_id)
+    )
+    if already_enqueued.first() is None:
+        await enqueue_song(session, song_id, job.job_id)
+        playback_queue_enqueued_total.inc()
 
 
 def _requeue_or_fail(job: Job, settings: Settings) -> None:

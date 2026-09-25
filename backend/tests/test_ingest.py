@@ -18,11 +18,12 @@ and migration `0004`.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import itertools
+from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.config import Settings
@@ -40,9 +41,30 @@ from songforge.models import (
     SOURCE_GENERATED,
     Base,
     Job,
+    PlaybackQueue,
     Song,
 )
 from songforge.storage import audio_key
+
+# Issue #14: `_finalize_ready` now also enqueues a `playback_queue` row on every path
+# that reaches READY below. `PlaybackQueue.id` never gets set by these tests (real
+# Postgres generates it via `Identity()`), and SQLite `create_all` doesn't auto-populate
+# a `BigInteger` `Identity()` PK either (see `tests/test_radio_queue.py`'s matching
+# comment) -- install the same `before_insert` shim so every READY-reaching test here
+# keeps working.
+_ids = itertools.count(1)
+
+
+def _assign_id(mapper: object, connection: object, target: PlaybackQueue) -> None:
+    if target.id is None:
+        target.id = next(_ids)
+
+
+@pytest.fixture(autouse=True)
+def _sqlite_id_shim() -> Iterator[None]:
+    event.listen(PlaybackQueue, "before_insert", _assign_id)
+    yield
+    event.remove(PlaybackQueue, "before_insert", _assign_id)
 
 
 @pytest.fixture()

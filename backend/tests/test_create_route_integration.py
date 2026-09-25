@@ -95,9 +95,13 @@ async def _clean_jobs():  # type: ignore[no-untyped-def]
     ephemeral, throwaway instance dedicated to this worktree's tests."""
     conn = await asyncpg.connect(_ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
-        await conn.execute("TRUNCATE TABLE jobs")
+        # CASCADE (issue #14): `playback_queue.job_id` now FKs `jobs.job_id`, so a
+        # plain `TRUNCATE jobs` is rejected once any queue row exists. CASCADE only
+        # follows that one incoming FK -- nothing else references `jobs` -- so this
+        # truncates `playback_queue` alongside it, never `songs`/`radio_state`.
+        await conn.execute("TRUNCATE TABLE jobs CASCADE")
         yield
-        await conn.execute("TRUNCATE TABLE jobs")
+        await conn.execute("TRUNCATE TABLE jobs CASCADE")
     finally:
         await conn.close()
 

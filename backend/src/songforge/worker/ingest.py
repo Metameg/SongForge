@@ -26,6 +26,7 @@ one claimed job, so that held transaction never spans more than one job.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import asyncpg
 import httpx
@@ -41,9 +42,27 @@ from songforge.jobs.ingest import (
     ingest_claimed_job,
 )
 from songforge.logging_setup import get_logger
+from songforge.models import JOB_STATE_READY
 from songforge.storage import ObjectStorage
 
 log = get_logger(__name__)
+
+# Called with a song's id once its owning job reaches READY in THIS commit (issue #14,
+# criterion #3's enqueue-time wake). Optional (defaults to a no-op) -- production wires
+# a real `pg_notify(settings.radio_ready_channel, song_id)` the same way
+# `worker/dispatch.py`'s `_notify_release` wires `jobs.dispatch.NotifyReleaseFn`.
+NotifyReadyFn = Callable[[str], Awaitable[None]]
+
+
+async def _safe_notify_ready(notify_ready: NotifyReadyFn, song_id: str) -> None:
+    """Best-effort post-commit notify (mirror `dispatch._safe_notify` /
+    `webhook._safe_notify`): the READY transition (and its `playback_queue` enqueue)
+    is already committed, so a NOTIFY failure must never surface -- worst case is the
+    radio coordinator's poll/boundary latency, never a lost or duplicated ingest."""
+    try:
+        await notify_ready(song_id)
+    except Exception:
+        log.exception("song_ready_notify_failed", song_id=song_id)
 
 
 async def _drain_ingest_pending(
@@ -52,10 +71,19 @@ async def _drain_ingest_pending(
     generation_client: GenerationClient,
     downloader: Downloader,
     settings: Settings,
+    notify_ready: NotifyReadyFn | None = None,
 ) -> None:
     """Ingest every currently-claimable job, one at a time, until none remain. Each
     claim + ingest + commit happens in its own session so the row lock (and the
     transaction held for the download+upload) is scoped to exactly one job.
+
+    ``notify_ready`` is optional and backward-compatible (issue #14, criterion #3):
+    when a job reaches READY in this commit (and is thereby enqueued onto
+    ``playback_queue`` by ``jobs.ingest._finalize_ready``), a POST-COMMIT best-effort
+    NOTIFY -- called with the song's id -- wakes the radio coordinator's interrupt path
+    -- mirrors ``web/routes/webhook.py``'s "commit first, notify after" ordering (a
+    missed notify only costs the coordinator's poll/boundary latency, never
+    correctness).
     """
     while True:
         async with sessionmaker() as session:
@@ -72,6 +100,18 @@ async def _drain_ingest_pending(
                 settings=settings,
             )
             await session.commit()
+            # Only touch `job.state`/`job.song_id` when a `notify_ready` was actually
+            # supplied -- callers that don't care about the wake-up (including tests
+            # exercising this loop with a minimal fake `Job` stand-in) needn't provide
+            # those attributes.
+            ready_song_id = (
+                job.song_id
+                if notify_ready is not None and job.state == JOB_STATE_READY
+                else None
+            )
+
+        if notify_ready is not None and ready_song_id is not None:
+            await _safe_notify_ready(notify_ready, ready_song_id)
 
 
 async def _wait_any(stop: asyncio.Event, wake: asyncio.Event) -> None:
@@ -100,35 +140,54 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
         try:
             listen_conn = await asyncpg.connect(dsn)
             try:
-                wake = asyncio.Event()
+                # Separate connection for the outbound `song_ready` NOTIFY (issue #14,
+                # criterion #3) -- mirrors `worker/dispatch.py`'s `notify_conn`, kept
+                # distinct from `listen_conn` above (which only ever LISTENs).
+                notify_conn = await asyncpg.connect(dsn)
+                try:
+                    wake = asyncio.Event()
 
-                def _on_wake(*_args: object) -> None:
-                    wake.set()
+                    def _on_wake(*_args: object) -> None:
+                        wake.set()
 
-                await listen_conn.add_listener(settings.ingest_channel, _on_wake)
-                log.info("ingest_listening", channel=settings.ingest_channel)
+                    await listen_conn.add_listener(settings.ingest_channel, _on_wake)
+                    log.info("ingest_listening", channel=settings.ingest_channel)
 
-                async with httpx.AsyncClient(
-                    timeout=settings.ingest_download_timeout_seconds
-                ) as http_client:
-                    generation_client = HttpGenerationClient(settings, http_client)
-                    downloader = HttpAudioDownloader(
-                        http_client,
-                        timeout=settings.ingest_download_timeout_seconds,
-                        max_bytes=settings.ingest_max_download_bytes,
-                    )
-                    while not stop.is_set():
-                        await _drain_ingest_pending(
-                            sessionmaker, storage, generation_client, downloader, settings
+                    async def _notify_ready(song_id: str) -> None:
+                        await notify_conn.execute(
+                            "SELECT pg_notify($1, $2)",
+                            settings.radio_ready_channel,
+                            song_id,
                         )
-                        wake.clear()
-                        try:
-                            await asyncio.wait_for(
-                                _wait_any(stop, wake),
-                                timeout=settings.ingest_poll_backstop_seconds,
+
+                    async with httpx.AsyncClient(
+                        timeout=settings.ingest_download_timeout_seconds
+                    ) as http_client:
+                        generation_client = HttpGenerationClient(settings, http_client)
+                        downloader = HttpAudioDownloader(
+                            http_client,
+                            timeout=settings.ingest_download_timeout_seconds,
+                            max_bytes=settings.ingest_max_download_bytes,
+                        )
+                        while not stop.is_set():
+                            await _drain_ingest_pending(
+                                sessionmaker,
+                                storage,
+                                generation_client,
+                                downloader,
+                                settings,
+                                _notify_ready,
                             )
-                        except asyncio.TimeoutError:
-                            pass  # backstop poll tick
+                            wake.clear()
+                            try:
+                                await asyncio.wait_for(
+                                    _wait_any(stop, wake),
+                                    timeout=settings.ingest_poll_backstop_seconds,
+                                )
+                            except asyncio.TimeoutError:
+                                pass  # backstop poll tick
+                finally:
+                    await notify_conn.close()
             finally:
                 await listen_conn.close()
         except Exception:

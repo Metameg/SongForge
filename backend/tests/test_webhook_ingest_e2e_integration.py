@@ -99,8 +99,16 @@ def _settings() -> Any:
 async def _clean_rows() -> Any:
     conn = await asyncpg.connect(_ASYNCPG_DSN, timeout=_CONNECT_TIMEOUT_SECONDS)
     try:
+        # `playback_queue` rows must go first (issue #14's `fk_playback_queue_job_id_jobs`)
+        # -- both on setup (a prior interrupted run) and teardown, before the jobs delete.
+        await conn.execute(
+            "DELETE FROM playback_queue WHERE job_id LIKE $1", f"{_TEST_JOB_PREFIX}%"
+        )
         await conn.execute("DELETE FROM jobs WHERE job_id LIKE $1", f"{_TEST_JOB_PREFIX}%")
         yield
+        await conn.execute(
+            "DELETE FROM playback_queue WHERE job_id LIKE $1", f"{_TEST_JOB_PREFIX}%"
+        )
         await conn.execute("DELETE FROM jobs WHERE job_id LIKE $1", f"{_TEST_JOB_PREFIX}%")
         # Songs are keyed by the simulator's real (random) conversion_id_1 -- no
         # stable prefix to filter on, so tests that created one delete it by id.
@@ -234,6 +242,24 @@ async def test_webhook_then_ingest_happy_path_against_real_simulator(
         finally:
             if handles:
                 async with sessionmaker() as session:
+                    # Issue #14: this job reaching READY enqueued a `playback_queue`
+                    # row -- delete it first, or `fk_playback_queue_job_id_jobs`/
+                    # `fk_playback_queue_song_id_songs` reject the Job/Song deletes
+                    # below.
+                    from sqlalchemy import select as _select
+
+                    from songforge.models import PlaybackQueue
+
+                    queue_rows = (
+                        await session.scalars(
+                            _select(PlaybackQueue).where(
+                                PlaybackQueue.song_id == handles["conversion_id_1"]
+                            )
+                        )
+                    ).all()
+                    for row in queue_rows:
+                        await session.delete(row)
+                    await session.commit()
                     # Delete the referencing `Job` row FIRST (now that the FK
                     # flush-ordering fix means `job.song_id` actually persists) --
                     # `fk_jobs_song_id_songs` forbids deleting the `Song` row while
@@ -349,6 +375,22 @@ async def test_expired_hint_url_is_refreshed_via_by_id_against_real_simulator(
         finally:
             if conversion_id_1 is not None:
                 async with sessionmaker() as session:
+                    # Issue #14: see the matching comment in the happy-path test's
+                    # teardown above -- delete the `playback_queue` row first.
+                    from sqlalchemy import select as _select
+
+                    from songforge.models import PlaybackQueue
+
+                    queue_rows = (
+                        await session.scalars(
+                            _select(PlaybackQueue).where(
+                                PlaybackQueue.song_id == conversion_id_1
+                            )
+                        )
+                    ).all()
+                    for row in queue_rows:
+                        await session.delete(row)
+                    await session.commit()
                     # Delete the referencing `Job` row FIRST -- see the matching
                     # comment in the happy-path test's teardown above.
                     job_row = await session.get(Job, job_id)

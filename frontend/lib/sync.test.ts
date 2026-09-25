@@ -188,3 +188,108 @@ describe("nextPreloadSlot", () => {
     expect(nextPreloadSlot("b")).toBe("a");
   });
 });
+
+/**
+ * Issue #14 (user-song queue: fallback + interrupts), criterion #3's client seam:
+ * `isInterruptArrival` tells an interrupt (a fresh user song cutting a static filler
+ * mid-song) apart from an ordinary boundary change, and `crossfadeGains` computes the
+ * two `<audio>` buffers' volumes during the transition.
+ *
+ * Neither symbol exists as a real implementation yet in `./sync` (RED phase) -- both
+ * currently `throw`, matching this file's precedent for RED-phase symbols (dynamic
+ * per-test import so a missing/throwing export fails only these tests).
+ */
+describe("isInterruptArrival", () => {
+  it("is true when the outgoing song is well short of its own duration", async () => {
+    const { isInterruptArrival } = await import("./sync");
+    // 40s into a 180s static song -- nowhere near naturally finishing.
+    expect(isInterruptArrival(40, 180)).toBe(true);
+  });
+
+  it("is false when the outgoing song has actually reached its duration (an ordinary boundary change)", async () => {
+    const { isInterruptArrival } = await import("./sync");
+    expect(isInterruptArrival(180, 180)).toBe(false);
+  });
+
+  it("is false just under the default epsilon before the boundary (not a real interrupt)", async () => {
+    const { isInterruptArrival, DEADBAND_SECONDS } = await import("./sync");
+    expect(isInterruptArrival(180 - (DEADBAND_SECONDS - 0.001), 180)).toBe(false);
+  });
+
+  it("honors a custom epsilon", async () => {
+    const { isInterruptArrival } = await import("./sync");
+    expect(isInterruptArrival(175, 180, 10)).toBe(false);
+    expect(isInterruptArrival(160, 180, 10)).toBe(true);
+  });
+
+  it("is false when the outgoing offset has overrun its own duration (negative remaining)", async () => {
+    const { isInterruptArrival } = await import("./sync");
+    // 200s reported into a 180s song -- clock drift/late poll, not an interrupt; a
+    // negative "remaining" must never read as "plenty of runway left".
+    expect(isInterruptArrival(200, 180)).toBe(false);
+  });
+
+  it("is true at offset 0 of a song that hasn't started counting down yet", async () => {
+    const { isInterruptArrival } = await import("./sync");
+    expect(isInterruptArrival(0, 180)).toBe(true);
+  });
+
+  it("treats a zero-duration outgoing song as never an interrupt (no runway to speak of)", async () => {
+    const { isInterruptArrival } = await import("./sync");
+    expect(isInterruptArrival(0, 0)).toBe(false);
+  });
+});
+
+describe("crossfadeGains", () => {
+  it("starts fully on the outgoing buffer at elapsed=0", async () => {
+    const { crossfadeGains } = await import("./sync");
+    expect(crossfadeGains(0)).toEqual({ outgoingGain: 1, incomingGain: 0 });
+  });
+
+  it("ends fully on the incoming buffer once the crossfade duration has elapsed", async () => {
+    const { crossfadeGains, CROSSFADE_DURATION_MS } = await import("./sync");
+    expect(crossfadeGains(CROSSFADE_DURATION_MS)).toEqual({
+      outgoingGain: 0,
+      incomingGain: 1,
+    });
+  });
+
+  it("is a linear 50/50 blend halfway through", async () => {
+    const { crossfadeGains, CROSSFADE_DURATION_MS } = await import("./sync");
+    expect(crossfadeGains(CROSSFADE_DURATION_MS / 2)).toEqual({
+      outgoingGain: 0.5,
+      incomingGain: 0.5,
+    });
+  });
+
+  it("clamps past the end of the crossfade (never negative/over 1)", async () => {
+    const { crossfadeGains, CROSSFADE_DURATION_MS } = await import("./sync");
+    expect(crossfadeGains(CROSSFADE_DURATION_MS * 2)).toEqual({
+      outgoingGain: 0,
+      incomingGain: 1,
+    });
+  });
+
+  it("honors a custom duration", async () => {
+    const { crossfadeGains } = await import("./sync");
+    expect(crossfadeGains(500, 1000)).toEqual({ outgoingGain: 0.5, incomingGain: 0.5 });
+  });
+
+  it("clamps a negative elapsed to the start (never plays incoming before elapsed=0)", async () => {
+    const { crossfadeGains } = await import("./sync");
+    expect(crossfadeGains(-100)).toEqual({ outgoingGain: 1, incomingGain: 0 });
+  });
+
+  it("does not divide by zero for a zero-length crossfade (jumps straight to the end)", async () => {
+    const { crossfadeGains } = await import("./sync");
+    expect(crossfadeGains(0, 0)).toEqual({ outgoingGain: 0, incomingGain: 1 });
+  });
+
+  it("the two gains always sum to 1", async () => {
+    const { crossfadeGains, CROSSFADE_DURATION_MS } = await import("./sync");
+    for (const elapsed of [0, 100, 750, CROSSFADE_DURATION_MS]) {
+      const { outgoingGain, incomingGain } = crossfadeGains(elapsed);
+      expect(outgoingGain + incomingGain).toBeCloseTo(1);
+    }
+  });
+});
