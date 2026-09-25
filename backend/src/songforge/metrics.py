@@ -184,6 +184,14 @@ user_notifications_total = Counter(
     registry=REGISTRY,
 )
 
+user_notifications_relayed_total = Counter(
+    "songforge_user_notifications_relayed_total",
+    "Per-user notifications relayed from the pub/sub subscription to a connected SSE "
+    "client (delivery-side counterpart to user_notifications_total's publish-side "
+    "count -- mirrors radio_pointer_events_relayed_total for UserEventBroadcaster).",
+    registry=REGISTRY,
+)
+
 
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.

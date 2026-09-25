@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from redis.asyncio import Redis
 
 from songforge.logging_setup import get_logger
+from songforge.metrics import user_notifications_relayed_total
 
 if TYPE_CHECKING:
     from redis.asyncio.client import PubSub
@@ -174,3 +175,10 @@ class UserEventBroadcaster:
                     queue.put_nowait(payload)
                 except asyncio.QueueFull:
                     log.warning("user_event_broadcaster_queue_full_dropped_frame")
+                    continue
+                # Delivery-side counterpart to `metrics.user_notifications_total`
+                # (the publish-side count) -- mirrors `PointerBroadcaster`'s
+                # `radio_pointer_events_relayed_total`: grows with listener count x
+                # pushes actually handed to a connected client's queue, excluding
+                # drops (F6).
+                user_notifications_relayed_total.inc()

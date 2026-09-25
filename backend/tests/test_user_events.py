@@ -18,6 +18,7 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from songforge.metrics import user_notifications_relayed_total
 from songforge.radio.user_events import _QUEUE_MAXSIZE, UserEventBroadcaster, user_channel
 
 PREFIX = "user:"
@@ -205,6 +206,30 @@ async def test_two_clients_for_the_same_user_both_receive_the_message() -> None:
         assert await _wait_until(lambda: not q2.empty())
         assert q1.get_nowait().get("job_id") == "job-1"
         assert q2.get_nowait().get("job_id") == "job-1"
+    finally:
+        await broadcaster.stop()
+
+
+async def test_relayed_metric_increments_once_per_successful_per_client_delivery() -> None:
+    """F6 (issue #16 phase 5 fix): delivery-side metric parity with
+    `PointerBroadcaster` (`radio_pointer_events_relayed_total`) -- one message fanned
+    out to TWO connected clients for the same user must increment
+    `user_notifications_relayed_total` by exactly 2, not 1 (once per publish) and not
+    0 (never wired up)."""
+    redis = _FakeRedis()
+    broadcaster = _make(redis)
+    q1 = broadcaster.register("user-a")
+    q2 = broadcaster.register("user-a")
+    before = user_notifications_relayed_total._value.get()
+    await broadcaster.start()
+    try:
+        redis.pubsub_obj.feed(
+            user_channel(PREFIX, "user-a"), '{"event": "job-failed", "job_id": "job-1"}'
+        )
+
+        assert await _wait_until(lambda: not q1.empty())
+        assert await _wait_until(lambda: not q2.empty())
+        assert user_notifications_relayed_total._value.get() == before + 2
     finally:
         await broadcaster.stop()
 
