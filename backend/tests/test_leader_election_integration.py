@@ -26,6 +26,13 @@ Maps to issue #17's acceptance criteria:
 5. First-boot init via the same startup path; killing the leader advances exactly
    once -- ``test_tick_initializes_on_first_boot_then_a_forced_boundary_advances_
    once_more``.
+6. The lock connection's tuning actually reaches Postgres -- PRD #74 +
+   "tune TCP keepalive / tcp_user_timeout to ~10-15s" --
+   ``test_get_worker_lock_engine_connects_and_postgres_accepts_tcp_user_timeout``.
+   ``tests/test_worker_lock_connection.py`` proves the engine is BUILT correctly
+   (mocked `create_async_engine`); this proves the resulting `server_settings` are
+   a real startup parameter Postgres actually accepts, not just a dict SQLAlchemy
+   happens to construct without error.
 
 Section B (PRD testing seam #3 -- process-lifecycle failover, "the one place the
 edge seam can't reach"): rather than spawning a real worker subprocess (heavy/flaky
@@ -63,6 +70,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from sqlalchemy import text
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -472,6 +480,66 @@ async def test_leader_killed_mid_catchup_survivor_advances_exactly_once_not_twic
         if not conn_a.is_closed():
             await conn_a.close()
         await conn_b.close()
+
+
+# ── C: lock-connection tuning reaches real Postgres (PRD #74) ─────────────────────
+
+
+async def test_get_worker_lock_engine_connects_and_postgres_accepts_tcp_user_timeout() -> None:
+    """`tests/test_worker_lock_connection.py` proves `get_worker_lock_engine` is BUILT
+    with `poolclass=NullPool` and `connect_args.server_settings.tcp_user_timeout` by
+    mocking `create_async_engine` -- it never opens a real socket, so it can't prove
+    Postgres actually ACCEPTS `tcp_user_timeout` as a startup `server_settings` param
+    (some builds/poolers reject unknown startup GUCs outright). This closes that gap:
+    a REAL connection, over the REAL engine, asserting both that it connects/acquires
+    an advisory lock without error and that the server-side GUC was actually set to
+    the configured value -- not just accepted, but applied."""
+    from songforge.config import Settings
+    from songforge.db import get_worker_lock_engine
+
+    lock_key = _LOCK_KEY + 20
+    settings = Settings(
+        _env={
+            "DATABASE_URL": _SETTINGS_DATABASE_URL,
+            "REDIS_URL": "redis://127.0.0.1:1/0",
+            "S3_ENDPOINT_URL": "http://127.0.0.1:1",
+            "S3_ACCESS_KEY_ID": "test",
+            "S3_SECRET_ACCESS_KEY": "test-secret",
+            "S3_BUCKET": "test",
+            "WORKER_LOCK_TCP_USER_TIMEOUT_SECONDS": "13",
+        }
+    )
+    expected_ms = str(int(settings.worker_lock_tcp_user_timeout_seconds * 1000))
+
+    import songforge.db as db_module
+
+    db_module.get_worker_lock_engine.cache_clear()  # type: ignore[attr-defined]
+    engine_get_settings = db_module.get_settings
+    db_module.get_settings = lambda: settings  # type: ignore[assignment]
+    try:
+        engine = get_worker_lock_engine()
+        try:
+            async with engine.connect() as conn:
+                acquired = await conn.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}
+                )
+                assert acquired.scalar() is True, (
+                    "the tuned lock connection must connect and acquire normally -- "
+                    "tcp_user_timeout must not be rejected as an invalid startup param"
+                )
+                shown = await conn.execute(text("SHOW tcp_user_timeout"))
+                assert shown.scalar() == expected_ms, (
+                    "Postgres must have actually APPLIED the configured tcp_user_timeout, "
+                    "not merely accepted the connection"
+                )
+                await conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key}
+                )
+        finally:
+            await engine.dispose()
+    finally:
+        db_module.get_settings = engine_get_settings  # type: ignore[assignment]
+        db_module.get_worker_lock_engine.cache_clear()  # type: ignore[attr-defined]
 
 
 async def test_leader_killed_before_its_first_advance_survivor_resumes_from_db_state_not_from_scratch(
