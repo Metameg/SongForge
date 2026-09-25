@@ -33,7 +33,10 @@ from songforge.jobs.generation_client import (
     GENERATION_STATUS_ERROR,
     GENERATION_STATUS_FAILED,
     GENERATION_STATUS_IN_QUEUE,
+    GenerationRateLimited,
+    GenerationRejected,
     GenerationStatus,
+    GenerationTransientError,
 )
 from songforge.jobs.watchdog import (
     claim_ingest_overdue_job,
@@ -54,7 +57,6 @@ from songforge.models import (
     Base,
     Job,
 )
-from songforge.web.rate_limit import Identity
 
 _seq_counter = itertools.count(1)
 
@@ -554,21 +556,15 @@ class TestSweepWaitingOverdue:
             ),
         )
         settings = Settings()
-        notified: list[str] = []
 
-        async def _notify(channel: str, payload: str) -> None:
-            notified.append(payload)
-
-        await sweep_waiting_overdue(
-            job, client=client, settings=settings, notify_ingest=_notify
-        )
+        intent = await sweep_waiting_overdue(job, client=client, settings=settings)
 
         assert events == ["by_id:task-1"]  # the poll actually happened
         assert job.state == JOB_STATE_INGEST_PENDING
         assert job.audio_url == "http://musicgpt.test/audio/recovered-token"
         assert job.audio_duration == 181.0
         assert job.title == "A Recovered Song"
-        assert notified == [job.job_id]
+        assert intent == (settings.ingest_channel, job.job_id)
 
     async def test_error_status_marks_the_job_failed(self) -> None:
         events: list[str] = []
@@ -617,6 +613,36 @@ class TestSweepWaitingOverdue:
 
         assert events == ["by_id:task-1"]
         assert job.state == JOB_STATE_WAITING_FOR_WEBHOOK
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            GenerationRateLimited("byId is at capacity"),
+            GenerationTransientError("byId returned 503"),
+            GenerationRejected(404, "unknown task_id"),
+        ],
+        ids=["rate_limited", "transient", "rejected"],
+    )
+    async def test_a_byid_poll_failure_is_never_raised_and_leaves_the_job_waiting(
+        self, exc: Exception
+    ) -> None:
+        """F1: an outage of the generation API's `/byId` endpoint (429/5xx/timeout/
+        terminal 4xx, the same typed exceptions `dispatch_claimed_job` reacts to) must
+        NEVER propagate out of `sweep_waiting_overdue` -- an uncaught raise here would
+        unwind through `_run_sweeps`' drain loop and abort the whole tick, starving the
+        other three sweeps (including the terminal-failure refund) for a full poll
+        interval, precisely during the outage the watchdog exists to survive. The job
+        is left WAITING untouched: no state change, no re-charge, no notify intent."""
+        events: list[str] = []
+        job = _waiting_job()
+        client = _StubGenerationClient(events, status=exc)
+        settings = Settings()
+
+        intent = await sweep_waiting_overdue(job, client=client, settings=settings)
+
+        assert events == ["by_id:task-1"]  # the poll was actually attempted
+        assert job.state == JOB_STATE_WAITING_FOR_WEBHOOK  # left untouched
+        assert intent is None  # no notify fires for an inconclusive poll
 
     async def test_completed_with_missing_audio_url_still_transitions_but_ingest_catches_it(
         self, session: AsyncSession
@@ -691,21 +717,17 @@ def _submitting_job(**overrides: object) -> Job:
 
 
 class TestSweepSubmittingStuck:
-    async def test_requeues_to_queued_with_bumped_attempts_and_notifies_new_job(
+    async def test_requeues_to_queued_with_bumped_attempts_and_returns_a_notify_intent(
         self,
     ) -> None:
         job = _submitting_job(attempts=1)
         settings = Settings()
-        notified: list[str] = []
 
-        async def _notify(channel: str, payload: str) -> None:
-            notified.append(payload)
-
-        await sweep_submitting_stuck(job, settings=settings, notify_new_job=_notify)
+        intent = await sweep_submitting_stuck(job, settings=settings)
 
         assert job.state == JOB_STATE_QUEUED
         assert job.attempts == 2
-        assert notified == [job.job_id]
+        assert intent == (settings.jobs_new_channel, job.job_id)
 
     async def test_requeue_resets_available_at_to_now_for_immediate_reclaim(self) -> None:
         """This is a crash-recovery re-queue, not a backoff (D6: the lease age-gate
@@ -774,40 +796,6 @@ class TestSweepIngestOverdue:
         assert job.ingest_attempts == 4  # the nudge never touches this counter
 
 
-class _RecordingRateLimiter:
-    """File-local fake `RateLimiter`: only `refund` is exercised by the terminal-
-    failure sweep -- records `(identity, ip)` so the test can assert the EXACT
-    reconstructed identity/ip (D3: both the cookie AND ip legs must be refunded for an
-    anon job)."""
-
-    def __init__(self) -> None:
-        self.refund_calls: list[tuple[Identity, str]] = []
-
-    async def consume(self, identity: Identity, ip: str) -> None:
-        raise AssertionError("sweep_terminal_failures must never consume a new slot")
-
-    async def remaining(self, identity: Identity, ip: str) -> int:
-        raise AssertionError("sweep_terminal_failures must never read `remaining`")
-
-    async def refund(self, identity: Identity, ip: str) -> None:
-        self.refund_calls.append((identity, ip))
-
-
-class _RaisingRateLimiter:
-    """File-local fake `RateLimiter` whose `refund` always raises -- simulates a
-    Redis blip (repo convention #3: a Redis blip must never abort the Postgres commit
-    that stamps `failure_handled_at`)."""
-
-    async def consume(self, identity: Identity, ip: str) -> None:
-        raise AssertionError("sweep_terminal_failures must never consume a new slot")
-
-    async def remaining(self, identity: Identity, ip: str) -> int:
-        raise AssertionError("sweep_terminal_failures must never read `remaining`")
-
-    async def refund(self, identity: Identity, ip: str) -> None:
-        raise ConnectionError("redis blip")
-
-
 def _failed_job(**overrides: object) -> Job:
     defaults: dict[str, object] = dict(
         job_id="job-1",
@@ -817,47 +805,44 @@ def _failed_job(**overrides: object) -> Job:
         client_ip="203.0.113.9",
         is_authenticated=False,
         failure_handled_at=None,
+        created_at=_now(),
     )
     defaults.update(overrides)
     return Job(**defaults)  # type: ignore[arg-type]
 
 
 class TestSweepTerminalFailures:
-    async def test_refunds_the_reconstructed_identity_and_ip(self) -> None:
+    """`sweep_terminal_failures` is now a PURE decision step (F4): it stamps
+    `failure_handled_at` and returns a `TerminalFailureIntent` for the caller
+    (`worker/watchdog.py::_drain_terminal_failures`) to refund + notify with AFTER
+    that stamp commits -- it no longer calls a `RateLimiter` or a publish hook itself.
+    The post-commit refund/notify firing (and its best-effort Redis-blip handling) is
+    covered in `tests/test_worker_watchdog.py`."""
+
+    async def test_returns_the_reconstructed_identity_and_ip(self) -> None:
         job = _failed_job()
-        rate_limiter = _RecordingRateLimiter()
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+        intent = await sweep_terminal_failures(job)
 
-        assert len(rate_limiter.refund_calls) == 1
-        identity, ip = rate_limiter.refund_calls[0]
-        assert identity.user_id == "user-abc"
-        assert identity.is_authenticated is False
-        assert ip == "203.0.113.9"
+        assert intent is not None
+        assert intent.identity.user_id == "user-abc"
+        assert intent.identity.is_authenticated is False
+        assert intent.ip == "203.0.113.9"
 
-    async def test_publishes_a_job_failed_notification_on_the_users_channel(self) -> None:
+    async def test_intent_carries_the_user_id_and_job_id_for_the_notification(self) -> None:
         job = _failed_job()
-        rate_limiter = _RecordingRateLimiter()
-        published: list[tuple[str, str]] = []
 
-        async def _publish(user_id: str, message: str) -> None:
-            published.append((user_id, message))
+        intent = await sweep_terminal_failures(job)
 
-        await sweep_terminal_failures(
-            job, rate_limiter=rate_limiter, publish_user_event=_publish  # type: ignore[arg-type]
-        )
-
-        assert len(published) == 1
-        user_id, message = published[0]
-        assert user_id == "user-abc"
-        assert "job-1" in message  # the job id is identifiable in the notification
+        assert intent is not None
+        assert intent.user_id == "user-abc"
+        assert intent.job_id == "job-1"
 
     async def test_stamps_failure_handled_at(self) -> None:
         job = _failed_job()
-        rate_limiter = _RecordingRateLimiter()
         before = _now()
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+        await sweep_terminal_failures(job)
 
         assert job.failure_handled_at is not None
         assert job.failure_handled_at >= before
@@ -865,96 +850,90 @@ class TestSweepTerminalFailures:
     async def test_never_calls_the_generation_client(self) -> None:
         """A4 (never auto-regenerates): `sweep_terminal_failures` isn't even handed a
         generation client -- there is no port to call. This test documents that
-        contract (and would fail loudly with a TypeError if a future change added
-        one without updating this guard)."""
+        contract by never transitioning the job to QUEUED/SUBMITTING."""
         job = _failed_job()
-        rate_limiter = _RecordingRateLimiter()
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+        await sweep_terminal_failures(job)
 
         assert job.state == JOB_STATE_FAILED  # never transitioned to QUEUED/SUBMITTING
 
+    async def test_returns_none_and_does_not_restamp_an_already_handled_row(self) -> None:
+        """Defensive (F4): the claim guard (`failure_handled_at IS NULL`) should make
+        this unreachable in production, but a row handed in already stamped must not
+        be re-stamped or hand back a stale intent."""
+        already_handled = _now() - timedelta(seconds=60)
+        job = _failed_job(failure_handled_at=already_handled)
 
-class TestSweepTerminalFailuresBestEffort:
-    """Redis-facing side effects (refund, per-user publish) are best-effort: a blip in
-    EITHER must never stop the Postgres commit that stamps `failure_handled_at` (repo
-    convention #3, D2)."""
+        intent = await sweep_terminal_failures(job)
 
-    async def test_refund_raising_still_stamps_failure_handled_at(self) -> None:
-        job = _failed_job()
-        rate_limiter = _RaisingRateLimiter()
-        before = _now()
+        assert intent is None
+        assert job.failure_handled_at == already_handled
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
-
-        assert job.failure_handled_at is not None
-        assert job.failure_handled_at >= before
-
-    async def test_publish_user_event_raising_still_stamps_failure_handled_at(self) -> None:
-        job = _failed_job()
-        rate_limiter = _RecordingRateLimiter()
-
-        async def _raising_publish(user_id: str, message: str) -> None:
-            raise ConnectionError("redis blip")
-
-        before = _now()
-        await sweep_terminal_failures(
-            job, rate_limiter=rate_limiter, publish_user_event=_raising_publish  # type: ignore[arg-type]
-        )
-
-        assert job.failure_handled_at is not None
-        assert job.failure_handled_at >= before
-        assert len(rate_limiter.refund_calls) == 1  # the refund itself still ran fine
-
-    async def test_refund_and_publish_both_raising_still_commits_the_stamp(
-        self, session: AsyncSession
-    ) -> None:
-        """Drives the real claim + sweep + commit (not just the in-memory `Job`) so the
-        Postgres commit itself -- not merely the in-process attribute -- is proven to
-        go through when BOTH Redis-facing side effects fail simultaneously."""
-        await _add(session, _job(job_id="failed-both-raise", state=JOB_STATE_FAILED))
-        rate_limiter = _RaisingRateLimiter()
-
-        async def _raising_publish(user_id: str, message: str) -> None:
-            raise ConnectionError("redis blip")
-
-        job = await claim_terminal_failure_job(session)
-        assert job is not None
-        await sweep_terminal_failures(
-            job, rate_limiter=rate_limiter, publish_user_event=_raising_publish  # type: ignore[arg-type]
-        )
-        await session.commit()
-
-        second_claim = await claim_terminal_failure_job(session)
-        assert second_claim is None  # stamped despite both failures -- never re-claimed
-
-    async def test_refund_uses_an_empty_string_when_client_ip_is_none(self) -> None:
+    async def test_ip_is_the_empty_string_when_client_ip_is_none(self) -> None:
         job = _failed_job(client_ip=None)
-        rate_limiter = _RecordingRateLimiter()
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+        intent = await sweep_terminal_failures(job)
 
-        assert rate_limiter.refund_calls[0][1] == ""
+        assert intent is not None
+        assert intent.ip == ""
 
-    async def test_refund_uses_an_empty_string_when_client_ip_is_the_empty_string(self) -> None:
+    async def test_ip_is_the_empty_string_when_client_ip_is_the_empty_string(self) -> None:
         job = _failed_job(client_ip="")
-        rate_limiter = _RecordingRateLimiter()
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+        intent = await sweep_terminal_failures(job)
 
-        assert rate_limiter.refund_calls[0][1] == ""
+        assert intent is not None
+        assert intent.ip == ""
 
-    async def test_refund_reconstructs_an_authenticated_identity(self) -> None:
+    async def test_reconstructs_an_authenticated_identity(self) -> None:
         """D3: `is_authenticated` is always False today (no accounts system yet), but
         the refund shape must already be correct once accounts land -- driven here with
         a forward-looking `is_authenticated=True` job."""
         job = _failed_job(is_authenticated=True)
-        rate_limiter = _RecordingRateLimiter()
 
-        await sweep_terminal_failures(job, rate_limiter=rate_limiter)  # type: ignore[arg-type]
+        intent = await sweep_terminal_failures(job)
 
-        identity, _ip = rate_limiter.refund_calls[0]
-        assert identity.is_authenticated is True
+        assert intent is not None
+        assert intent.identity.is_authenticated is True
+
+
+class TestSweepTerminalFailuresChargeDay:
+    """F3: the refund's day bucket is the job's CREATE day (`consume`'s charged
+    bucket), never "today" -- a job created before a UTC-midnight rollover and swept
+    after it must refund the day it actually charged, closing a cross-midnight
+    farmable-gap (see `RateLimiter.refund`'s `day` docstring)."""
+
+    async def test_day_is_the_jobs_created_at_utc_date(self) -> None:
+        created = datetime(2026, 1, 1, 23, 59, tzinfo=timezone.utc)
+        job = _failed_job(created_at=created)
+
+        intent = await sweep_terminal_failures(job)
+
+        assert intent is not None
+        assert intent.day == "2026-01-01"
+
+    async def test_day_survives_a_cross_midnight_sweep_not_todays_date(self) -> None:
+        """The row is swept well after its create day has rolled over -- `intent.day`
+        must still be the CREATE day, not whatever "today" is at sweep time."""
+        created = datetime.now(timezone.utc) - timedelta(days=2)
+        job = _failed_job(created_at=created)
+
+        intent = await sweep_terminal_failures(job)
+
+        assert intent is not None
+        assert intent.day == created.date().isoformat()
+        assert intent.day != _now().date().isoformat()
+
+    async def test_day_normalizes_a_naive_created_at(self) -> None:
+        """SQLite doesn't round-trip `tzinfo` (see `_as_aware_utc`'s docstring in
+        `jobs/watchdog.py`) -- a naive `created_at` must still normalize to the
+        correct UTC date rather than raising."""
+        job = _failed_job(created_at=datetime(2026, 3, 15, 12, 0))  # naive, no tzinfo
+
+        intent = await sweep_terminal_failures(job)
+
+        assert intent is not None
+        assert intent.day == "2026-03-15"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -963,37 +942,31 @@ class TestSweepTerminalFailuresBestEffort:
 
 
 class TestSweepTerminalFailuresIdempotency:
-    async def test_a_second_claim_after_the_stamp_finds_nothing_to_refund_or_notify(
+    async def test_a_second_claim_after_the_stamp_finds_nothing_to_hand_back(
         self, session: AsyncSession
     ) -> None:
         """The idempotency guarantee (D2) is row-claim-based, not a check inside
         `sweep_terminal_failures` itself: `claim_terminal_failure_job`'s `WHERE
         failure_handled_at IS NULL` is what makes a second sweep pass over the SAME
         row a no-op. Drives the real claim + sweep + commit twice over one job to
-        prove that end to end -- exactly one refund, exactly one notification, ever,
-        no matter how many watchdog ticks later a second sweep pass runs."""
+        prove that end to end -- exactly one intent handed back, ever, no matter how
+        many watchdog ticks later a second sweep pass runs."""
         await _add(session, _job(job_id="failed-1", state=JOB_STATE_FAILED))
-        rate_limiter = _RecordingRateLimiter()
-        published: list[tuple[str, str]] = []
 
-        async def _publish(user_id: str, message: str) -> None:
-            published.append((user_id, message))
-
-        # First sweep: claims the row, refunds, notifies, stamps `failure_handled_at`.
+        # First sweep: claims the row, stamps `failure_handled_at`, hands back an
+        # intent for the caller to refund+notify with.
         job = await claim_terminal_failure_job(session)
         assert job is not None
-        await sweep_terminal_failures(
-            job, rate_limiter=rate_limiter, publish_user_event=_publish  # type: ignore[arg-type]
-        )
+        intent = await sweep_terminal_failures(job)
         await session.commit()
+
+        assert intent is not None
 
         # Second sweep (a later watchdog tick, or a concurrent worker instance): the
         # claim query itself finds nothing left to hand back.
         second_claim = await claim_terminal_failure_job(session)
 
         assert second_claim is None
-        assert len(rate_limiter.refund_calls) == 1  # never double-refunded
-        assert len(published) == 1  # never double-notified
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
