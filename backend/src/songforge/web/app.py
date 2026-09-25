@@ -35,6 +35,7 @@ from songforge.logging_setup import configure_logging, get_logger
 from songforge.metrics import render_latest
 from songforge.radio.pointer_broadcaster import PointerBroadcaster
 from songforge.radio.pointer_cache import PointerCache
+from songforge.radio.user_events import UserEventBroadcaster
 from songforge.redis_client import get_redis
 from songforge.web.middleware import CorrelationIdMiddleware, MetricsMiddleware
 from songforge.web.routes import create, events, health, now_playing, quota, webhook
@@ -51,9 +52,11 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.pointer_broadcaster.start()
+        await app.state.user_event_broadcaster.start()
         try:
             yield
         finally:
+            await app.state.user_event_broadcaster.stop()
             await app.state.pointer_broadcaster.stop()
 
     app = FastAPI(
@@ -82,6 +85,14 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
         redis=redis if redis is not None else get_redis(),
         channel=settings.radio_pointer_channel,
         cache=app.state.pointer_cache,
+    )
+
+    # Issue #16, criterion A4: the per-user mirror of `pointer_broadcaster` -- ONE
+    # PSUBSCRIBE per app instance, fanning `job-failed` notifications out to exactly
+    # the connected client(s) registered under the matching user id.
+    app.state.user_event_broadcaster = UserEventBroadcaster(
+        redis=redis if redis is not None else get_redis(),
+        channel_prefix=settings.user_events_channel_prefix,
     )
 
     app.include_router(health.router)

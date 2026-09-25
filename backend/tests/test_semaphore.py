@@ -39,6 +39,15 @@ class _InMemorySemaphoreBackend:
     async def set_value(self, key: str, value: int) -> None:
         self._counts[key] = value
 
+    async def scan_keys(self, match: str) -> list[str]:
+        # `match` is always a `<prefix>*` glob in this codebase (see
+        # `RedisSemaphore.scan_user_ids`) -- a plain prefix check stands in for the
+        # real backend's `SCAN`/`scan_iter`, which is exercised only against a live
+        # Redis (see the module docstring's fast-unit-path/live-Redis split).
+        assert match.endswith("*"), f"unsupported fake scan_keys match: {match!r}"
+        prefix = match[:-1]
+        return [key for key in self._counts if key.startswith(prefix)]
+
     def get(self, key: str) -> int:
         return self._counts.get(key, 0)
 
@@ -189,3 +198,74 @@ async def test_concurrent_acquires_never_exceed_the_global_cap() -> None:
 
     assert sum(1 for granted in results if granted) == 3
     assert backend.get(global_key(settings)) == 3
+
+
+# ── Watchdog reconcile backstop, per-user leg (issue #16 slot-leak fix) ────────────
+#
+# The global reconcile (`reconcile_from_active_count`) was already covered above. The
+# per-user leg needs a way to discover WHICH user keys currently exist in Redis (a
+# leaked/never-released key from a crashed process) before it can snap each one back
+# to its owner's fresh active-row count -- `scan_user_ids` (backed by
+# `SemaphoreBackend.scan_keys`) is that discovery step, and
+# `reconcile_user_from_active_count` is the per-key set-from-truth step
+# `worker/watchdog.py`'s reconcile loop calls once per discovered user id.
+
+
+async def test_scan_user_ids_returns_user_ids_for_existing_per_user_keys() -> None:
+    settings = _settings(global_generation_concurrency=5)
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")
+    await sem.acquire("user-b")
+
+    user_ids = await sem.scan_user_ids()
+
+    assert sorted(user_ids) == ["user-a", "user-b"]
+
+
+async def test_scan_user_ids_returns_empty_list_when_no_per_user_keys_exist() -> None:
+    settings = _settings()
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+
+    assert await sem.scan_user_ids() == []
+
+
+async def test_scan_user_ids_never_returns_the_global_key_itself() -> None:
+    """The global key (`sem:gen:global`) shares no prefix with a per-user key
+    (`sem:gen:user:{id}`) -- confirms `scan_user_ids` scopes its scan to the per-user
+    prefix, not a bare `sem:gen:*` that would also match the global counter."""
+    settings = _settings()
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")  # touches both the global key and a per-user key
+
+    user_ids = await sem.scan_user_ids()
+
+    assert user_ids == ["user-a"]
+
+
+async def test_reconcile_user_from_active_count_sets_the_per_user_counter() -> None:
+    settings = _settings()
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")
+    await sem.acquire("user-a")  # per-user counter now 2, out of sync with "truth"
+
+    await sem.reconcile_user_from_active_count("user-a", 1)
+
+    assert backend.get(user_key(settings, "user-a")) == 1
+
+
+async def test_reconcile_user_from_active_count_can_snap_a_leaked_key_down_to_zero() -> None:
+    """The realistic leak scenario: a crashed process acquired a slot and never
+    released it (no active rows left for that user), so reconcile must be able to
+    snap the counter all the way back to 0, not just correct within a non-zero range."""
+    settings = _settings()
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")
+
+    await sem.reconcile_user_from_active_count("user-a", 0)
+
+    assert backend.get(user_key(settings, "user-a")) == 0

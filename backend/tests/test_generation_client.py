@@ -22,6 +22,10 @@ import pytest
 
 from songforge.config import Settings
 from songforge.jobs.generation_client import (
+    GENERATION_STATUS_COMPLETED,
+    GENERATION_STATUS_ERROR,
+    GENERATION_STATUS_FAILED,
+    GENERATION_STATUS_IN_QUEUE,
     GenerationRateLimited,
     GenerationRejected,
     GenerationTransientError,
@@ -348,3 +352,189 @@ async def test_get_audio_url_by_id_against_real_sim_rejects_unknown_task() -> No
         with pytest.raises(GenerationRejected) as exc_info:
             await client.get_audio_url_by_id("does-not-exist")
     assert exc_info.value.status_code == 404
+
+
+# ── get_status_by_id (issue #16: status-branching by-id lookup for the watchdog) ──
+#
+# Unlike `get_audio_url_by_id` (raises unless the task is COMPLETED), the watchdog's
+# `jobs/watchdog.py::sweep_waiting_overdue` needs the raw STATUS to branch: COMPLETED
+# recovers a lost webhook (no re-charge), ERROR/FAILED are terminal, IN_QUEUE is left
+# waiting. Mirrors `get_audio_url_by_id`'s two-tier test structure (hand-crafted
+# `MockTransport` first, then the real simulator). Currently RED at runtime (not
+# collection): `HttpGenerationClient.get_status_by_id` raises `NotImplementedError`
+# (issue #16 phase 3) -- see that method's docstring in `jobs/generation_client.py`.
+
+
+async def test_get_status_by_id_returns_completed_with_audio_url_duration_and_title() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/byId"
+        assert request.url.params["task_id"] == "t1"
+        return httpx.Response(
+            200,
+            json={
+                "task_id": "t1",
+                "status": "COMPLETED",
+                "conversion_id_1": "c1",
+                "conversion_id_2": "c2",
+                "audio_url": "http://musicgpt.test/audio/fresh-token",
+                "conversion_duration": 123.4,
+                "title": "A Song",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        status = await client.get_status_by_id("t1")
+
+    assert status.status == GENERATION_STATUS_COMPLETED
+    assert status.audio_url == "http://musicgpt.test/audio/fresh-token"
+    assert status.duration == 123.4
+    assert status.title == "A Song"
+
+
+async def test_get_status_by_id_returns_in_queue_with_no_audio_url() -> None:
+    handler = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "task_id": "t1",
+                "status": "IN_QUEUE",
+                "conversion_id_1": "c1",
+                "conversion_id_2": "c2",
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        status = await client.get_status_by_id("t1")
+
+    assert status.status == GENERATION_STATUS_IN_QUEUE
+    assert status.audio_url is None
+
+
+async def test_get_status_by_id_returns_error_status() -> None:
+    handler = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "task_id": "t1",
+                "status": "ERROR",
+                "conversion_id_1": "c1",
+                "conversion_id_2": "c2",
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        status = await client.get_status_by_id("t1")
+
+    assert status.status == GENERATION_STATUS_ERROR
+
+
+async def test_get_status_by_id_returns_failed_status() -> None:
+    handler = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "task_id": "t1",
+                "status": "FAILED",
+                "conversion_id_1": "c1",
+                "conversion_id_2": "c2",
+            },
+        )
+    )
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        status = await client.get_status_by_id("t1")
+
+    assert status.status == GENERATION_STATUS_FAILED
+
+
+async def test_get_status_by_id_raises_rejected_on_404() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(404, text="unknown task_id"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationRejected) as exc_info:
+            await client.get_status_by_id("unknown")
+    assert exc_info.value.status_code == 404
+
+
+async def test_get_status_by_id_raises_rate_limited_on_429() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(429, text="high demand"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationRateLimited):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_raises_transient_error_on_5xx() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(503, text="down"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_raises_transient_error_on_timeout() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_raises_transient_error_on_malformed_json_body() -> None:
+    handler = httpx.MockTransport(lambda r: httpx.Response(200, text="not json"))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_raises_transient_error_on_a_non_dict_json_body() -> None:
+    """Valid JSON that isn't an object (e.g. a bare array) is a distinct malformed-200
+    branch from a JSON parse failure -- `data.get(...)` would raise `AttributeError`
+    on a list, so this must be caught and mapped to the same typed exception rather
+    than crashing the watchdog loop."""
+    handler = httpx.MockTransport(lambda r: httpx.Response(200, json=["not", "an", "object"]))
+    async with httpx.AsyncClient(transport=handler) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_raises_transient_error_on_a_network_connection_error() -> None:
+    """A non-timeout `httpx.RequestError` (e.g. connection refused) must map the same
+    way a timeout does -- both are retriable, neither is a crash."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = HttpGenerationClient(_settings(), http_client)
+        with pytest.raises(GenerationTransientError):
+            await client.get_status_by_id("t1")
+
+
+async def test_get_status_by_id_against_real_simulator_returns_completed() -> None:
+    """Drives the real `GET /byId` end to end (mirrors
+    `test_get_audio_url_by_id_against_real_simulator_returns_a_fresh_url`) -- proves
+    `get_status_by_id`'s parsing matches the real `ByIdResponse` shape once
+    implemented."""
+    rig = make_rig()
+    async with rig.client:
+        client = HttpGenerationClient(_settings(), rig.client)
+        handles = await client.create(
+            prompt=str(DEFAULT_BODY["prompt"]),
+            lyrics=None,
+            webhook_url=str(DEFAULT_BODY["webhook_url"]),
+        )
+        await wait_for_pending_webhooks(rig.app)
+
+        status = await client.get_status_by_id(handles.task_id)
+
+    assert status.status == GENERATION_STATUS_COMPLETED
+    assert status.audio_url
+    assert status.audio_url.startswith("http")

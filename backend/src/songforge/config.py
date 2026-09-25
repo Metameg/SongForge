@@ -216,6 +216,30 @@ class Settings(BaseSettings):
     # disconnected, and gives a reconnecting client a bound on staleness (criterion #4).
     sse_heartbeat_seconds: float = 30.0
 
+    # ── Watchdog: leaderless recovery sweep (issue #16) ──────────────────────
+    # Backstop poll interval between sweeps (A1: a single periodic watchdog owns all
+    # recovery). Not latency-critical -- recovery, not the happy path.
+    watchdog_poll_interval_seconds: float = 30.0
+    # Design D5: a WAITING_FOR_WEBHOOK job is only polled once `updated_at + eta +
+    # this buffer <= now` -- never during its own expected generation window.
+    watchdog_waiting_overdue_buffer_seconds: float = 45.0
+    # A SUBMITTING job with no `task_id` older than this is presumed crashed
+    # mid-submit and requeued (design D6: the age-gate is what keeps the resulting
+    # delayed re-call/double-charge bounded and rare).
+    watchdog_submitting_lease_seconds: float = 120.0
+    # A GENEROUS threshold (well beyond `ingest_requeue_backoff_seconds`) past which
+    # an INGEST_PENDING job is presumed stalled/crashed and nudged for re-claim --
+    # backstop over (not a replacement for) the inline ingest retry (D1).
+    watchdog_ingest_overdue_seconds: float = 300.0
+    # Bounded batch size for the WAITING-overdue claim query's candidate scan (its
+    # per-row `eta`-based overdue check isn't a single portable SQL predicate across
+    # SQLite/Postgres -- see `jobs/watchdog.py::claim_waiting_overdue_job`).
+    watchdog_claim_batch_size: int = 20
+    # Redis pub/sub channel prefix a per-user notification (issue #16, criterion A4)
+    # is published to: `{prefix}{user_id}:events`, e.g. `user:abc123:events`. The
+    # per-instance `UserEventBroadcaster` PSUBSCRIBEs the matching wildcard pattern.
+    user_events_channel_prefix: str = "user:"
+
     # ── Observability (always on, every environment; spec #77) ──────────────
     metrics_enabled: bool = True
     correlation_id_header: str = "X-Correlation-ID"

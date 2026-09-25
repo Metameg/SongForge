@@ -163,6 +163,60 @@ radio_pointer_events_relayed_total = Counter(
 )
 
 
+# ── Failure recovery: watchdog, idempotency & refund (issue #16) ─────────────────
+watchdog_recovered_total = Counter(
+    "songforge_watchdog_recovered_total",
+    "Jobs recovered by the watchdog's periodic sweep, labelled by recovery path.",
+    labelnames=("path",),
+    registry=REGISTRY,
+)
+
+quota_refunded_total = Counter(
+    "songforge_quota_refunded_total",
+    "Daily-quota slots refunded by the watchdog's terminal-failure sweep (A4).",
+    registry=REGISTRY,
+)
+
+user_notifications_total = Counter(
+    "songforge_user_notifications_total",
+    "Per-user SSE notifications published, labelled by notification type.",
+    labelnames=("type",),
+    registry=REGISTRY,
+)
+
+user_notifications_relayed_total = Counter(
+    "songforge_user_notifications_relayed_total",
+    "Per-user notifications relayed from the pub/sub subscription to a connected SSE "
+    "client (delivery-side counterpart to user_notifications_total's publish-side "
+    "count -- mirrors radio_pointer_events_relayed_total for UserEventBroadcaster).",
+    registry=REGISTRY,
+)
+
+# ── Generation semaphore slot-leak fix (issue #16 follow-up) ─────────────────────
+#
+# `jobs.dispatch.dispatch_claimed_job` already releases on its own FAILED/429/
+# transient paths (unlabelled, pre-existing) -- these two cover the release/reconcile
+# sites this fix ADDS: every ACTIVE_JOB_STATES -> terminal transition that happens
+# OUTSIDE dispatch (ingest completion/failure, a webhook failure, and the watchdog's
+# own sweeps), plus the watchdog's Postgres-truth reconcile backstop.
+
+semaphore_released_total = Counter(
+    "songforge_semaphore_released_total",
+    "Generation semaphore slots released outside jobs.dispatch, by the site that "
+    "released them.",
+    labelnames=("site",),
+    registry=REGISTRY,
+)
+
+semaphore_reconciled_total = Counter(
+    "songforge_semaphore_reconciled_total",
+    "Semaphore counters snapped to a fresh Postgres active-row count by the "
+    "watchdog's per-tick reconcile backstop, by scope (global or per-user).",
+    labelnames=("scope",),
+    registry=REGISTRY,
+)
+
+
 def render_latest() -> Response:
     """Render the registry as a Prometheus-format HTTP response.
 

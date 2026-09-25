@@ -41,8 +41,11 @@ from songforge.jobs.ingest import (
     claim_next_ingest_job,
     ingest_claimed_job,
 )
+from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
 from songforge.logging_setup import get_logger
-from songforge.models import JOB_STATE_READY
+from songforge.metrics import semaphore_released_total
+from songforge.models import JOB_STATE_FAILED, JOB_STATE_READY
+from songforge.redis_client import get_redis
 from songforge.storage import ObjectStorage
 
 log = get_logger(__name__)
@@ -65,6 +68,21 @@ async def _safe_notify_ready(notify_ready: NotifyReadyFn, song_id: str) -> None:
         log.exception("song_ready_notify_failed", song_id=song_id)
 
 
+async def _safe_release_semaphore(semaphore: Semaphore, user_id: str) -> None:
+    """Best-effort generation-semaphore release (issue #16 slot-leak fix): a job
+    that reaches READY or FAILED here has left `ACTIVE_JOB_STATES`, so the slot
+    `jobs.dispatch.dispatch_claimed_job` acquired before the generation API call must
+    be freed. Fired AFTER the commit, same "Redis blip must never abort an
+    otherwise-committed Postgres transition" convention as `jobs.dispatch._safe_release`
+    -- worst case a missed release is corrected later by the watchdog's reconcile
+    backstop (`worker/watchdog.py`)."""
+    try:
+        await semaphore.release(user_id)
+        semaphore_released_total.labels(site="ingest").inc()
+    except Exception:
+        log.exception("semaphore_release_failed", site="ingest", user_id=user_id)
+
+
 async def _drain_ingest_pending(
     sessionmaker: async_sessionmaker[AsyncSession],
     storage: ObjectStorage,
@@ -72,6 +90,7 @@ async def _drain_ingest_pending(
     downloader: Downloader,
     settings: Settings,
     notify_ready: NotifyReadyFn | None = None,
+    semaphore: Semaphore | None = None,
 ) -> None:
     """Ingest every currently-claimable job, one at a time, until none remain. Each
     claim + ingest + commit happens in its own session so the row lock (and the
@@ -84,6 +103,12 @@ async def _drain_ingest_pending(
     -- mirrors ``web/routes/webhook.py``'s "commit first, notify after" ordering (a
     missed notify only costs the coordinator's poll/boundary latency, never
     correctness).
+
+    ``semaphore`` is likewise optional/backward-compatible (issue #16 slot-leak fix):
+    when a job reaches READY *or* FAILED in this commit -- i.e. it has left
+    ``ACTIVE_JOB_STATES`` -- its generation-semaphore slot is released, POST-COMMIT,
+    best-effort. A job requeued back to INGEST_PENDING (the in-claim retry wasn't
+    resolved) is still active and must NOT release.
     """
     while True:
         async with sessionmaker() as session:
@@ -100,18 +125,25 @@ async def _drain_ingest_pending(
                 settings=settings,
             )
             await session.commit()
-            # Only touch `job.state`/`job.song_id` when a `notify_ready` was actually
-            # supplied -- callers that don't care about the wake-up (including tests
-            # exercising this loop with a minimal fake `Job` stand-in) needn't provide
-            # those attributes.
+            # Only touch `job.state`/`job.song_id`/`job.user_id` when the
+            # corresponding hook was actually supplied -- callers that don't care
+            # about these wake-ups (including tests exercising this loop with a
+            # minimal fake `Job` stand-in) needn't provide those attributes.
             ready_song_id = (
                 job.song_id
                 if notify_ready is not None and job.state == JOB_STATE_READY
                 else None
             )
+            release_user_id = (
+                job.user_id
+                if semaphore is not None and job.state in (JOB_STATE_READY, JOB_STATE_FAILED)
+                else None
+            )
 
         if notify_ready is not None and ready_song_id is not None:
             await _safe_notify_ready(notify_ready, ready_song_id)
+        if semaphore is not None and release_user_id is not None:
+            await _safe_release_semaphore(semaphore, release_user_id)
 
 
 async def _wait_any(stop: asyncio.Event, wake: asyncio.Event) -> None:
@@ -132,6 +164,11 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
     # lru_cache singleton) so this loop honors whatever settings the caller wired up
     # -- important for tests that construct `Settings` with test-only S3 config.
     storage = ObjectStorage.from_settings(settings)
+    # Mirrors `worker/dispatch.py::run_dispatch`'s own semaphore wiring -- release
+    # site for the slot-leak fix (issue #16): a job dispatch acquired before the
+    # generation API call is only released, on this loop's side, once it reaches
+    # READY/FAILED here.
+    semaphore = RedisSemaphore(RedisSemaphoreBackend(get_redis()), settings)
     # asyncpg wants a plain postgres DSN; the app-wide URL carries the `+asyncpg`
     # SQLAlchemy driver tag, which asyncpg.connect() doesn't understand.
     dsn = settings.database_url.replace("+asyncpg", "")
@@ -177,6 +214,7 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
                                 downloader,
                                 settings,
                                 _notify_ready,
+                                semaphore,
                             )
                             wake.clear()
                             try:

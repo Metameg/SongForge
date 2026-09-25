@@ -36,7 +36,11 @@ from songforge.models import (
     Job,
 )
 from songforge.web.app import create_app
-from songforge.web.routes.webhook import get_notify_dependency, get_session
+from songforge.web.routes.webhook import (
+    get_notify_dependency,
+    get_semaphore_dependency,
+    get_session,
+)
 
 _seq_counter = itertools.count(1)
 
@@ -516,6 +520,181 @@ async def test_webhook_failure_status_increments_failed_counter(
 
     assert resp.status_code == 200
     assert _outcome_count("failed") == before + 1
+
+
+# ── Generation semaphore release (issue #16 slot-leak fix) ─────────────────────────
+#
+# The webhook's failure branch (`body.status is not None or body.conversion_path is
+# None` -> FAILED) is a second event-driven release site: the job leaves
+# WAITING_FOR_WEBHOOK (an active state) without ever reaching ingest, so the slot
+# `jobs.dispatch.dispatch_claimed_job` acquired before the generation API call must be
+# released here, post-commit, best-effort. The success branch (-> INGEST_PENDING) must
+# NOT release -- the job is still active; `worker/ingest.py`'s own release site handles
+# that job once IT reaches READY/FAILED.
+
+
+class _SemaphoreSpy:
+    """File-local fake ``Semaphore``; injected via ``get_semaphore_dependency``."""
+
+    def __init__(self) -> None:
+        self.released_with: list[str] = []
+
+    async def acquire(self, user_id: str) -> bool:
+        raise AssertionError("the webhook route must never acquire a slot")
+
+    async def release(self, user_id: str) -> None:
+        self.released_with.append(user_id)
+
+    async def reconcile_from_active_count(self, count: int) -> None:
+        raise AssertionError("the webhook route must never reconcile the global cap")
+
+
+def _build_client_with_semaphore(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> tuple[TestClient, _NotifySpy, _SemaphoreSpy]:
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield session
+
+    notify_spy = _NotifySpy()
+    semaphore_spy = _SemaphoreSpy()
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: notify_spy
+    app.dependency_overrides[get_semaphore_dependency] = lambda: semaphore_spy
+    return TestClient(app), notify_spy, semaphore_spy
+
+
+async def test_webhook_failure_releases_the_semaphore_slot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker, user_id="user-42")
+    client, _, semaphore_spy = _build_client_with_semaphore(sessionmaker)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None, status="ERROR"),
+    )
+
+    assert resp.status_code == 200
+    assert semaphore_spy.released_with == ["user-42"]
+
+
+async def test_webhook_success_does_not_release_the_semaphore_slot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker, user_id="user-42")
+    client, _, semaphore_spy = _build_client_with_semaphore(sessionmaker)
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert semaphore_spy.released_with == []
+
+
+async def test_webhook_noop_paths_do_not_release_the_semaphore_slot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The idempotency no-op (already past WAITING_FOR_WEBHOOK) and the unknown-
+    task-id no-op must not release either -- neither one is this route's original
+    transition into FAILED."""
+    await _insert_job(sessionmaker, user_id="user-42", state=JOB_STATE_FAILED)
+    client, _, semaphore_spy = _build_client_with_semaphore(sessionmaker)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None, status="ERROR"),
+    )
+
+    assert resp.status_code == 200
+    assert semaphore_spy.released_with == []
+
+
+async def test_webhook_releases_the_semaphore_after_the_persisting_commit(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Ordering IS the criterion (mirrors `test_webhook_notifies_after_the_
+    persisting_commit`): the FAILED transition must be committed to Postgres before
+    the semaphore release fires."""
+    await _insert_job(sessionmaker, user_id="user-42")
+    events: list[str] = []
+
+    class _CommitTrackingSession:
+        def __init__(self, session: AsyncSession) -> None:
+            self._session = session
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._session, name)
+
+        async def commit(self) -> None:
+            await self._session.commit()
+            events.append("committed")
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield _CommitTrackingSession(session)  # type: ignore[misc]
+
+    class _OrderedSemaphoreSpy:
+        async def acquire(self, user_id: str) -> bool:
+            raise AssertionError("must never acquire")
+
+        async def release(self, user_id: str) -> None:
+            events.append(f"release:{user_id}")
+
+        async def reconcile_from_active_count(self, count: int) -> None:
+            raise AssertionError("must never reconcile")
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: _NotifySpy()
+    app.dependency_overrides[get_semaphore_dependency] = lambda: _OrderedSemaphoreSpy()
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None, status="ERROR"),
+    )
+
+    assert resp.status_code == 200
+    assert events == ["committed", "release:user-42"]
+
+
+async def test_webhook_returns_200_even_if_semaphore_release_raises(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Best-effort: a raising `semaphore.release` (e.g. a Redis blip) must be
+    swallowed, mirroring `_safe_notify`'s convention -- the already-committed FAILED
+    transition must not be undone or surfaced as a 500."""
+    await _insert_job(sessionmaker, user_id="user-42")
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield session
+
+    class _ExplodingSemaphore:
+        async def acquire(self, user_id: str) -> bool:
+            raise AssertionError("must never acquire")
+
+        async def release(self, user_id: str) -> None:
+            raise RuntimeError("redis blip during release")
+
+        async def reconcile_from_active_count(self, count: int) -> None:
+            raise AssertionError("must never reconcile")
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: _NotifySpy()
+    app.dependency_overrides[get_semaphore_dependency] = lambda: _ExplodingSemaphore()
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None, status="ERROR"),
+    )
+
+    assert resp.status_code == 200
+    job = await _get_job(sessionmaker, "job-1")
+    assert job.state == JOB_STATE_FAILED  # already committed before release ran
 
 
 async def test_webhook_unknown_task_increments_unknown_task_counter(

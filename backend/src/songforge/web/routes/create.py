@@ -176,6 +176,12 @@ async def create_job(
         lyrics=lyrics,
         state=JOB_STATE_QUEUED,
         webhook_url=settings.musicgpt_webhook_url,
+        # Issue #16, design D3: persisted so the watchdog's terminal-failure sweep can
+        # reconstruct the EXACT identity + ip that created this job for an accurate
+        # `RateLimiter.refund` -- an anon create charges BOTH the cookie and ip
+        # counters, so the ip leg here is required, not redundant with `user_id`.
+        client_ip=ip,
+        is_authenticated=identity.is_authenticated,
     )
     session.add(job)
     await session.commit()

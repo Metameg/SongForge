@@ -17,6 +17,7 @@ from typing import Literal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -199,6 +200,30 @@ class Job(Base):
     # ingest. `available_at` (already defined above) is reused as-is for ingest's
     # requeue backoff (the job's `state` alone disambiguates which stage it belongs to).
     ingest_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # Failure-recovery bookkeeping (issue #16, design D2/D3): `client_ip` and
+    # `is_authenticated` are persisted at create time (`web/routes/create.py`) so the
+    # watchdog's terminal-failure sweep can reconstruct the EXACT `Identity` + ip that
+    # created this job for an accurate `RateLimiter.refund` -- an anon create charges
+    # BOTH the cookie (`user_id`, already stored) and the IP counters, so without the
+    # IP leg here the refund would be incomplete. `is_authenticated` is always `False`
+    # today (no accounts system yet) but is stored so the refund stays correct once
+    # accounts land. Both nullable/defaulted so existing rows and every pre-#16 test
+    # that constructs a `Job` without them are unaffected.
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_authenticated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
+    # Row-claim guard for the terminal-failure refund+notify sweep (issue #16, design
+    # D2): NULL means a FAILED row still needs `RateLimiter.refund` + the per-user
+    # `job-failed` notification; stamped by `jobs.watchdog.sweep_terminal_failures`
+    # once both have run, so a re-claim of an already-handled FAILED row
+    # (`claim_terminal_failure_job`'s `WHERE failure_handled_at IS NULL`) is a no-op --
+    # never a second refund, never a second notification.
+    failure_handled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

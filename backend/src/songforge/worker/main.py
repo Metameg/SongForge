@@ -17,6 +17,7 @@ from songforge.worker.dispatch import run_dispatch
 from songforge.worker.health import touch_heartbeat
 from songforge.worker.ingest import run_ingest
 from songforge.worker.radio_coordinator import run_radio_coordinator
+from songforge.worker.watchdog import run_watchdog
 
 log = get_logger(__name__)
 
@@ -48,9 +49,10 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
         finished audio (refreshing an expired URL via by-id lookup when needed),
         upload to R2, and land the job at READY with a playable Song row (issue
         #13, criteria #2/#3/#4). Row-claimable like dispatch, not leader-elected.
-
-    Later tickets add, concurrently supervised alongside these:
       * watchdog  — leaderless recovery sweep; every side-effect is row-claimed first
+        (issue #16, criteria A1-A5): polls overdue WAITING_FOR_WEBHOOK jobs, requeues
+        crashed-mid-submit jobs, nudges/escalates stalled INGEST_PENDING jobs, and
+        centralizes the terminal-failure refund + per-user notify.
     """
     log.info("worker_started", environment=settings.environment)
     await asyncio.gather(
@@ -58,6 +60,7 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
         run_radio_coordinator(settings, stop),
         run_dispatch(settings, stop),
         run_ingest(settings, stop),
+        run_watchdog(settings, stop),
     )
     log.info("worker_stopped")
 

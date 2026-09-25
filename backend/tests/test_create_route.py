@@ -489,6 +489,33 @@ async def test_enforce_rate_limits_false_never_blocks_and_bypasses_bot_check(
     assert len(rows) == 5
 
 
+
+# ── Persisted identity for the refund seam (issue #16, design D3) ────────────────
+#
+# The watchdog's terminal-failure sweep needs the EXACT `client_ip`/`is_authenticated`
+# that created a job to reconstruct an accurate `RateLimiter.refund` call -- an anon
+# create charges BOTH the cookie AND the IP counters, but the job row previously only
+# stored `user_id`. `Job.client_ip`/`Job.is_authenticated` exist now (nullable/
+# defaulted, see `models.py`), but `create_job` doesn't set them yet -- RED.
+
+
+async def test_create_persists_client_ip_and_is_authenticated_for_the_refund_seam(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        create_route, "client_ip", lambda request, settings: "203.0.113.9"
+    )
+    events: list[str] = []
+    client, _ = _build_client(sessionmaker, events)
+
+    resp = client.post("/create", json={"prompt": "a song for the watchdog"})
+
+    assert resp.status_code == 200
+    rows = await _job_rows(sessionmaker)
+    assert rows[0].client_ip == "203.0.113.9"
+    assert rows[0].is_authenticated is False
+
+
 @pytest.mark.parametrize("environment", ["staging", "prod"])
 async def test_identity_cookie_has_secure_flag_outside_local(
     sessionmaker: async_sessionmaker[AsyncSession],
