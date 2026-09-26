@@ -17,7 +17,7 @@
       "id": 1,
       "title": "Jobs by state",
       "type": "timeseries",
-      "description": "songforge_jobs_in_state{state} -- point-in-time job counts per pipeline state (QUEUED, SUBMITTING, WAITING_FOR_WEBHOOK, INGEST_PENDING, READY, FAILED), scraped from Postgres by the PipelineCollector at every /metrics scrape.",
+      "description": "songforge_jobs_in_state{state} -- point-in-time job counts per pipeline state (QUEUED, SUBMITTING, WAITING_FOR_WEBHOOK, INGEST_PENDING, READY, FAILED), scraped from Postgres by metrics_pipeline's scrape-time refresh at every /metrics scrape.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
@@ -35,7 +35,7 @@
       "id": 2,
       "title": "Generation-slot utilization",
       "type": "timeseries",
-      "description": "songforge_generation_slots_in_use{scope} against songforge_generation_slots_capacity{scope=\"global\"} -- how full the global generation semaphore is (only \"global\" has a meaningful capacity; \"per_user_total\" is a sum across however many users currently hold a slot).",
+      "description": "songforge_generation_slots_in_use{scope} against songforge_generation_slots_capacity{scope=\"global\"} -- how full the global generation semaphore is (only scope=\"global\" has a meaningful capacity; scope=\"user\" is a sum across however many users currently hold a slot).",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {

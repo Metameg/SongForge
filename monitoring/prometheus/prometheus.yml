@@ -13,8 +13,9 @@ global:
 
 scrape_configs:
   # The SongForge web app's own /metrics endpoint -- the REGISTRY in
-  # backend/src/songforge/metrics.py, including the PipelineCollector's
-  # pull-based jobs-by-state / semaphore-utilization gauges.
+  # backend/src/songforge/metrics.py, including the jobs-by-state / semaphore-
+  # utilization gauges refreshed at scrape time by
+  # backend/src/songforge/metrics_pipeline.py.
   - job_name: songforge_web
     static_configs:
       - targets: ["web:8000"]
