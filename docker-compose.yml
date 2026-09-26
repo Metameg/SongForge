@@ -208,6 +208,65 @@ services:
       retries: 10
       start_period: 20s
 
+  # ── Observability (issue #18, AC5) ──────────────────────────────────────────────
+  # All four services below are gated behind `profiles: ["monitoring"]`, so a plain
+  # `docker compose up` (the existing default workflow) is completely unaffected.
+  # Bring them up with `docker compose --profile monitoring up`. See
+  # monitoring/README.md for the local/staging/prod env split this profile covers
+  # (local only -- staging/prod use a different, documented topology).
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-59090}:9090"
+    depends_on:
+      web:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards/songforge:ro
+    ports:
+      - "${GRAFANA_HOST_PORT:-59091}:3000"
+    depends_on:
+      - prometheus
+
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    profiles: ["monitoring"]
+    environment:
+      # Reuses the same POSTGRES_* credentials the `postgres` service already uses
+      # (x-backend-env) -- no second set of credentials introduced.
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}?sslmode=disable
+    ports:
+      - "${POSTGRES_EXPORTER_HOST_PORT:-59187}:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    profiles: ["monitoring"]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    ports:
+      - "${REDIS_EXPORTER_HOST_PORT:-59121}:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:

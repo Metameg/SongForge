@@ -1,0 +1,17 @@
+# Grafana dashboard provisioning (issue #18, AC5) -- auto-loads every dashboard
+# JSON under monitoring/grafana/dashboards/ (pipeline.json, capacity-thesis.json)
+# on container start. updateIntervalSeconds lets an edited dashboard file be
+# picked up without restarting Grafana, useful mid load-test session.
+
+apiVersion: 1
+
+providers:
+  - name: songforge
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/songforge
+      foldersFromFilesStructure: false

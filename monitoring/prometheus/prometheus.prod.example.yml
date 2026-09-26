@@ -1,0 +1,27 @@
+# Prod scrape-and-forward TEMPLATE (issue #18, AC5) -- NOT used by docker-compose.yml,
+# NOT deployed anywhere by this repo. Prod has no self-hosted Prometheus/Grafana; a
+# lightweight agent (Prometheus in remote_write-only mode, or Grafana Agent) runs
+# alongside the prod `web` instance(s), scrapes their local /metrics, and forwards
+# samples to Grafana Cloud's free tier via remote_write. Copy this file, fill in the
+# two placeholders from your Grafana Cloud stack's "Connection details" > Prometheus
+# page, and set it as the agent's config -- NEVER commit the filled-in credentials.
+#
+# See monitoring/README.md for the full local/staging/prod env split.
+
+global:
+  # Conservative prod interval -- this is NOT a load-test scrape config.
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: songforge_web
+    static_configs:
+      # One target per prod web instance (or a service-discovery mechanism
+      # appropriate to the deploy platform, e.g. Railway's internal DNS).
+      - targets: ["localhost:8000"]
+
+remote_write:
+  - url: "${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}"
+    basic_auth:
+      username: "${GRAFANA_CLOUD_PROMETHEUS_USERNAME}"
+      password: "${GRAFANA_CLOUD_API_KEY}"
