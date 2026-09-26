@@ -57,6 +57,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import Settings
+from songforge.correlation import bind_correlation_id
 from songforge.jobs.generation_client import (
     GenerationClient,
     GenerationRateLimited,
@@ -289,75 +290,82 @@ async def ingest_claimed_job(
     uncaught exception here would permanently head-of-line-block every ingest job
     behind this one, on every worker instance (row-claimable, not leader-elected),
     until someone manually fixes the row.
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    ``correlation_id`` re-bound (reset on exit) -- see
+    ``jobs.dispatch.dispatch_claimed_job``'s matching docstring note.
     """
-    if not job.conversion_id_1:
-        # Data-integrity guard: WAITING_FOR_WEBHOOK -> INGEST_PENDING should never
-        # happen without a non-empty conversion_id_1 (dispatch sets it before that
-        # state), but this must never crash the ingest loop if it somehow does.
-        # Falsiness (not `is None`) is deliberate -- quality report MED finding: an
-        # empty-string conversion_id_1 must be rejected too, or it would sail through
-        # as a "valid" id (`Song(id="")`, key `audio/.mp3`).
-        job.state = JOB_STATE_FAILED
-        ingest_failed_total.inc()
-        log.error("ingest_missing_conversion_id", job_id=job.job_id)
-        return
-
-    song_id = job.conversion_id_1
-    key = audio_key(song_id)
-
-    try:
-        # Offloaded via `asyncio.to_thread` (quality report MED finding): `storage`
-        # wraps a synchronous boto3 client, and calling it directly here would block
-        # this coroutine's event loop -- shared with the heartbeat and radio-
-        # coordinator clock in `worker/main.py`'s supervised `gather` -- for the
-        # duration of the S3 round trip.
-        if await asyncio.to_thread(storage.exists, key):
-            # Self-heal: the object is already in R2 (a prior claim uploaded it but
-            # crashed before committing READY) -- skip the download/upload entirely.
-            await _finalize_ready(session, job, song_id, key)
-            ingest_completed_total.inc()
-            log.info("ingest_completed_idempotent", job_id=job.job_id, song_id=song_id)
-            return
-
-        if job.audio_url is None or job.task_id is None:
-            # Data-integrity guard mirroring the conversion_id_1 one above: an
-            # INGEST_PENDING job should always have both set (the webhook route sets
-            # audio_url before this state; dispatch sets task_id alongside
-            # conversion_id_1). Previously enforced by a bare `assert` in
-            # `_download_with_refresh` (quality report HIGH finding) -- stripped
-            # under `python -O`, and would have raised uncaught rather than failing
-            # this one job gracefully.
+    with bind_correlation_id(job.correlation_id):
+        if not job.conversion_id_1:
+            # Data-integrity guard: WAITING_FOR_WEBHOOK -> INGEST_PENDING should never
+            # happen without a non-empty conversion_id_1 (dispatch sets it before that
+            # state), but this must never crash the ingest loop if it somehow does.
+            # Falsiness (not `is None`) is deliberate -- quality report MED finding: an
+            # empty-string conversion_id_1 must be rejected too, or it would sail through
+            # as a "valid" id (`Song(id="")`, key `audio/.mp3`).
             job.state = JOB_STATE_FAILED
             ingest_failed_total.inc()
-            log.error("ingest_missing_audio_url_or_task_id", job_id=job.job_id)
+            log.error("ingest_missing_conversion_id", job_id=job.job_id)
             return
 
-        audio_bytes = await _download_with_refresh(
-            job,
-            downloader,
-            generation_client,
-            audio_url=job.audio_url,
-            task_id=job.task_id,
-        )
+        song_id = job.conversion_id_1
+        key = audio_key(song_id)
 
-        if audio_bytes is None:
+        try:
+            # Offloaded via `asyncio.to_thread` (quality report MED finding): `storage`
+            # wraps a synchronous boto3 client, and calling it directly here would block
+            # this coroutine's event loop -- shared with the heartbeat and radio-
+            # coordinator clock in `worker/main.py`'s supervised `gather` -- for the
+            # duration of the S3 round trip.
+            if await asyncio.to_thread(storage.exists, key):
+                # Self-heal: the object is already in R2 (a prior claim uploaded it but
+                # crashed before committing READY) -- skip the download/upload entirely.
+                await _finalize_ready(session, job, song_id, key)
+                ingest_completed_total.inc()
+                log.info(
+                    "ingest_completed_idempotent", job_id=job.job_id, song_id=song_id
+                )
+                return
+
+            if job.audio_url is None or job.task_id is None:
+                # Data-integrity guard mirroring the conversion_id_1 one above: an
+                # INGEST_PENDING job should always have both set (the webhook route sets
+                # audio_url before this state; dispatch sets task_id alongside
+                # conversion_id_1). Previously enforced by a bare `assert` in
+                # `_download_with_refresh` (quality report HIGH finding) -- stripped
+                # under `python -O`, and would have raised uncaught rather than failing
+                # this one job gracefully.
+                job.state = JOB_STATE_FAILED
+                ingest_failed_total.inc()
+                log.error("ingest_missing_audio_url_or_task_id", job_id=job.job_id)
+                return
+
+            audio_bytes = await _download_with_refresh(
+                job,
+                downloader,
+                generation_client,
+                audio_url=job.audio_url,
+                task_id=job.task_id,
+            )
+
+            if audio_bytes is None:
+                _requeue_or_fail(job, settings)
+                return
+
+            await asyncio.to_thread(storage.put, key, audio_bytes)
+            await _finalize_ready(session, job, song_id, key)
+            ingest_completed_total.inc()
+            log.info("ingest_completed", job_id=job.job_id, song_id=song_id)
+        except Exception:
+            # Catch-all: see the module/function docstrings above. Roll back any partial
+            # flush (e.g. a Song insert rejected by a column constraint -- security
+            # report MED "poison-pill" finding: an oversized `title` must count toward
+            # the attempt cap, not retry forever) so the session is clean for the
+            # caller's own `session.commit()`, then bound the retry exactly like the
+            # download-failure path above.
+            log.exception("ingest_unmapped_error", job_id=job.job_id)
+            await session.rollback()
             _requeue_or_fail(job, settings)
-            return
-
-        await asyncio.to_thread(storage.put, key, audio_bytes)
-        await _finalize_ready(session, job, song_id, key)
-        ingest_completed_total.inc()
-        log.info("ingest_completed", job_id=job.job_id, song_id=song_id)
-    except Exception:
-        # Catch-all: see the module/function docstrings above. Roll back any partial
-        # flush (e.g. a Song insert rejected by a column constraint -- security
-        # report MED "poison-pill" finding: an oversized `title` must count toward
-        # the attempt cap, not retry forever) so the session is clean for the
-        # caller's own `session.commit()`, then bound the retry exactly like the
-        # download-failure path above.
-        log.exception("ingest_unmapped_error", job_id=job.job_id)
-        await session.rollback()
-        _requeue_or_fail(job, settings)
 
 
 async def claim_next_ingest_job(session: AsyncSession) -> Job | None:

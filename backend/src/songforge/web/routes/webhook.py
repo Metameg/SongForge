@@ -31,6 +31,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import get_settings
+from songforge.correlation import bind_correlation_id
 from songforge.db import get_sessionmaker
 from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
 from songforge.logging_setup import get_logger
@@ -158,6 +159,15 @@ async def receive_webhook(
     model) before this endpoint is genuinely public. The audio URL this handler
     records is trusted downstream at the actual network fetch -- see the matching
     comment at the download site in ``songforge.jobs.ingest.HttpAudioDownloader``.
+
+    Issue #18, criterion #1: once the job is found, the remainder of this handler
+    runs with the JOB's own submit-time ``correlation_id`` re-bound -- deliberately
+    overriding this request's own ``CorrelationIdMiddleware``-minted id, since the
+    point of the trace is the song's original submit id, not the webhook delivery's
+    own transient request id. This is log-only: ``CorrelationIdMiddleware.dispatch``
+    already captured its own ``cid`` into a local variable before calling this route
+    and echoes THAT variable on the response header, not a fresh contextvar read, so
+    overriding the binding here never changes the echoed ``X-Correlation-ID``.
     """
     settings = get_settings()
     # `.with_for_update()` (LOW/MED finding): without a row lock, two genuinely
@@ -180,37 +190,42 @@ async def receive_webhook(
         log.info("webhook_unknown_task_id", task_id=body.task_id)
         return WebhookResponse()
 
-    if job.state != JOB_STATE_WAITING_FOR_WEBHOOK:
-        # Already ingested/failed (or, defensively, not yet dispatched) -- a
-        # duplicate or late-arriving webhook. PRD #6 idempotency: never re-run the
-        # transition or NOTIFY again.
-        webhooks_received_total.labels(outcome="duplicate_ignored").inc()
-        log.info("webhook_duplicate_ignored", task_id=body.task_id, state=job.state)
-        return WebhookResponse()
+    with bind_correlation_id(job.correlation_id):
+        if job.state != JOB_STATE_WAITING_FOR_WEBHOOK:
+            # Already ingested/failed (or, defensively, not yet dispatched) -- a
+            # duplicate or late-arriving webhook. PRD #6 idempotency: never re-run
+            # the transition or NOTIFY again.
+            webhooks_received_total.labels(outcome="duplicate_ignored").inc()
+            log.info(
+                "webhook_duplicate_ignored", task_id=body.task_id, state=job.state
+            )
+            return WebhookResponse()
 
-    if body.status is not None or body.conversion_path is None:
-        # A declared failure, or a success-shaped payload missing the one field
-        # ingest needs -- either way unrecoverable without a real audio URL. Quota
-        # refund + user SSE notify on failure is a LATER ticket (see
-        # `.orchestrator/CONTEXT.md` OUT-of-scope); this only flips the state.
-        job.state = JOB_STATE_FAILED
+        if body.status is not None or body.conversion_path is None:
+            # A declared failure, or a success-shaped payload missing the one field
+            # ingest needs -- either way unrecoverable without a real audio URL.
+            # Quota refund + user SSE notify on failure is a LATER ticket (see
+            # `.orchestrator/CONTEXT.md` OUT-of-scope); this only flips the state.
+            job.state = JOB_STATE_FAILED
+            await session.commit()
+            webhooks_received_total.labels(outcome="failed").inc()
+            log.info(
+                "webhook_marked_failed", task_id=body.task_id, status=body.status
+            )
+            # Issue #16 slot-leak fix: the job leaves WAITING_FOR_WEBHOOK (an active
+            # state) here without ever reaching ingest -- release its generation-
+            # semaphore slot, post-commit, best-effort.
+            await _safe_release_semaphore(semaphore, job.user_id)
+            return WebhookResponse()
+
+        job.audio_url = body.conversion_path
+        job.audio_duration = body.conversion_duration
+        job.title = body.title
+        job.state = JOB_STATE_INGEST_PENDING
         await session.commit()
-        webhooks_received_total.labels(outcome="failed").inc()
-        log.info("webhook_marked_failed", task_id=body.task_id, status=body.status)
-        # Issue #16 slot-leak fix: the job leaves WAITING_FOR_WEBHOOK (an active
-        # state) here without ever reaching ingest -- release its generation-
-        # semaphore slot, post-commit, best-effort.
-        await _safe_release_semaphore(semaphore, job.user_id)
+        webhooks_received_total.labels(outcome="ingest_pending").inc()
+        log.info("webhook_ingest_pending", task_id=body.task_id, job_id=job.job_id)
+
+        await _safe_notify(notify, settings.ingest_channel, job.job_id)
+
         return WebhookResponse()
-
-    job.audio_url = body.conversion_path
-    job.audio_duration = body.conversion_duration
-    job.title = body.title
-    job.state = JOB_STATE_INGEST_PENDING
-    await session.commit()
-    webhooks_received_total.labels(outcome="ingest_pending").inc()
-    log.info("webhook_ingest_pending", task_id=body.task_id, job_id=job.job_id)
-
-    await _safe_notify(notify, settings.ingest_channel, job.job_id)
-
-    return WebhookResponse()

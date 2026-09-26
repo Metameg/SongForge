@@ -72,6 +72,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import Settings
+from songforge.correlation import bind_correlation_id
 from songforge.jobs.generation_client import (
     GENERATION_STATUS_COMPLETED,
     GENERATION_STATUS_ERROR,
@@ -138,53 +139,63 @@ async def sweep_waiting_overdue(
 
     Mutates `job` in place; the caller (`worker/watchdog.py`) commits, then fires the
     returned intent (if any) AFTER that commit succeeds.
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    `correlation_id` re-bound (reset on exit) -- see
+    `jobs.dispatch.dispatch_claimed_job`'s matching docstring note.
     """
-    if job.task_id is None:
-        # Data-integrity guard (mirrors `jobs.ingest`'s guards): dispatch always sets
-        # `task_id` before a job reaches WAITING_FOR_WEBHOOK, but this must never
-        # crash the watchdog loop if it somehow doesn't.
-        log.error("watchdog_waiting_missing_task_id", job_id=job.job_id)
-        return None
+    with bind_correlation_id(job.correlation_id):
+        if job.task_id is None:
+            # Data-integrity guard (mirrors `jobs.ingest`'s guards): dispatch always
+            # sets `task_id` before a job reaches WAITING_FOR_WEBHOOK, but this must
+            # never crash the watchdog loop if it somehow doesn't.
+            log.error("watchdog_waiting_missing_task_id", job_id=job.job_id)
+            return None
 
-    try:
-        status = await client.get_status_by_id(job.task_id)
-    except (GenerationRateLimited, GenerationTransientError, GenerationRejected) as exc:
-        # The generation API's `/byId` endpoint is itself unavailable/erroring. This
-        # must NEVER propagate: an uncaught raise here would abort the whole watchdog
-        # tick (see module docstring), starving the other three sweeps -- including
-        # the terminal-failure refund -- for a full poll interval, precisely during
-        # the kind of outage the watchdog exists to survive. Leave WAITING; the next
-        # tick tries again.
-        log.warning(
-            "watchdog_waiting_poll_failed",
-            job_id=job.job_id,
-            task_id=job.task_id,
-            error_type=type(exc).__name__,
-        )
-        return None
+        try:
+            status = await client.get_status_by_id(job.task_id)
+        except (
+            GenerationRateLimited,
+            GenerationTransientError,
+            GenerationRejected,
+        ) as exc:
+            # The generation API's `/byId` endpoint is itself unavailable/erroring.
+            # This must NEVER propagate: an uncaught raise here would abort the whole
+            # watchdog tick (see module docstring), starving the other three sweeps --
+            # including the terminal-failure refund -- for a full poll interval,
+            # precisely during the kind of outage the watchdog exists to survive.
+            # Leave WAITING; the next tick tries again.
+            log.warning(
+                "watchdog_waiting_poll_failed",
+                job_id=job.job_id,
+                task_id=job.task_id,
+                error_type=type(exc).__name__,
+            )
+            return None
 
-    if status.status == GENERATION_STATUS_COMPLETED:
-        job.audio_url = status.audio_url
-        job.audio_duration = status.duration
-        job.title = status.title
-        job.state = JOB_STATE_INGEST_PENDING
-        watchdog_recovered_total.labels(path="waiting_polled").inc()
-        log.info("watchdog_waiting_recovered", job_id=job.job_id)
-        return (settings.ingest_channel, job.job_id)
-    elif status.status in (GENERATION_STATUS_ERROR, GENERATION_STATUS_FAILED):
-        job.state = JOB_STATE_FAILED
-        watchdog_recovered_total.labels(path="waiting_polled").inc()
-        log.info(
-            "watchdog_waiting_terminal", job_id=job.job_id, status=status.status
-        )
-        return None
-    else:
-        # IN_QUEUE / still generating -- left WAITING. Deliberately not counted as
-        # "recovered" (nothing was recovered) and `updated_at` is not bumped (see
-        # `claim_waiting_overdue_job`'s docstring: bumping it would push the next
-        # overdue check out a full `eta` window, which is wrong once already overdue).
-        log.debug("watchdog_waiting_still_pending", job_id=job.job_id)
-        return None
+        if status.status == GENERATION_STATUS_COMPLETED:
+            job.audio_url = status.audio_url
+            job.audio_duration = status.duration
+            job.title = status.title
+            job.state = JOB_STATE_INGEST_PENDING
+            watchdog_recovered_total.labels(path="waiting_polled").inc()
+            log.info("watchdog_waiting_recovered", job_id=job.job_id)
+            return (settings.ingest_channel, job.job_id)
+        elif status.status in (GENERATION_STATUS_ERROR, GENERATION_STATUS_FAILED):
+            job.state = JOB_STATE_FAILED
+            watchdog_recovered_total.labels(path="waiting_polled").inc()
+            log.info(
+                "watchdog_waiting_terminal", job_id=job.job_id, status=status.status
+            )
+            return None
+        else:
+            # IN_QUEUE / still generating -- left WAITING. Deliberately not counted as
+            # "recovered" (nothing was recovered) and `updated_at` is not bumped (see
+            # `claim_waiting_overdue_job`'s docstring: bumping it would push the next
+            # overdue check out a full `eta` window, which is wrong once already
+            # overdue).
+            log.debug("watchdog_waiting_still_pending", job_id=job.job_id)
+            return None
 
 
 # ── Decision: sweep_submitting_stuck (A2/A3) ──────────────────────────────────────
@@ -204,13 +215,19 @@ async def sweep_submitting_stuck(
     Mutates `job` in place; the caller commits, then fires the returned intent AFTER
     that commit succeeds. Unlike `sweep_waiting_overdue`, a claimed row here is
     unconditionally requeued, so a `NotifyIntent` is always returned (never `None`).
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    `correlation_id` re-bound (reset on exit).
     """
-    job.state = JOB_STATE_QUEUED
-    job.attempts += 1
-    job.available_at = datetime.now(timezone.utc)
-    watchdog_recovered_total.labels(path="submitting_recalled").inc()
-    log.info("watchdog_submitting_recalled", job_id=job.job_id, attempts=job.attempts)
-    return (settings.jobs_new_channel, job.job_id)
+    with bind_correlation_id(job.correlation_id):
+        job.state = JOB_STATE_QUEUED
+        job.attempts += 1
+        job.available_at = datetime.now(timezone.utc)
+        watchdog_recovered_total.labels(path="submitting_recalled").inc()
+        log.info(
+            "watchdog_submitting_recalled", job_id=job.job_id, attempts=job.attempts
+        )
+        return (settings.jobs_new_channel, job.job_id)
 
 
 # ── Decision: sweep_ingest_overdue (A2 backstop) ──────────────────────────────────
@@ -228,19 +245,23 @@ async def sweep_ingest_overdue(
     stalled/crashed claim that never got that far.
 
     Mutates `job` in place; the caller commits.
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    `correlation_id` re-bound (reset on exit).
     """
-    if job.ingest_attempts >= settings.ingest_max_attempts:
-        job.state = JOB_STATE_FAILED
-        watchdog_recovered_total.labels(path="ingest_escalated_failed").inc()
-        log.info(
-            "watchdog_ingest_escalated_failed",
-            job_id=job.job_id,
-            ingest_attempts=job.ingest_attempts,
-        )
-    else:
-        job.available_at = datetime.now(timezone.utc)
-        watchdog_recovered_total.labels(path="ingest_nudged").inc()
-        log.info("watchdog_ingest_nudged", job_id=job.job_id)
+    with bind_correlation_id(job.correlation_id):
+        if job.ingest_attempts >= settings.ingest_max_attempts:
+            job.state = JOB_STATE_FAILED
+            watchdog_recovered_total.labels(path="ingest_escalated_failed").inc()
+            log.info(
+                "watchdog_ingest_escalated_failed",
+                job_id=job.job_id,
+                ingest_attempts=job.ingest_attempts,
+            )
+        else:
+            job.available_at = datetime.now(timezone.utc)
+            watchdog_recovered_total.labels(path="ingest_nudged").inc()
+            log.info("watchdog_ingest_nudged", job_id=job.job_id)
 
 
 # ── Decision: sweep_terminal_failures (A4) ────────────────────────────────────────
@@ -283,32 +304,37 @@ async def sweep_terminal_failures(job: Job) -> TerminalFailureIntent | None:
     the farmable-gap this closes.
 
     Mutates `job` in place; the caller commits, then fires the returned intent.
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    `correlation_id` re-bound (reset on exit).
     """
-    if job.failure_handled_at is not None:
-        return None
+    with bind_correlation_id(job.correlation_id):
+        if job.failure_handled_at is not None:
+            return None
 
-    if not job.client_ip:
-        # F5: a pre-migration-0006 row (or any row created before `client_ip` was
-        # persisted) refunds only the cookie leg via a decoy `ip=""` key -- silently
-        # incomplete otherwise. Surfacing it here keeps that gap observable rather
-        # than absorbed into an unremarkable "refunded" log line.
-        log.warning("watchdog_refund_missing_client_ip", job_id=job.job_id)
+        if not job.client_ip:
+            # F5: a pre-migration-0006 row (or any row created before `client_ip` was
+            # persisted) refunds only the cookie leg via a decoy `ip=""` key --
+            # silently incomplete otherwise. Surfacing it here keeps that gap
+            # observable rather than absorbed into an unremarkable "refunded" log
+            # line.
+            log.warning("watchdog_refund_missing_client_ip", job_id=job.job_id)
 
-    identity = Identity(
-        user_id=job.user_id, is_authenticated=job.is_authenticated, minted=False
-    )
-    day = _as_aware_utc(job.created_at).date().isoformat()
+        identity = Identity(
+            user_id=job.user_id, is_authenticated=job.is_authenticated, minted=False
+        )
+        day = _as_aware_utc(job.created_at).date().isoformat()
 
-    job.failure_handled_at = datetime.now(timezone.utc)
-    log.info("watchdog_terminal_failure_handled", job_id=job.job_id)
+        job.failure_handled_at = datetime.now(timezone.utc)
+        log.info("watchdog_terminal_failure_handled", job_id=job.job_id)
 
-    return TerminalFailureIntent(
-        identity=identity,
-        ip=job.client_ip or "",
-        day=day,
-        user_id=job.user_id,
-        job_id=job.job_id,
-    )
+        return TerminalFailureIntent(
+            identity=identity,
+            ip=job.client_ip or "",
+            day=day,
+            user_id=job.user_id,
+            job_id=job.job_id,
+        )
 
 
 # ── Claims: FOR UPDATE SKIP LOCKED row-claim queries (A1) ─────────────────────────

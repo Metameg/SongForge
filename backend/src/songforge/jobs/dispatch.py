@@ -36,6 +36,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import Settings
+from songforge.correlation import bind_correlation_id
 from songforge.jobs.generation_client import (
     GenerationClient,
     GenerationRateLimited,
@@ -119,79 +120,87 @@ async def dispatch_claimed_job(
     acquired and the API was called (regardless of outcome), ``False`` if no slot was
     available — the job is left for the caller to leave QUEUED without ever having
     called the API (criterion #3: "no slot -> don't claim/hold").
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    ``correlation_id`` re-bound (reset on exit, so a drain loop handling many jobs
+    back-to-back never leaks one job's id into the next's log lines) -- this is what
+    makes the pipeline trace survive the worker hop.
     """
-    notify = notify_release or _noop_notify_release
+    with bind_correlation_id(job.correlation_id):
+        notify = notify_release or _noop_notify_release
 
-    acquired = await semaphore.acquire(job.user_id)
-    if not acquired:
-        job.state = JOB_STATE_QUEUED
-        log.info("dispatch_no_slot", job_id=job.job_id, user_id=job.user_id)
-        # Accepted v1 trade-off (PRD v1-FIFO, spec #61-63): strict seq-order FIFO
-        # claiming (criterion #2) means a per-user-capped job at the head of the
-        # queue can bounce here and stop this drain pass (see `_drain_ready_jobs`
-        # in `worker/dispatch.py`) before trying the next, non-saturated user's job
-        # -- even with spare global capacity. Deliberate, not a bug: a fairness/
-        # skip-ahead pass is a later issue's concern (quality report MED finding).
-        return False
+        acquired = await semaphore.acquire(job.user_id)
+        if not acquired:
+            job.state = JOB_STATE_QUEUED
+            log.info("dispatch_no_slot", job_id=job.job_id, user_id=job.user_id)
+            # Accepted v1 trade-off (PRD v1-FIFO, spec #61-63): strict seq-order FIFO
+            # claiming (criterion #2) means a per-user-capped job at the head of the
+            # queue can bounce here and stop this drain pass (see `_drain_ready_jobs`
+            # in `worker/dispatch.py`) before trying the next, non-saturated user's job
+            # -- even with spare global capacity. Deliberate, not a bug: a fairness/
+            # skip-ahead pass is a later issue's concern (quality report MED finding).
+            return False
 
-    try:
-        handles = await client.create(
-            prompt=job.prompt,
-            lyrics=job.lyrics,
-            webhook_url=job.webhook_url or settings.musicgpt_webhook_url,
-        )
-    except GenerationRateLimited:
-        _apply_backoff(job, settings)
-        await _safe_release(semaphore, job.user_id)
-        await _safe_reconcile(semaphore, count_active_jobs)
-        await _safe_notify(notify, job.job_id)
-        jobs_requeued_total.labels(reason="rate_limited").inc()
-        log.info(
-            "dispatch_rate_limited_requeued", job_id=job.job_id, attempts=job.attempts
-        )
-        return True
-    except GenerationRejected as exc:
-        job.state = JOB_STATE_FAILED
-        await _safe_release(semaphore, job.user_id)
-        await _safe_notify(notify, job.job_id)
-        jobs_failed_total.inc()
-        log.info(
-            "dispatch_failed_terminal", job_id=job.job_id, status_code=exc.status_code
-        )
-        return True
-    except GenerationTransientError:
-        _apply_backoff(job, settings)
-        await _safe_release(semaphore, job.user_id)
-        await _safe_notify(notify, job.job_id)
-        jobs_requeued_total.labels(reason="transient").inc()
-        log.info("dispatch_transient_requeued", job_id=job.job_id, attempts=job.attempts)
-        return True
-    except Exception:
-        # Catch-all (quality report HIGH finding): anything unmapped here -- a bug,
-        # or some other surprise `client.create()` didn't turn into one of the three
-        # typed exceptions above -- must be handled at least as safely as the
-        # 5xx/timeout branch: release the slot, requeue with backoff, notify. The
-        # job must never be left stranded in SUBMITTING, and the slot must never
-        # leak (a malformed-200 body specifically is now handled upstream in
-        # `generation_client.HttpGenerationClient.create`, which raises
-        # `GenerationTransientError` for that case -- this branch is the backstop
-        # for anything else).
-        log.exception("dispatch_unmapped_error", job_id=job.job_id)
-        _apply_backoff(job, settings)
-        await _safe_release(semaphore, job.user_id)
-        await _safe_notify(notify, job.job_id)
-        jobs_requeued_total.labels(reason="unmapped_error").inc()
-        return True
+        try:
+            handles = await client.create(
+                prompt=job.prompt,
+                lyrics=job.lyrics,
+                webhook_url=job.webhook_url or settings.musicgpt_webhook_url,
+            )
+        except GenerationRateLimited:
+            _apply_backoff(job, settings)
+            await _safe_release(semaphore, job.user_id)
+            await _safe_reconcile(semaphore, count_active_jobs)
+            await _safe_notify(notify, job.job_id)
+            jobs_requeued_total.labels(reason="rate_limited").inc()
+            log.info(
+                "dispatch_rate_limited_requeued", job_id=job.job_id, attempts=job.attempts
+            )
+            return True
+        except GenerationRejected as exc:
+            job.state = JOB_STATE_FAILED
+            await _safe_release(semaphore, job.user_id)
+            await _safe_notify(notify, job.job_id)
+            jobs_failed_total.inc()
+            log.info(
+                "dispatch_failed_terminal", job_id=job.job_id, status_code=exc.status_code
+            )
+            return True
+        except GenerationTransientError:
+            _apply_backoff(job, settings)
+            await _safe_release(semaphore, job.user_id)
+            await _safe_notify(notify, job.job_id)
+            jobs_requeued_total.labels(reason="transient").inc()
+            log.info(
+                "dispatch_transient_requeued", job_id=job.job_id, attempts=job.attempts
+            )
+            return True
+        except Exception:
+            # Catch-all (quality report HIGH finding): anything unmapped here -- a bug,
+            # or some other surprise `client.create()` didn't turn into one of the three
+            # typed exceptions above -- must be handled at least as safely as the
+            # 5xx/timeout branch: release the slot, requeue with backoff, notify. The
+            # job must never be left stranded in SUBMITTING, and the slot must never
+            # leak (a malformed-200 body specifically is now handled upstream in
+            # `generation_client.HttpGenerationClient.create`, which raises
+            # `GenerationTransientError` for that case -- this branch is the backstop
+            # for anything else).
+            log.exception("dispatch_unmapped_error", job_id=job.job_id)
+            _apply_backoff(job, settings)
+            await _safe_release(semaphore, job.user_id)
+            await _safe_notify(notify, job.job_id)
+            jobs_requeued_total.labels(reason="unmapped_error").inc()
+            return True
 
-    job.state = JOB_STATE_WAITING_FOR_WEBHOOK
-    job.task_id = handles.task_id
-    job.conversion_id_1 = handles.conversion_id_1
-    job.conversion_id_2 = handles.conversion_id_2
-    job.eta = handles.eta
-    job.credit_estimate = handles.credit_estimate
-    jobs_dispatched_total.inc()
-    log.info("dispatch_submitted", job_id=job.job_id, task_id=handles.task_id)
-    return True
+        job.state = JOB_STATE_WAITING_FOR_WEBHOOK
+        job.task_id = handles.task_id
+        job.conversion_id_1 = handles.conversion_id_1
+        job.conversion_id_2 = handles.conversion_id_2
+        job.eta = handles.eta
+        job.credit_estimate = handles.credit_estimate
+        jobs_dispatched_total.inc()
+        log.info("dispatch_submitted", job_id=job.job_id, task_id=handles.task_id)
+        return True
 
 
 def _apply_backoff(job: Job, settings: Settings) -> None:

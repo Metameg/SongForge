@@ -33,6 +33,16 @@ def configure_logging(level: str = "INFO", stream: TextIO | None = None) -> None
 
     logging.basicConfig(format="%(message)s", stream=out, level=log_level, force=True)
 
+    # httpx/httpcore log their own plain-text "HTTP Request: ..." lines at INFO via
+    # the stdlib `logging` module (not structlog) -- left at the root level's default,
+    # `basicConfig` above would propagate them straight through this same handler,
+    # breaking the "every emitted line is a JSON object" invariant this module's
+    # docstring promises (both this app's own outbound generation-API/audio-download
+    # calls, `songforge.jobs.generation_client`/`songforge.jobs.ingest`, use httpx).
+    # Silenced up to WARNING regardless of the app's own configured level.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
