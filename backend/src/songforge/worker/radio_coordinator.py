@@ -2,11 +2,15 @@
 
 Satisfies issue #8 criterion #2 (the worker advances through the static library at each
 boundary) end-to-end. Leadership is a single fixed Postgres advisory lock
-(`settings.radio_advisory_lock_key`) held on the worker's own direct DB connection (not
-the web tier's pooled one) — only the holder runs the timer. With one worker process this
-lock is acquired trivially; full failover/catch-up test coverage across multiple workers
-is a later ticket (see `.orchestrator/CONTEXT.md` DEFERRED list) — this module implements
-lock acquisition and use, not the kill-a-process lifecycle matrix.
+(`settings.radio_advisory_lock_key`) held on the worker's own dedicated, direct DB
+connection (`songforge.db.get_worker_lock_engine`, NullPool — not the web tier's pooled
+one, and not the shared `get_engine()` pool either, per PRD #74) — only the holder runs
+the timer. Full leader-election and failover semantics — automatic takeover on the
+holder's session dying, pause-tolerance (no TTL/heartbeat), the idempotent version-CAS
+safety net, state reconstruction and live-radio catch-up on election, and first-boot init
+on this same path — are issue #17's contract; see `tests/test_leader_election_integration.py`
+for the process-lifecycle failover matrix (PRD testing seam #3) and
+`tests/test_worker_lock_connection.py` for the lock connection's tuning contract.
 
 The pointer-mutation logic itself (`initialize_if_absent`/`advance`) lives in
 `songforge.radio.coordinator` and is unit-tested there against in-memory SQLite; this
@@ -25,7 +29,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from songforge.config import Settings
-from songforge.db import get_engine, get_sessionmaker
+from songforge.db import get_sessionmaker, get_worker_lock_engine
 from songforge.logging_setup import get_logger
 from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState
 from songforge.radio.coordinator import (
@@ -108,7 +112,7 @@ async def run_radio_coordinator(settings: Settings, stop: asyncio.Event) -> None
 
     while not stop.is_set():
         try:
-            engine = get_engine()
+            engine = get_worker_lock_engine()
             async with engine.connect() as lock_conn:
                 await lock_conn.execute(
                     text("SELECT pg_advisory_lock(:key)"),

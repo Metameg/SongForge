@@ -120,6 +120,11 @@ class Settings(BaseSettings):
     # ── Worker ──────────────────────────────────────────────────────────────
     worker_heartbeat_path: str = "/tmp/songforge-worker.heartbeat"  # noqa: S108
     worker_loop_interval_seconds: float = 5.0
+    # PRD #74 + issue #17: the radio leader's advisory-lock connection sets Postgres's
+    # `tcp_user_timeout` GUC to this many seconds via asyncpg `server_settings`, so a
+    # dead leader's session (and therefore its advisory lock) is detected and released
+    # promptly -- the PRD's target failover-detection window is ~10-15s.
+    worker_lock_tcp_user_timeout_seconds: float = 13.0
 
     # ── Radio (issue #8: static radio plays) ────────────────────────────────
     # Redis capped-list anti-repeat window: how many recently-played static song ids
