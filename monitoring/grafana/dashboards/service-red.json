@@ -1,0 +1,343 @@
+{
+  "id": null,
+  "uid": "songforge-service-red",
+  "title": "SongForge Service RED + USE",
+  "description": "Common production observability for SongForge: RED (Rate/Errors/Duration) for the HTTP edge and USE (Utilization/Saturation/Errors) for the Postgres and Redis datastores. Built only from metrics already collected (app /metrics + postgres_exporter + redis_exporter). Note: the app uses a dedicated Prometheus registry, so app-process CPU/memory metrics are intentionally not exposed here.",
+  "tags": [
+    "songforge",
+    "observability",
+    "red",
+    "use",
+    "issue-18"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request throughput by route",
+      "type": "timeseries",
+      "description": "RED/Rate: per-route request throughput. sum by (path)(rate(songforge_http_requests_total[1m])).",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (path) (rate(songforge_http_requests_total[1m]))",
+          "legendFormat": "{{path}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Requests by status class",
+      "type": "timeseries",
+      "description": "RED/Rate: request volume split by HTTP status code, so a rising 4xx/5xx band is visible against 2xx.",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(songforge_http_requests_total[1m]))",
+          "legendFormat": "{{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "5xx error rate (%)",
+      "type": "timeseries",
+      "description": "RED/Errors: server-error ratio. No data when there is zero traffic (0/0); a flat 0 line means requests are succeeding.",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(songforge_http_requests_total{status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(songforge_http_requests_total[5m])), 1)",
+          "legendFormat": "5xx error %",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Request latency p50 / p95 / p99",
+      "type": "timeseries",
+      "description": "RED/Duration: overall request-latency percentiles from the songforge_http_request_duration_seconds histogram.",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(songforge_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(songforge_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(songforge_http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "p99 latency by route",
+      "type": "timeseries",
+      "description": "RED/Duration: p99 broken out per route, so a single slow endpoint doesn't hide behind the aggregate.",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(songforge_http_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Postgres connections vs max",
+      "type": "timeseries",
+      "description": "USE/Utilization: total Postgres backends against the server's max_connections ceiling. Also the strongest form of the capacity thesis -- DB connections stay flat as SSE listeners rise.",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(pg_stat_database_numbackends)",
+          "legendFormat": "backends in use",
+          "refId": "A"
+        },
+        {
+          "expr": "pg_settings_max_connections",
+          "legendFormat": "max_connections",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Postgres transaction rate",
+      "type": "timeseries",
+      "description": "USE/Throughput: Postgres commit vs rollback rate. A climbing rollback line signals contention or failing transactions.",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(pg_stat_database_xact_commit[5m]))",
+          "legendFormat": "commits/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(pg_stat_database_xact_rollback[5m]))",
+          "legendFormat": "rollbacks/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Redis connected clients",
+      "type": "timeseries",
+      "description": "USE/Utilization: Redis client connections. Should stay bounded (one pub/sub subscription per app instance), not scale with listener count.",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "redis_connected_clients",
+          "legendFormat": "clients",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Redis memory used",
+      "type": "timeseries",
+      "description": "USE/Utilization: Redis resident memory.",
+      "gridPos": {
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes",
+          "legendFormat": "used",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Redis ops/sec",
+      "type": "timeseries",
+      "description": "USE/Throughput: Redis command rate.",
+      "gridPos": {
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(redis_commands_processed_total[5m])",
+          "legendFormat": "commands/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Redis keyspace hit ratio",
+      "type": "timeseries",
+      "description": "USE: Redis cache hit ratio (hits / (hits+misses)). clamp_min avoids a divide-by-zero when idle.",
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(redis_keyspace_hits_total[5m])) / clamp_min(sum(rate(redis_keyspace_hits_total[5m])) + sum(rate(redis_keyspace_misses_total[5m])), 1)",
+          "legendFormat": "hit ratio",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Scrape target health (up)",
+      "type": "timeseries",
+      "description": "Availability: Prometheus scrape health per target (1=up, 0=down) for the web app and the postgres/redis exporters.",
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "up",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
