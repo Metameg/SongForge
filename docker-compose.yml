@@ -263,7 +263,12 @@ services:
     volumes:
       - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards/songforge:ro
+      # Dashboard JSON is mounted OUTSIDE the read-only provisioning tree: nesting
+      # it under the :ro provisioning/dashboards mount makes Docker try to mkdir the
+      # child mountpoint inside a read-only fs and fail to start Grafana. The
+      # provider config (provisioning/dashboards/dashboards.yml) points its `path`
+      # here, under Grafana's own writable data dir.
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards/songforge:ro
     ports:
       # Loopback-only -- see the prometheus service's port comment above.
       - "127.0.0.1:${GRAFANA_HOST_PORT:-59091}:3000"
