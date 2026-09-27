@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 
@@ -13,6 +14,32 @@ from songforge import correlation, metrics
 from songforge.logging_setup import get_logger
 
 _log = get_logger("songforge.web.access")
+
+# `jobs.correlation_id` is `String(64)` (see `songforge.models`) -- this cap MUST
+# match that column width, or an over-length inbound header overflows the INSERT
+# (issue #18 fix-pass, security finding M2).
+_CORRELATION_ID_MAX_LEN = 64
+# Conservative allow-list (hex/uuid plus common separators). Anything else --
+# whitespace, `<>`, control characters like CRLF -- is stripped rather than
+# rejected outright, so a mostly-legal caller-supplied trace id still survives.
+_CORRELATION_ID_ILLEGAL_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_correlation_id(raw: str | None) -> str:
+    """Bound and sanitize an inbound correlation ID before it is bound or persisted.
+
+    Strips every character outside ``[A-Za-z0-9._-]`` and caps the result to
+    ``_CORRELATION_ID_MAX_LEN``, so both the log stream and the
+    ``jobs.correlation_id`` column only ever receive a validated value (issue #18
+    fix-pass: security M2 bounds the DB write, L1 covers the reflected response
+    header / log-injection surface). Falls back to a freshly minted id if the
+    header was absent, or nothing legal survives sanitization.
+    """
+    if raw is not None:
+        cleaned = _CORRELATION_ID_ILLEGAL_CHARS.sub("", raw)[:_CORRELATION_ID_MAX_LEN]
+        if cleaned:
+            return cleaned
+    return uuid.uuid4().hex
 
 
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
@@ -31,7 +58,7 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         incoming = request.headers.get(self.header_name)
-        cid = incoming or uuid.uuid4().hex
+        cid = _sanitize_correlation_id(incoming)
         token = correlation.set_correlation_id(cid)
         try:
             response = await call_next(request)

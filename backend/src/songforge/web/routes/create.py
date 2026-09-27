@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.config import get_settings
+from songforge.correlation import get_correlation_id
 from songforge.db import get_sessionmaker
 from songforge.logging_setup import get_logger
 from songforge.metrics import bot_check_failed_total, jobs_created_total
@@ -182,6 +183,10 @@ async def create_job(
         # counters, so the ip leg here is required, not redundant with `user_id`.
         client_ip=ip,
         is_authenticated=identity.is_authenticated,
+        # Issue #18, criterion #1: persist the request's own correlation ID (already
+        # bound by `CorrelationIdMiddleware`, the outermost middleware -- see
+        # `web/middleware.py`) so the pipeline's later async hops can re-bind it.
+        correlation_id=get_correlation_id(),
     )
     session.add(job)
     await session.commit()

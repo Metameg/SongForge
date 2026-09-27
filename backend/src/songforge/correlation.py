@@ -9,6 +9,8 @@ threaded through every function signature.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 
 _correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
@@ -39,3 +41,25 @@ def new_correlation_id() -> str:
     value = uuid.uuid4().hex
     _correlation_id.set(value)
     return value
+
+
+@contextmanager
+def bind_correlation_id(value: str | None) -> Iterator[str]:
+    """Bind ``value`` as the correlation ID for the duration of the block, minting a
+    fresh id if ``value`` is ``None`` (e.g. a pre-#18 row with no stored correlation
+    id -- see ``songforge.models.Job.correlation_id``). Restores whatever was bound
+    before on exit (issue #18, acceptance criterion #1) -- a caller nested inside a
+    request's own ``CorrelationIdMiddleware`` binding (e.g.
+    ``web/routes/webhook.py::receive_webhook``) gets that prior binding back, not
+    ``None``, and a drain loop that binds one job after another never leaks one job's
+    id into the next.
+
+    Sets the contextvar directly (not via :func:`new_correlation_id`, which also binds)
+    to avoid a redundant double-bind when minting a fresh id.
+    """
+    cid = value if value is not None else uuid.uuid4().hex
+    token = set_correlation_id(cid)
+    try:
+        yield cid
+    finally:
+        reset_correlation_id(token)

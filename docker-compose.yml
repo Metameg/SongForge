@@ -208,6 +208,105 @@ services:
       retries: 10
       start_period: 20s
 
+  # ── Observability (issue #18, AC5) ──────────────────────────────────────────────
+  # All four services below are gated behind `profiles: ["monitoring"]`, so a plain
+  # `docker compose up` (the existing default workflow) is completely unaffected.
+  # Bring them up with `docker compose --profile monitoring up`. See
+  # monitoring/README.md for the local/staging/prod env split this profile covers
+  # (local only -- staging/prod use a different, documented topology).
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      # Loopback-only (security H1): a short-form `"host:container"` publish binds
+      # 0.0.0.0 (all interfaces), which would put Prometheus's UI/API on any
+      # reachable network interface, not just this machine. Long-form pins it to
+      # 127.0.0.1 -- reachable from the host, not the LAN or a public interface.
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-59090}:9090"
+    depends_on:
+      web:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # No baked-in default (security H1): an `admin`/`admin` fallback is a trivial
+      # takeover of a Grafana instance that has datasource + provisioning access.
+      # Deliberately empty rather than `:?required` here -- a `:?` fails variable
+      # INTERPOLATION for the whole compose file (Compose interpolates every
+      # service before profile-filtering), which would break a plain, no-profile
+      # `docker compose config`/`up` even though grafana never runs in that case.
+      # The entrypoint guard below enforces "fail closed if unset" at the point
+      # that actually matters: starting this container.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      # Off by default (security H1); a local dev opts in per-session via .env
+      # rather than every environment inheriting anonymous Viewer access.
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANON_ENABLED:-false}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    # Refuse to boot with no admin password rather than let Grafana fall back to
+    # any built-in default (security H1). `docker compose config` never runs this,
+    # so it doesn't affect the config-render checks -- only an actual `up`.
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        if [ -z "$$GF_SECURITY_ADMIN_PASSWORD" ]; then
+          echo "GRAFANA_ADMIN_PASSWORD must be set to bring up the monitoring profile (see .env.example) -- refusing to start with no admin password." >&2
+          exit 1
+        fi
+        exec /run.sh
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # Dashboard JSON is mounted OUTSIDE the read-only provisioning tree: nesting
+      # it under the :ro provisioning/dashboards mount makes Docker try to mkdir the
+      # child mountpoint inside a read-only fs and fail to start Grafana. The
+      # provider config (provisioning/dashboards/dashboards.yml) points its `path`
+      # here, under Grafana's own writable data dir.
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards/songforge:ro
+    ports:
+      # Loopback-only -- see the prometheus service's port comment above.
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-59091}:3000"
+    depends_on:
+      - prometheus
+
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    profiles: ["monitoring"]
+    environment:
+      # Reuses the same POSTGRES_* credentials the `postgres` service already uses
+      # (x-backend-env) -- no second set of credentials introduced. Staging/prod
+      # should point this at a dedicated read-only monitoring role with TLS
+      # (sslmode != disable) instead -- see monitoring/README.md.
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}?sslmode=disable
+    # No host port published (security H1): this exporter has no auth of its own
+    # and exposes Postgres internals (table sizes, connection/lock stats). Prometheus
+    # scrapes it over the compose network by service name (postgres_exporter:9187);
+    # nothing outside the compose network needs to reach it directly.
+    expose:
+      - "9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    profiles: ["monitoring"]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    # No host port published -- see the postgres_exporter comment above; same
+    # reasoning (unauthenticated, internal-network-only scrape target).
+    expose:
+      - "9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:

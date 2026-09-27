@@ -28,11 +28,13 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from redis.asyncio import Redis
+from starlette.responses import Response
 
 from songforge import __version__
 from songforge.config import Settings, get_settings
+from songforge.db import get_sessionmaker
 from songforge.logging_setup import configure_logging, get_logger
-from songforge.metrics import render_latest
+from songforge.metrics_pipeline import render_latest_with_pipeline_gauges
 from songforge.radio.pointer_broadcaster import PointerBroadcaster
 from songforge.radio.pointer_cache import PointerCache
 from songforge.radio.user_events import UserEventBroadcaster
@@ -78,11 +80,14 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
         ttl_seconds=settings.radio_pointer_cache_ttl_seconds
     )
 
-    # Issue #10, criterion #2: the per-instance pub/sub relay -> SSE fan-out. `redis`
-    # defaults to the shared client (only connects on first use); tests inject a fake
-    # via the `redis=` keyword so the broadcaster never needs a live Redis.
+    # `redis` defaults to the shared client (only connects on first use); tests inject
+    # a fake via the `redis=` keyword. Resolved once so the pub/sub broadcasters below
+    # and the `/metrics` route (issue #18, AC2) share the same effective client.
+    effective_redis = redis if redis is not None else get_redis()
+
+    # Issue #10, criterion #2: the per-instance pub/sub relay -> SSE fan-out.
     app.state.pointer_broadcaster = PointerBroadcaster(
-        redis=redis if redis is not None else get_redis(),
+        redis=effective_redis,
         channel=settings.radio_pointer_channel,
         cache=app.state.pointer_cache,
     )
@@ -91,9 +96,21 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     # PSUBSCRIBE per app instance, fanning `job-failed` notifications out to exactly
     # the connected client(s) registered under the matching user id.
     app.state.user_event_broadcaster = UserEventBroadcaster(
-        redis=redis if redis is not None else get_redis(),
+        redis=effective_redis,
         channel_prefix=settings.user_events_channel_prefix,
     )
+
+    async def metrics_route() -> Response:
+        """`GET /metrics` (issue #18, AC1+AC2): render the shared registry after
+        refreshing the pipeline gauges from a fresh DB session + the app's Redis
+        client. `render_latest_with_pipeline_gauges` isolates each datastore's
+        refresh in its own try/except, so an unreachable Postgres/Redis (e.g. this
+        repo's edge-test env, see `tests/conftest.py`) still yields a 200 with
+        whatever static counters are already registered -- never a 500."""
+        async with get_sessionmaker()() as session:
+            return await render_latest_with_pipeline_gauges(
+                session, effective_redis, settings
+            )
 
     app.include_router(health.router)
     app.include_router(now_playing.router)
@@ -103,7 +120,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     app.include_router(events.router)
     if settings.metrics_enabled:
         app.add_api_route(
-            "/metrics", render_latest, include_in_schema=False, tags=["observability"]
+            "/metrics", metrics_route, include_in_schema=False, tags=["observability"]
         )
 
     get_logger(__name__).info(

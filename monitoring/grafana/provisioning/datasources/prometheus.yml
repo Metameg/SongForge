@@ -1,0 +1,14 @@
+# Grafana datasource provisioning (issue #18, AC5) -- auto-registers the
+# local-compose Prometheus as Grafana's default datasource on container start,
+# so `docker compose --profile monitoring up` needs no manual "add datasource"
+# click-through.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

@@ -129,6 +129,20 @@ ACTIVE_JOB_STATES: tuple[JobState, ...] = (
     JOB_STATE_INGEST_PENDING,
 )
 
+# Every job state, in state-machine order (issue #18, AC2): the pipeline gauge
+# (`songforge.metrics_pipeline.refresh_job_state_gauges`) zero-fills across this
+# canonical tuple so a state with no rows still renders an explicit `0` series
+# rather than a missing one -- a scraper graphing "jobs by state" must never see a
+# gap just because nothing currently sits in, say, INGEST_PENDING.
+ALL_JOB_STATES: tuple[JobState, ...] = (
+    JOB_STATE_QUEUED,
+    JOB_STATE_SUBMITTING,
+    JOB_STATE_WAITING_FOR_WEBHOOK,
+    JOB_STATE_INGEST_PENDING,
+    JOB_STATE_READY,
+    JOB_STATE_FAILED,
+)
+
 
 class Job(Base):
     """A generation job: one prompt submission through to a playable song (issue #12).
@@ -224,6 +238,15 @@ class Job(Base):
     failure_handled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # End-to-end trace id (issue #18, acceptance criterion #1): the submit-time
+    # correlation ID (`POST /create`, `web/routes/create.py`), persisted so every
+    # later pipeline seam (dispatch/ingest/webhook/watchdog) can re-bind it for its
+    # own log lines even though those run in a separate process/request from the
+    # original submit. Nullable: pre-#18 rows, and any caller that doesn't stamp it,
+    # must not break; no index -- a 1:1 per-job value, not a filter column (mirrors
+    # why `task_id`/`conversion_id_1` above have no index either).
+    correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

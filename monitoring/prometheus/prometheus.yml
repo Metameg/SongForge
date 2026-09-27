@@ -1,0 +1,31 @@
+# Local load-test Prometheus config (issue #18, AC5).
+#
+# This is a LOAD-TEST tool's scrape config, not a production one: the interval
+# is aggressive (5s) so a k6 run's shape shows up clearly on the Grafana
+# dashboards in monitoring/grafana/dashboards/. See monitoring/README.md for
+# how staging/prod scrape intervals and topology differ, and
+# monitoring/prometheus/prometheus.prod.example.yml for the prod remote_write
+# template (Grafana Cloud free tier -- no self-hosted Prometheus/Grafana in prod).
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The SongForge web app's own /metrics endpoint -- the REGISTRY in
+  # backend/src/songforge/metrics.py, including the jobs-by-state / semaphore-
+  # utilization gauges refreshed at scrape time by
+  # backend/src/songforge/metrics_pipeline.py.
+  - job_name: songforge_web
+    static_configs:
+      - targets: ["web:8000"]
+
+  # Postgres: jobs table row counts, connection/lock stats, etc.
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres_exporter:9187"]
+
+  # Redis: semaphore key stats, pub/sub, memory, etc.
+  - job_name: redis
+    static_configs:
+      - targets: ["redis_exporter:9121"]
