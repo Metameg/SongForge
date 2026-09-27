@@ -73,7 +73,7 @@
       "id": 3,
       "title": "5xx error rate (%)",
       "type": "timeseries",
-      "description": "RED/Errors: server-error ratio. No data when there is zero traffic (0/0); a flat 0 line means requests are succeeding.",
+      "description": "RED/Errors: server-error ratio. `or vector(0)` + `clamp_min` make it read a flat 0% when clean instead of 'No data'.",
       "gridPos": {
         "x": 0,
         "y": 8,
@@ -335,6 +335,111 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "App CPU (cores)",
+      "type": "timeseries",
+      "description": "USE/Utilization: web-process CPU, as fraction of a core (rate of process_cpu_seconds_total).",
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{job=\"songforge_web\"}[1m])",
+          "legendFormat": "cpu cores",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "title": "App resident memory",
+      "type": "timeseries",
+      "description": "USE/Utilization: web-process resident set size.",
+      "gridPos": {
+        "x": 8,
+        "y": 48,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{job=\"songforge_web\"}",
+          "legendFormat": "resident",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decbytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "App open file descriptors",
+      "type": "timeseries",
+      "description": "USE/Saturation: open file descriptors against the process limit -- FD exhaustion caps concurrent connections.",
+      "gridPos": {
+        "x": 16,
+        "y": 48,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "process_open_fds{job=\"songforge_web\"}",
+          "legendFormat": "open fds",
+          "refId": "A"
+        },
+        {
+          "expr": "process_max_fds{job=\"songforge_web\"}",
+          "legendFormat": "max fds",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "App GC collections/sec",
+      "type": "timeseries",
+      "description": "Python GC collection rate per generation -- a proxy for allocation churn/GC pressure in the web process.",
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (generation) (rate(python_gc_collections_total{job=\"songforge_web\"}[5m]))",
+          "legendFormat": "gen {{generation}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
         },
         "overrides": []
       }

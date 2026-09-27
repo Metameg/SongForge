@@ -12,13 +12,25 @@ from prometheus_client import (
     CollectorRegistry,
     Counter,
     Gauge,
+    GCCollector,
     Histogram,
+    PlatformCollector,
+    ProcessCollector,
     generate_latest,
 )
 from starlette.responses import Response
 
 # A dedicated registry keeps app metrics isolated and import-order independent.
 REGISTRY = CollectorRegistry()
+
+# Standard process/platform/GC collectors, registered on OUR registry explicitly.
+# prometheus-client only auto-attaches these to its *default* registry, and we use a
+# dedicated one -- so without this the app exposes no process CPU/memory/fd/GC series
+# (the USE half of a production observability view). Instantiating each with
+# `registry=REGISTRY` registers it; the returned objects are intentionally unused.
+ProcessCollector(registry=REGISTRY)
+PlatformCollector(registry=REGISTRY)
+GCCollector(registry=REGISTRY)
 
 http_requests_total = Counter(
     "songforge_http_requests_total",
