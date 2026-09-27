@@ -354,8 +354,11 @@ async def test_create_is_blocked_with_429_when_the_cookie_cap_is_exceeded(
     from songforge.web.rate_limit import RateLimitDecision
 
     class _CookieDenyingLimiter:
-        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=False, blocked_scope="cookie", remaining=0)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            raise AssertionError("charge must never run when check denies")
 
         async def remaining(self, identity: Any, ip: str) -> int:
             return 0
@@ -384,8 +387,11 @@ async def test_create_is_blocked_with_429_when_the_ip_cap_is_exceeded(
     from songforge.web.rate_limit import RateLimitDecision
 
     class _IpDenyingLimiter:
-        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=False, blocked_scope="ip", remaining=0)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            raise AssertionError("charge must never run when check denies")
 
         async def remaining(self, identity: Any, ip: str) -> int:
             return 0
@@ -410,8 +416,11 @@ async def test_create_is_blocked_with_403_when_the_bot_check_fails(
     from songforge.web.rate_limit import RateLimitDecision
 
     class _AllowingLimiter:
-        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=5)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            raise AssertionError("charge must never run when the bot check fails first")
 
         async def remaining(self, identity: Any, ip: str) -> int:
             return 5
@@ -437,11 +446,15 @@ async def test_create_succeeds_within_caps_and_increments_the_limiter_counter(
 
     class _RecordingLimiter:
         def __init__(self) -> None:
-            self.consume_calls: list[tuple[str, str]] = []
+            self.check_calls: list[tuple[str, str]] = []
+            self.charge_calls: list[tuple[str, str]] = []
 
-        async def consume(self, identity: Any, ip: str) -> RateLimitDecision:
-            self.consume_calls.append((identity.user_id, ip))
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
+            self.check_calls.append((identity.user_id, ip))
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            self.charge_calls.append((identity.user_id, ip))
 
         async def remaining(self, identity: Any, ip: str) -> int:
             return 1
@@ -460,7 +473,8 @@ async def test_create_succeeds_within_caps_and_increments_the_limiter_counter(
     assert resp.status_code == 200
     rows = await _job_rows(sessionmaker)
     assert len(rows) == 1
-    assert len(limiter.consume_calls) == 1  # the counter was actually incremented
+    assert len(limiter.check_calls) == 1  # gated once
+    assert len(limiter.charge_calls) == 1  # the slot was charged (once) for the create
 
 
 async def test_enforce_rate_limits_false_never_blocks_and_bypasses_bot_check(
@@ -539,3 +553,144 @@ async def test_identity_cookie_has_secure_flag_outside_local(
     set_cookie_header = resp.headers.get("set-cookie", "")
     assert "sf_uid" in set_cookie_header
     assert "secure" in set_cookie_header.lower()
+
+
+# ── Quota-leak fix: charge the slot only AFTER the durable commit ─────────────────
+#
+# The old flow charged the quota slot (`consume`) BEFORE the Postgres commit, so an
+# instance that crashed in between leaked a slot with no job row to refund against.
+# `create_job` now `check`s (read-only) before the write and `charge`s only after the
+# durable commit. These tests pin that ordering and the crash-safety it buys.
+
+
+class _FailingCommitSession:
+    """Session proxy whose `commit()` raises -- stands in for an instance dying (or the
+    DB failing) at the durability boundary, AFTER the quota gate but BEFORE the row is
+    persisted."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    async def commit(self) -> None:
+        raise RuntimeError("simulated crash / DB failure at the commit boundary")
+
+
+async def test_create_charges_the_quota_slot_after_the_commit(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The charge must land AFTER the persisting commit, before NOTIFY -- proving the
+    slot is spent only once the job is durable."""
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _EventChargingLimiter:
+        def __init__(self, events: list[str]) -> None:
+            self._events = events
+            self.charge_calls: list[tuple[str, str]] = []
+
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            self.charge_calls.append((identity.user_id, ip))
+            self._events.append("charged")
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 1
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    limiter = _EventChargingLimiter(events)
+    client, _ = _build_client_with_gates(
+        sessionmaker, events, rate_limiter=limiter, bot_check=_PassingBotCheck()
+    )
+
+    resp = client.post("/create", json={"prompt": "a song charged after commit"})
+
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    # commit happens first, THEN charge, THEN notify -- the durability ordering.
+    assert events == ["committed", "charged", f"notify:new_job:{job_id}"]
+    assert len(limiter.charge_calls) == 1
+
+
+async def test_create_does_not_charge_quota_when_the_commit_fails(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The crux of the fix: if the commit fails (instance crash / DB error) the quota
+    slot is NOT charged and nothing is persisted -- no phantom slot, no orphan row."""
+    from songforge.web.rate_limit import RateLimitDecision
+    from songforge.web.routes.create import get_bot_check, get_rate_limiter
+
+    class _RecordingLimiter:
+        def __init__(self) -> None:
+            self.charge_calls: list[tuple[str, str]] = []
+
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            self.charge_calls.append((identity.user_id, ip))
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 1
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    limiter = _RecordingLimiter()
+
+    async def _override_session() -> AsyncIterator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield _FailingCommitSession(session)  # type: ignore[misc]
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override_session
+    app.dependency_overrides[get_notify_dependency] = lambda: _NotifySpy(events)
+    app.dependency_overrides[get_rate_limiter] = lambda: limiter
+    app.dependency_overrides[get_bot_check] = lambda: _PassingBotCheck()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.post("/create", json={"prompt": "a create that crashes at commit"})
+
+    assert resp.status_code == 500  # the commit failure surfaces as a server error
+    assert limiter.charge_calls == []  # NO quota slot leaked
+    assert await _job_rows(sessionmaker) == []  # nothing persisted
+
+
+async def test_create_succeeds_even_when_the_charge_fails(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A charge failure (e.g. Redis blip) must not un-create a durably committed job --
+    charge is best-effort and errs toward under-counting, the safe direction."""
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _ChargeFailingLimiter:
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
+
+        async def charge(self, identity: Any, ip: str) -> None:
+            raise RuntimeError("redis unavailable")
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 1
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    client, _ = _build_client_with_gates(
+        sessionmaker, events, rate_limiter=_ChargeFailingLimiter(), bot_check=_PassingBotCheck()
+    )
+
+    resp = client.post("/create", json={"prompt": "a song whose charge blips"})
+
+    assert resp.status_code == 200  # the durable job is not undone by a charge failure
+    rows = await _job_rows(sessionmaker)
+    assert len(rows) == 1
+    assert rows[0].state == JOB_STATE_QUEUED

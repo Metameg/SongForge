@@ -140,14 +140,20 @@ async def create_job(
 
     Gate order (issue #15): the **bot check** runs first (403 on failure -- deter
     scripted farming before doing any work); then prompt **validation** (422 -- reject
-    malformed input WITHOUT charging a quota slot); then the **daily-quota rate limiter**
-    ``consume`` (429 on any exceeded cap -- charges the slot only for a valid, human
-    request). Every rejection persists nothing.
+    malformed input); then the **daily-quota** ``check`` (429 on any full cap). Every
+    rejection persists nothing and charges nothing.
 
-    After the gates, the ordering from issue #12 still holds (criteria #1 + #5): the job
-    row is committed to Postgres, in the QUEUED state, before ``notify`` fires and long
-    before any generation-API call (that call belongs entirely to
-    ``songforge.jobs.dispatch``, never to this route).
+    Durability boundary (quota-leak fix): the quota slot is CHARGED
+    (``rate_limiter.charge``) only AFTER the job row is durably committed, not at the
+    gate. So an instance that crashes between the gate and the commit leaks no slot
+    (there'd be no job row to refund against). The trade-off is a bounded over-admission
+    race -- two concurrent creates can each pass ``check`` before either ``charge`` --
+    acceptable under the deterrence-not-prevention quota stance, and it never risks
+    wasted generation spend (generation starts only after the row exists).
+
+    The issue #12 ordering still holds (criteria #1 + #5): the job row is committed to
+    Postgres, QUEUED, before ``notify`` fires and long before any generation-API call
+    (that call belongs entirely to ``songforge.jobs.dispatch``, never to this route).
     """
     settings = get_settings()
 
@@ -163,7 +169,11 @@ async def create_job(
     _validate_lyrics(body.lyrics)
     lyrics = body.lyrics.strip() if body.lyrics else None
 
-    decision = await rate_limiter.consume(identity, ip)
+    # Durability boundary (quota-leak fix): only READ the caps here to reject a create
+    # that has no room (429, persisting nothing). The slot is CHARGED after the job row
+    # is durably committed (below), so an instance that crashes between this gate and
+    # the commit never leaks a quota slot -- there'd be no job row to refund against.
+    decision = await rate_limiter.check(identity, ip)
     if not decision.allowed:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -192,6 +202,17 @@ async def create_job(
     await session.commit()
     jobs_created_total.inc()
     log.info("job_created", job_id=job.job_id, user_id=identity.user_id)
+
+    # Charge the quota slot only now that the job is durably persisted. Best-effort: a
+    # charge failure (e.g. Redis blip) must never un-create a committed job -- it errs
+    # toward under-counting, the safe direction under the deterrence-not-prevention
+    # quota stance, and the row still exists for the watchdog/refund seam.
+    try:
+        await rate_limiter.charge(identity, ip)
+    except Exception:  # noqa: BLE001 - accounting must not fail a durable create
+        log.warning(
+            "rate_limit_charge_failed", job_id=job.job_id, user_id=identity.user_id
+        )
 
     await notify(settings.jobs_new_channel, job.job_id)
 
