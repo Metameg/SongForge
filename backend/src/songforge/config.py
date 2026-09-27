@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     environment: Environment = "local"
     service_name: str = "songforge"
     log_level: str = "INFO"
+    # Issue #19 (PRD #6 AC#4): the web tier's bind port. Aliased to the bare `PORT`
+    # env var (not `WEB_PORT`) because that's the variable Railway (and Heroku-style
+    # PaaS in general) injects into the container to tell it which port to listen
+    # on -- config.py stays the single env-read source of truth, so `__main__.py`
+    # reads this setting rather than `os.environ` directly. Defaults to 8000 for
+    # local/compose, where nothing sets `PORT` and the old hard-coded value applies.
+    web_port: int = Field(default=8000, validation_alias="PORT")
 
     # ── Datastores ──────────────────────────────────────────────────────────
     # Async driver (asyncpg) is the runtime default; Alembic derives a sync URL.

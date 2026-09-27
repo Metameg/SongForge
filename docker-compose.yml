@@ -4,11 +4,30 @@
 # Ordering guarantee (acceptance criterion #2): the one-shot `migrate` service runs the
 # boot sequence (migrations + static-library seed) to completion; `web` and `worker` wait
 # for it via `service_completed_successfully` before they start.
+#
+# Multi-instance topology (issue #19, PRD #6 AC#1-#3): an `lb` (nginx) service fronts N
+# stateless `web` replicas, a `pgbouncer` service fans in the web tier's Postgres
+# connections, and `worker` scales to N=2-3 for HA (row-claim parallelism + a single
+# advisory-lock leader -- already built by #12/#13/#16/#17; this slice just runs N of
+# them). See docs/deploy.md and README's "Multi-instance & deploy" section for the
+# bring-up commands (`--scale`) and the local kill-leader / failover smoke check.
 
 x-backend-env: &backend-env
   ENVIRONMENT: ${ENVIRONMENT:-local}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+  # Issue #19 (PRD #6 AC#2): this shared default points at PgBouncer, not Postgres
+  # directly -- it's what `web` (the only service that doesn't override it below)
+  # actually uses. `migrate` and `worker` explicitly OVERRIDE this back to a direct
+  # `postgres:5432` URL in their own `environment:` blocks below, because:
+  #   - `worker`'s advisory-lock + LISTEN/NOTIFY connections MUST bypass a transaction
+  #     pooler (PgBouncer transaction mode does not support session-level features at
+  #     all -- a pooled LISTEN/NOTIFY or advisory lock silently stops working, which is
+  #     worse than an error: it can silently produce two "leaders").
+  #   - `migrate` runs Alembic DDL (and its own locking) at boot; DDL and migration
+  #     tooling are unsafe/undefined under transaction-mode pooling, same reasoning.
+  # `DB_PGBOUNCER_TRANSACTION_MODE=true` (below, on `web` only) tells the app to disable
+  # asyncpg's server-side prepared-statement cache to match -- see config.py/db.py.
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@pgbouncer:6432/${POSTGRES_DB:-songforge}
   REDIS_URL: redis://redis:6379/0
   S3_ENDPOINT_URL: http://minio:9000
   S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-songforge}
@@ -66,6 +85,42 @@ services:
       timeout: 5s
       retries: 10
 
+  # Issue #19 (PRD #6 AC#2): transaction-pooling PgBouncer in front of `postgres`,
+  # fanning in the web tier's connections so N `web` replicas don't each hold a large
+  # idle pool directly against Postgres. `worker` and `migrate` bypass this entirely
+  # (see the `DATABASE_URL` comment on `x-backend-env` above) -- only `web` talks to it.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    environment:
+      # Bootstrap URL edoburu's entrypoint parses to generate pgbouncer.ini +
+      # userlist.txt -- plain `postgresql://` (not `+asyncpg`), and NOT the same env
+      # var name as the app's `DATABASE_URL` (this is pgbouncer's OWN upstream target,
+      # i.e. the real Postgres it pools, not something the app ever reads here).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+      POOL_MODE: transaction
+      LISTEN_PORT: 6432
+      # Matches Postgres 16's default `password_encryption` so the plaintext
+      # password edoburu stores in userlist.txt for AUTH_TYPE=scram-sha-256/plain
+      # round-trips a real SCRAM handshake to the backend.
+      AUTH_TYPE: scram-sha-256
+      # Placeholder sizing -- deliberately NOT tuned here; tune against issue #18's
+      # k6 load-test harness once real concurrency numbers exist (PRD explicitly
+      # scopes exact pool sizing as out-of-scope for this slice).
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-200}
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # pg_isready just needs a TCP-level "accepting connections" answer -- it
+      # doesn't need to authenticate, so it works against pgbouncer without a
+      # real client credential. (edoburu's image ships Postgres's own client
+      # tools alongside pgbouncer itself.)
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "6432"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     ports:
@@ -102,6 +157,10 @@ services:
     <<: *backend-build
     environment:
       <<: *backend-env
+      # Issue #19 (PRD #6 AC#2): DIRECT to Postgres, bypassing pgbouncer -- Alembic's
+      # DDL + migration locking is unsafe/undefined under transaction-mode pooling.
+      # See the rationale on the `x-backend-env` anchor's `DATABASE_URL` above.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
     command: ["songforge-boot"]
     volumes:
       - ./app/static/audios:/app/static-library:ro
@@ -116,15 +175,26 @@ services:
     <<: *backend-build
     environment:
       <<: *backend-env
+      # Issue #19 (PRD #6 AC#2): only the pooled web engine (`db.get_engine()`) needs
+      # asyncpg's server-side prepared-statement cache disabled -- PgBouncer
+      # transaction-mode pooling can silently hand a logical connection a different
+      # backend session between statements, which breaks server-side prepare/execute.
+      DB_PGBOUNCER_TRANSACTION_MODE: "true"
     command: ["songforge-web"]
-    ports:
-      - "${WEB_HOST_PORT:-8000}:8000"
+    # No host port published here (issue #19, AC#1): traffic is meant to reach `web`
+    # ONLY through the `lb` service below, which is also what makes `--scale web=N`
+    # possible at all -- N replicas can't all bind the same static host port. Publish
+    # `${LB_HOST_PORT:-8000}` on `lb` instead. For single-instance local debugging of
+    # one specific replica, use `docker compose exec web ...` or a temporary
+    # `docker compose port web 8000`.
     depends_on:
       migrate:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      pgbouncer:
         condition: service_healthy
     healthcheck:
       test:
@@ -136,11 +206,35 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
+    deploy:
+      # Swarm-only field -- plain `docker compose up` (non-Swarm) silently IGNORES
+      # `deploy.replicas`. It's left here as documentation of the intended N, but the
+      # authoritative way to actually run N locally is `docker compose up --scale
+      # web=N` (see README's "Multi-instance & deploy" section / docs/deploy.md).
+      replicas: 2
+
+  # Load balancer in front of `web` (issue #19, PRD #6 AC#1). See loadbalancer/nginx.conf
+  # for the DNS-re-resolution note (nginx must re-resolve `web` as it scales).
+  lb:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./loadbalancer/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${LB_HOST_PORT:-8000}:80"
+    depends_on:
+      web:
+        condition: service_healthy
 
   worker:
     <<: *backend-build
     environment:
       <<: *backend-env
+      # Issue #19 (PRD #6 AC#2): DIRECT to Postgres, bypassing pgbouncer -- the
+      # worker's advisory-lock connection (radio leader election, #17) and all four
+      # LISTEN/NOTIFY connections (dispatch/watchdog/radio_coordinator/ingest) must
+      # never be handed off mid-lifetime by a transaction pooler. See the rationale
+      # on the `x-backend-env` anchor's `DATABASE_URL` above.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
     command: ["songforge-worker"]
     depends_on:
       migrate:
@@ -155,6 +249,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    deploy:
+      # Same Swarm-only caveat as `web.deploy.replicas` above -- use
+      # `docker compose up --scale worker=N` locally. N=2-3 workers run safely
+      # because dispatch/ingest/watchdog already row-claim with `FOR UPDATE SKIP
+      # LOCKED` (#12/#13/#16) and the radio coordinator elects exactly one leader via
+      # `pg_advisory_lock` (#17) -- this slice's job is running N of them, not
+      # building that coordination (already done).
+      replicas: 2
 
   # Dev/test-only fault-injectable MusicGPT simulator (issue #11). NEVER deployed to prod —
   # prod points MUSICGPT_BASE_URL at the real MusicGPT API, so this service is simply absent
