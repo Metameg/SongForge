@@ -325,6 +325,23 @@ class Settings(BaseSettings):
         return self.worker_database_url or self.database_url
 
     @property
+    def sync_worker_database_url(self) -> str:
+        """Sync SQLAlchemy URL Alembic should use for migrations (Phase-5 fix, issue #19).
+
+        Derived from :attr:`effective_worker_database_url` rather than :attr:`database_url`
+        (which is what :attr:`sync_database_url` derives from): on Railway, the boot step's
+        ``releaseCommand`` runs inside the ``web`` service and inherits *its* env, which
+        points ``database_url`` at PgBouncer in transaction-pooling mode -- exactly the
+        connection class Alembic DDL (and its own migration locking) must never run
+        through. Setting ``WORKER_DATABASE_URL`` on that service gives the release step a
+        direct URL to migrate through, while `web`'s request-serving connections stay
+        pooled. Falls back to `database_url` when no override is set, so local/single-node
+        (no pooler in front of Postgres at all) is unchanged -- identical to
+        `sync_database_url` in that case.
+        """
+        return self.effective_worker_database_url.replace("+asyncpg", "+psycopg", 1)
+
+    @property
     def public_audio_base_url(self) -> str:
         """Base URL that immutable audio objects are served from."""
         if self.s3_public_base_url:

@@ -66,6 +66,14 @@ are already reachable behind Railway's own platform-managed edge/load balancer �
 in `loadbalancer/nginx.conf` is a Compose-specific workaround for Docker's embedded DNS; it
 has no Railway analog because Railway's edge already re-discovers replicas as they scale.
 
+**Note on retry-on-restart:** `loadbalancer/nginx.conf` sets
+`proxy_next_upstream error timeout http_502 http_503 http_504;` (retrying up to
+`proxy_next_upstream_tries 2` a different `web` replica) so a request that lands on a
+container mid-restart gets a second try instead of a hard error — this is a compose-local
+concern only, covering the window between `docker stop`/a crash and the resolver's next
+10s DNS refresh. Railway's own edge LB already handles unhealthy-replica retry/failover in
+prod; nothing equivalent needs configuring there.
+
 **Why pgbouncer is its own Railway service:** Railway's managed Postgres plugin does **not**
 ship a built-in connection pooler. Running `edoburu/pgbouncer` (same image as the compose
 stack, see `docker-compose.yml`) as its own Railway service — sourced from the Docker image
@@ -92,11 +100,41 @@ services already do.
 
 `deploy/railway/web.json` sets `deploy.releaseCommand: "songforge-boot"` — Railway runs
 this **once per deploy, before the new `startCommand` takes traffic**, and a non-zero exit
-blocks the rollout (the new version never goes live) — this is the "release step" (AC#4),
-equivalent to compose's one-shot `migrate` service gated by `service_completed_successfully`.
+blocks the rollout (the new version never goes live) — this is the "release step" (AC#4).
 It's attached to `web` only (not `worker`) so migrations run from exactly one place. See
+["Migrations must bypass PgBouncer"](#migrations-must-bypass-pgbouncer) for why this is
+now *actually* equivalent to compose's one-shot `migrate` service (an earlier version of
+this doc claimed parity here that wasn't true — see that section), and
 ["Ordering & first deploy"](#ordering--first-deploy-gotcha) below for the one gotcha this
 implies.
+
+## Migrations must bypass PgBouncer
+
+**This is load-bearing, not a style preference.** `docker-compose.yml`'s `migrate` service
+deliberately gives itself a *direct* `DATABASE_URL` (bypassing `pgbouncer`) because
+Alembic's DDL and its own migration-locking are unsafe/undefined under PgBouncer
+**transaction pooling** — a pooled logical connection can be handed a different backend
+session between statements, and things like a future `CREATE INDEX CONCURRENTLY`
+migration cannot run inside a pooler-imposed transaction at all.
+
+On Railway, `songforge-boot` (the `releaseCommand` above) runs **inside the `web`
+service** and inherits *its* environment — which, per the env var matrix below, points
+`DATABASE_URL` at PgBouncer with `DB_PGBOUNCER_TRANSACTION_MODE=true`. Left as-is, the
+release step would run Alembic DDL through the exact class of connection the local
+`migrate` service was built to avoid — not equivalent to compose, despite an earlier
+version of this doc claiming otherwise.
+
+**Fix:** set `WORKER_DATABASE_URL` on the `web` Railway service to a **direct** Postgres
+plugin connection string (bypassing pgbouncer) — the same variable that lets the worker's
+advisory-lock/LISTEN-NOTIFY connections bypass the pooler (AC#2). `songforge-boot` (via
+`migrations/env.py` → `Settings.sync_worker_database_url`) now migrates over
+`effective_worker_database_url` — `WORKER_DATABASE_URL` when set, else `database_url` — so
+setting it on `web` routes *only* the release step's migrations around PgBouncer; `web`'s
+own request-serving connections (`db.get_engine()`) are untouched and still pool through
+`database_url`. This mirrors compose's topology exactly: one shared env surface, one
+override that steers migrations to a direct connection while request traffic stays
+pooled. See `deploy/railway/web.json`'s `_notes.requiredEnvVars.WORKER_DATABASE_URL` for
+the on-file reminder.
 
 ## Env var matrix (delta from `.env.example`)
 
@@ -107,10 +145,11 @@ only calls out what **differs per service** or is **prod-required**.
 | ----------------------------------- | ---------------------------------------- | ----------------------------------- | ----- |
 | `DATABASE_URL`                      | `postgresql+asyncpg://…@<pgbouncer-host>:6432/<db>` | `postgresql+asyncpg://…@<postgres-host>:5432/<db>` (direct, from the Postgres plugin's own connection string) | AC#2: web pools, worker/release bypass the pooler entirely |
 | `DB_PGBOUNCER_TRANSACTION_MODE`     | `true`                                    | unset (`false` default)             | disables asyncpg's server-side prepared-statement cache — only needed where a pooler sits in front |
-| `WORKER_DATABASE_URL`               | n/a                                       | not needed (worker's own `DATABASE_URL` already IS the direct URL) | this override exists in `config.py`/`db.py` for topologies where web and worker must share one `DATABASE_URL` value (e.g. a shared Railway variable group) and still diverge — not needed when each Railway service sets its own `DATABASE_URL` independently, which is the default and the recommended setup |
+| `WORKER_DATABASE_URL`               | **required**: direct (non-pooled) Postgres plugin URL | not needed (worker's own `DATABASE_URL` already IS the direct URL) | Phase-5 fix: `web`'s `releaseCommand` (`songforge-boot`) inherits `web`'s own env, so without this override its Alembic migrations would run through pgbouncer — see [Migrations must bypass PgBouncer](#migrations-must-bypass-pgbouncer). `web`'s request-serving connections are unaffected and still use pooled `DATABASE_URL` |
 | `PORT`                              | set automatically by Railway             | n/a (worker binds no port)          | `Settings.web_port` reads this (see `config.py`); `songforge-web`'s `__main__.py` binds it, replacing the old Procfile's hard-coded `8000` |
-| `SESSION_SECRET`                    | **required, real value**                 | not read by worker                  | prod fail-closed: `Settings` raises if `ENVIRONMENT=prod` and this is still the dev-insecure default — see `config.py` |
-| `ENVIRONMENT`                       | `staging` or `prod`                      | `staging` or `prod`                 | gates the `SESSION_SECRET` check above and any other environment-specific behavior |
+| `SESSION_SECRET`                    | **required, real value**                 | not read by worker                  | prod fail-closed: `Settings` raises if `ENVIRONMENT=prod` and this is still the dev-insecure default — see `config.py`. **The validator does NOT currently enforce this in staging** (an existing test, `test_staging_with_default_session_secret_is_fine`, pins that the default is accepted there) — treat this as a manual, non-negotiable operator requirement instead: set a real `SESSION_SECRET` in staging too, since staging is prod-tier and may be internet-reachable (an unset one leaves the identity cookie's HMAC key a public constant, forgeable by anyone) |
+| `ENVIRONMENT`                       | `staging` or `prod`                      | `staging` or `prod`                 | gates the `SESSION_SECRET` fail-closed check above (prod only, see note) and any other environment-specific behavior |
+| `CLIENT_IP_HEADER`                  | set to `X-Forwarded-For` **only after verifying** Railway's edge (see below) | not read (worker never resolves a request's client IP) | see [Client IP / rate-limit trust](#client-ip--rate-limit-trust) |
 | `S3_ENDPOINT_URL`                   | R2 endpoint: `https://<account-id>.r2.cloudflarestorage.com` | same | see [R2 setup](#r2-object-storage-setup) |
 | `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | R2 API token pair                 | same                                 | scoped to the one bucket (least privilege) |
 | `S3_BUCKET` / `S3_REGION`           | your R2 bucket name / `auto`             | same                                 | |
@@ -176,6 +215,57 @@ process dies or its connection drops:
 deploy this is a non-issue: Alembic's migrations are versioned (it only applies revisions
 the schema doesn't already have), so redeploying `web` again is idempotent, and `worker`
 redeploying independently never needs to run `songforge-boot` itself.
+
+## Client IP / rate-limit trust
+
+The per-IP daily-quota cap (`anon_daily_songs_per_ip`, issue #15) trusts a forwarded
+header for the client's IP **only** when `CLIENT_IP_HEADER` is configured — and that is
+only safe when the proxy in front **overwrites** the header with the real TCP peer,
+never appends to a client-supplied value (`web/identity.py::client_ip` reads the
+**leftmost** token, trusting whatever a client puts there if the header is merely
+appended to).
+
+- **Local (compose):** SAFE. `loadbalancer/nginx.conf` sets
+  `proxy_set_header X-Forwarded-For $remote_addr;` — an overwrite, not
+  `$proxy_add_x_forwarded_for` (which appends) — and `web` has no host port of its own,
+  so `lb` is genuinely the only hop in front of every request. `docker-compose.yml` sets
+  `CLIENT_IP_HEADER=X-Forwarded-For` on the `web` service to match. Verify it yourself:
+  ```sh
+  curl -s -H 'X-Forwarded-For: 1.2.3.4' http://localhost:${LB_HOST_PORT:-8000}/health/ready
+  # then check the rate-limit path actually resolves the REAL peer, not 1.2.3.4, e.g. by
+  # exhausting ANON_DAILY_SONGS_PER_IP from one real client and confirming a spoofed
+  # X-Forwarded-For on a fresh request does NOT get a fresh quota bucket.
+  ```
+- **Railway:** **NOT safe to assume.** Before setting `CLIENT_IP_HEADER=X-Forwarded-For`
+  on the `web` service, the operator must confirm Railway's edge overwrites/normalizes
+  `X-Forwarded-For` (or sets its own trustworthy header, e.g. an `X-Real-IP` /
+  platform-specific header) rather than appending to a client-supplied value — consult
+  Railway's current networking docs, since platform behavior here is not something this
+  repo can verify or pin. **If unverified, leave `CLIENT_IP_HEADER` unset.** The
+  degraded-but-safe fallback (direct socket peer) means every request looks like it
+  comes from Railway's own edge IP — the per-IP cap collapses to one shared bucket
+  (unfair rate-limiting, but NOT spoofable) — strictly better than trusting an
+  unverified, appendable header, which would let a client bypass the cap entirely by
+  rotating a spoofed value per request.
+
+## Observability: `/metrics` exposure
+
+`GET /metrics` (issue #18, "always on, every environment") stays **always-on** on `web`
+itself — this section restricts *where it's reachable from*, not whether it exists.
+
+- **Local (compose):** `loadbalancer/nginx.conf` blocks it at the public edge
+  (`location = /metrics { deny all; return 403; }`) — a request to
+  `http://localhost:${LB_HOST_PORT}/metrics` gets a 403. This does NOT break scraping:
+  `monitoring/prometheus/prometheus.yml` targets `web:8000` directly over the compose
+  network (`job_name: songforge_web`, `targets: ["web:8000"]`) — it never goes through
+  `lb` in the first place.
+- **Railway/prod:** there is no self-hosted Prometheus and no nginx-equivalent public
+  edge rule to add — instead, per `monitoring/prometheus/prometheus.prod.example.yml`, a
+  lightweight scrape-and-forward agent (Prometheus in `remote_write`-only mode, or
+  Grafana Agent) runs **alongside** the prod `web` instance(s) and forwards to Grafana
+  Cloud's free tier. Scrape it over Railway's **private network** (internal DNS /
+  colocated agent), never by pointing a scraper at `web`'s public Railway domain. Do not
+  add a public route or expose `/metrics` on the internet-facing domain.
 
 ## Rollback / release-command failure behavior
 

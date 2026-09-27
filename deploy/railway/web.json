@@ -12,5 +12,14 @@
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5,
     "numReplicas": 2
+  },
+  "_notes": {
+    "_comment": "Railway config-as-code has no env-var section (env vars are set via the dashboard/CLI, not this file) -- these are additional properties Railway ignores, kept here so the required vars live next to the service they apply to. See docs/deploy.md's env var matrix for full detail.",
+    "requiredEnvVars": {
+      "CLIENT_IP_HEADER": "Set to X-Forwarded-For ONLY after confirming Railway's edge overwrites/normalizes X-Forwarded-For before this service sees it (never appends to a client-supplied value) -- see docs/deploy.md 'Client IP / rate-limit trust'. If unverified, leave unset (the per-IP cap falls back to the socket peer, which under Railway's edge means every request shares one bucket -- safe-but-degraded, not spoofable).",
+      "WORKER_DATABASE_URL": "Direct (non-pooled) Postgres plugin connection string, e.g. the plugin's own postgresql+asyncpg:// URL. Required so releaseCommand (songforge-boot -> Alembic migrations, via Settings.sync_worker_database_url) bypasses PgBouncer -- this service's own DATABASE_URL stays pointed at pgbouncer for request-serving traffic. See docs/deploy.md 'Migrations must bypass PgBouncer'.",
+      "SESSION_SECRET": "Required real (non-default) value in staging and prod -- see docs/deploy.md 'Session secret'."
+    },
+    "metricsExposure": "GET /metrics is NOT exposed on this service's public Railway domain-facing traffic path in the local compose analog (loadbalancer/nginx.conf blocks it at the edge with `location = /metrics { deny all; }`). On Railway, scrape /metrics over the private network (an agent colocated with `web`, per monitoring/prometheus/prometheus.prod.example.yml) or via Grafana Cloud's agent -- never point a scraper at this service's public domain. See docs/deploy.md 'Observability: /metrics exposure'."
   }
 }

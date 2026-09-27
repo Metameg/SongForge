@@ -180,6 +180,15 @@ services:
       # transaction-mode pooling can silently hand a logical connection a different
       # backend session between statements, which breaks server-side prepare/execute.
       DB_PGBOUNCER_TRANSACTION_MODE: "true"
+      # Security Phase-5 fix (HIGH): trust X-Forwarded-For for the per-IP rate cap ONLY
+      # because `lb` (loadbalancer/nginx.conf) OVERWRITES this header with the real TCP
+      # peer (`proxy_set_header X-Forwarded-For $remote_addr;`) rather than appending to
+      # whatever the client sent. `web` is reachable ONLY through `lb` (no host port of
+      # its own, see below), so nginx is genuinely the single hop in front of every
+      # request -- the leftmost-token trust in web/identity.py::client_ip is therefore
+      # unspoofable. Set only here (not the shared x-backend-env default, which stays
+      # blank for `worker`/`migrate`/`simulator`, none of which resolve a client IP).
+      CLIENT_IP_HEADER: "X-Forwarded-For"
     command: ["songforge-web"]
     # No host port published here (issue #19, AC#1): traffic is meant to reach `web`
     # ONLY through the `lb` service below, which is also what makes `--scale web=N`
