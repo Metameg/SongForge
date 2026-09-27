@@ -53,6 +53,20 @@ class Settings(BaseSettings):
     # Async driver (asyncpg) is the runtime default; Alembic derives a sync URL.
     database_url: str
     redis_url: str
+    # Issue #19 (PRD #6 AC#2): optional direct/unpooled URL for the worker's
+    # advisory-lock + LISTEN/NOTIFY connections, so they can bypass PgBouncer while
+    # `database_url` (web tier) points AT PgBouncer. Left unset (`None`), the worker
+    # falls back to `database_url` -- unchanged behavior for dev/tests/single-node,
+    # where there is no pooler in front of Postgres. See `effective_worker_database_url`.
+    worker_database_url: str | None = None
+    # Issue #19 (PRD #6 AC#2): gates disabling asyncpg's server-side prepared-statement
+    # cache on the pooled web engine (`db.get_engine()`). asyncpg caches prepared
+    # statements per physical connection; under PgBouncer's TRANSACTION pooling mode a
+    # logical "connection" can be handed a different backend session between queries,
+    # so a statement prepared against one backend can silently vanish (or, worse,
+    # collide with an unrelated statement) on the next. Default `False` keeps today's
+    # behavior (no PgBouncer in front, cache stays on) for dev/tests/single-node.
+    db_pgbouncer_transaction_mode: bool = False
 
     # ── Object storage (S3 API: MinIO locally, Cloudflare R2 in prod) ───────
     s3_endpoint_url: str
@@ -291,6 +305,17 @@ class Settings(BaseSettings):
         two can never drift.
         """
         return self.database_url.replace("+asyncpg", "+psycopg", 1)
+
+    @property
+    def effective_worker_database_url(self) -> str:
+        """URL the worker's advisory-lock + LISTEN/NOTIFY connections should use.
+
+        Issue #19 (PRD #6 AC#2): returns :attr:`worker_database_url` when set (a direct
+        Postgres URL bypassing PgBouncer), else falls back to :attr:`database_url` so
+        dev/tests/single-node deployments (no separate worker URL configured) are
+        unchanged -- worker and web share the same URL, exactly like today.
+        """
+        return self.worker_database_url or self.database_url
 
     @property
     def public_audio_base_url(self) -> str:

@@ -8,6 +8,11 @@ rather than hanging on DNS — the app-edge tests never need a live datastore.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+
+import pytest
+
+from songforge import db as db_module
 
 _TEST_ENV = {
     "ENVIRONMENT": "local",
@@ -29,3 +34,31 @@ _TEST_ENV = {
 
 for _key, _value in _TEST_ENV.items():
     os.environ.setdefault(_key, _value)
+
+
+@pytest.fixture(autouse=True)
+def _reset_engine_caches() -> Iterator[None]:
+    """Clear `db.get_engine`/`db.get_worker_lock_engine`'s process-wide `lru_cache`s
+    after every test.
+
+    Both getters are cached at module scope (`maxsize=1`), so any test that
+    monkeypatches `create_async_engine` to capture construction kwargs (the
+    established London-school pattern in this suite -- see
+    `test_worker_lock_connection.py`, `test_db_url_split.py`) leaves its FAKE engine
+    cached for whichever test runs next, in any file, regardless of pytest's
+    collection order. That was previously harmless because the only thing ever left
+    behind was a real (lazily-constructed, never-connected) `AsyncEngine` pointed at
+    this file's closed test port above -- it still fails fast and correctly on first
+    use. A mocked engine does not: `unittest.mock.MagicMock` auto-implements the async
+    dunder methods (`__aenter__`, etc.), so a leaked mock silently "succeeds" where a
+    real connection to the closed port would fail, corrupting any later test relying on
+    the documented fail-fast readiness-check behavior (e.g. `test_web_app.py`'s
+    `test_readiness_reports_down_datastores`). Clearing after every test -- rather than
+    only before, as individual test modules already do for their own cases -- restores
+    full cross-file isolation.
+    """
+    yield
+    db_module.get_engine.cache_clear()
+    cached = getattr(db_module, "get_worker_lock_engine", None)
+    if cached is not None and hasattr(cached, "cache_clear"):
+        cached.cache_clear()

@@ -29,7 +29,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from songforge.config import Settings
-from songforge.db import get_sessionmaker, get_worker_lock_engine
+from songforge.db import get_sessionmaker, get_worker_lock_engine, worker_asyncpg_dsn
 from songforge.logging_setup import get_logger
 from songforge.models import RADIO_STATE_SINGLETON_ID, RadioState
 from songforge.radio.coordinator import (
@@ -106,9 +106,10 @@ async def run_radio_coordinator(settings: Settings, stop: asyncio.Event) -> None
         redis, max_len=settings.radio_recent_history_size
     )
 
-    # asyncpg wants a plain postgres DSN; the app-wide URL carries the `+asyncpg`
-    # SQLAlchemy driver tag, which asyncpg.connect() doesn't understand.
-    dsn = settings.database_url.replace("+asyncpg", "")
+    # Issue #19: the worker's direct/unpooled URL (bypassing PgBouncer), with the
+    # `+asyncpg` SQLAlchemy driver tag stripped -- asyncpg.connect() wants a plain
+    # postgres DSN and doesn't understand that suffix.
+    dsn = worker_asyncpg_dsn(settings)
 
     while not stop.is_set():
         try:

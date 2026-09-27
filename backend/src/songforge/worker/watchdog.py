@@ -41,7 +41,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from songforge.config import Settings
-from songforge.db import get_sessionmaker
+from songforge.db import get_sessionmaker, worker_asyncpg_dsn
 from songforge.jobs.dispatch import count_active_jobs, count_active_jobs_by_user
 from songforge.jobs.generation_client import GenerationClient, HttpGenerationClient
 from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
@@ -347,10 +347,11 @@ async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
     # (mirrors `worker/dispatch.py::run_dispatch` / `worker/ingest.py::run_ingest`'s
     # own semaphore wiring).
     semaphore = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
-    # asyncpg wants a plain postgres DSN; the app-wide URL carries the `+asyncpg`
-    # SQLAlchemy driver tag, which asyncpg.connect() doesn't understand (mirrors
+    # Issue #19: the worker's direct/unpooled URL (bypassing PgBouncer), with the
+    # `+asyncpg` SQLAlchemy driver tag stripped -- asyncpg.connect() wants a plain
+    # postgres DSN and doesn't understand that suffix (mirrors
     # `worker/dispatch.py::run_dispatch`).
-    dsn = settings.database_url.replace("+asyncpg", "")
+    dsn = worker_asyncpg_dsn(settings)
 
     async def _publish_user_event(user_id: str, message: str) -> None:
         await redis.publish(

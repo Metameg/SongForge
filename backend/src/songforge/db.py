@@ -15,6 +15,7 @@ unpooled engine with a tuned ``tcp_user_timeout``.
 from __future__ import annotations
 
 import functools
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -31,11 +32,16 @@ from songforge.config import Settings, get_settings
 @functools.lru_cache(maxsize=1)
 def get_engine() -> AsyncEngine:
     settings: Settings = get_settings()
-    return create_async_engine(
-        settings.database_url,
-        pool_pre_ping=True,
-        future=True,
-    )
+    # Issue #19 (PRD #6 AC#2): only when the web tier sits behind PgBouncer in
+    # TRANSACTION pooling mode do we disable asyncpg's server-side prepared-statement
+    # cache -- under that pooling mode a logical connection can be handed a different
+    # backend session between queries, so a statement prepared against one backend can
+    # silently break on the next. Single-node/dev/tests (no pooler) keep the cache on
+    # (today's construction, unchanged) since disabling it there is a needless perf hit.
+    kwargs: dict[str, Any] = {"pool_pre_ping": True, "future": True}
+    if settings.db_pgbouncer_transaction_mode:
+        kwargs["connect_args"] = {"statement_cache_size": 0}
+    return create_async_engine(settings.database_url, **kwargs)
 
 
 @functools.lru_cache(maxsize=1)
@@ -53,15 +59,35 @@ def get_worker_lock_engine() -> AsyncEngine:
     mechanism (PRD: "tune TCP keepalive / tcp_user_timeout to ~10-15s") — it tells
     Postgres how fast to decide the leader's session is gone and tear its backend (and
     thus its advisory lock) down, so a blocked waiter can take over promptly.
+
+    Issue #19 (PRD #6 AC#2): built from ``settings.effective_worker_database_url``, not
+    ``settings.database_url`` — when ``WORKER_DATABASE_URL`` is set (pointing directly
+    at Postgres while ``database_url`` points at PgBouncer), the lock connection must
+    use that direct URL, or the very pooler this engine exists to bypass would end up
+    holding it.
     """
     settings: Settings = get_settings()
     timeout_ms = int(settings.worker_lock_tcp_user_timeout_seconds * 1000)
     return create_async_engine(
-        settings.database_url,
+        settings.effective_worker_database_url,
         poolclass=NullPool,
         future=True,
         connect_args={"server_settings": {"tcp_user_timeout": str(timeout_ms)}},
     )
+
+
+def worker_asyncpg_dsn(settings: Settings) -> str:
+    """Raw ``asyncpg.connect()`` DSN for the worker's direct Postgres connections.
+
+    Issue #19 (PRD #6 AC#2): single source of truth for the DSN the worker's four
+    LISTEN/NOTIFY modules (``worker/dispatch.py``, ``worker/watchdog.py``,
+    ``worker/radio_coordinator.py``, ``worker/ingest.py``) and the advisory-lock engine
+    above all need — ``settings.effective_worker_database_url`` (the direct/unpooled
+    URL, falling back to ``database_url`` when no worker-specific URL is configured)
+    with the ``+asyncpg`` SQLAlchemy driver tag stripped, since ``asyncpg.connect()``
+    wants a plain ``postgresql://`` DSN and doesn't understand the driver suffix.
+    """
+    return settings.effective_worker_database_url.replace("+asyncpg", "")
 
 
 @functools.lru_cache(maxsize=1)
