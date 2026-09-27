@@ -61,15 +61,25 @@
     },
     {
       "id": 3,
-      "title": "Job failure rate",
+      "title": "Terminal failure rate (by path)",
       "type": "timeseries",
-      "description": "rate(songforge_jobs_failed_total[5m]) -- terminal job failures per second.",
+      "description": "Terminal job failures broken out by the code path that recorded them, because no single counter captures all of them: dispatch rejections increment songforge_jobs_failed_total, a failure webhook increments songforge_webhooks_received_total{outcome=\"failed\"}, and the watchdog's terminal ingest-escalation increments songforge_watchdog_recovered_total{path=\"ingest_escalated_failed\"}. Charting only jobs_failed_total would read a false zero during webhook- or watchdog-driven incidents. (Ingest failures have their own panel.)",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
       "targets": [
         {
           "expr": "rate(songforge_jobs_failed_total[5m])",
-          "legendFormat": "jobs failed/s",
+          "legendFormat": "dispatch rejected/s",
           "refId": "A"
+        },
+        {
+          "expr": "rate(songforge_webhooks_received_total{outcome=\"failed\"}[5m])",
+          "legendFormat": "webhook failed/s",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(songforge_watchdog_recovered_total{path=\"ingest_escalated_failed\"}[5m])",
+          "legendFormat": "watchdog terminal/s",
+          "refId": "C"
         }
       ],
       "fieldConfig": {

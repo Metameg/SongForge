@@ -15,15 +15,20 @@
   "panels": [
     {
       "id": 1,
-      "title": "Connected SSE listeners (independent variable)",
+      "title": "Connected listeners + fan-out (both EXPECTED TO RISE)",
       "type": "timeseries",
-      "description": "songforge_sse_connected_listeners -- the value loadtest/connection-ceiling.js drives up. Expected to rise through a k6 ramp.",
+      "description": "songforge_sse_connected_listeners (the value loadtest/connection-ceiling.js drives up) and rate(songforge_radio_pointer_events_relayed_total[1m]). Both rise together during a ramp: the relay counter increments once per listener per push, so it IS the in-process fan-out work -- it belongs on the 'rises' side, not the flat side. The thesis is that these climb while the datastore panels below stay flat.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
           "expr": "songforge_sse_connected_listeners",
           "legendFormat": "connected listeners",
           "refId": "A"
+        },
+        {
+          "expr": "rate(songforge_radio_pointer_events_relayed_total[1m])",
+          "legendFormat": "pointer events relayed/s (in-process fan-out)",
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -33,9 +38,9 @@
     },
     {
       "id": 2,
-      "title": "Radio advance rate + pointer-event fan-out (expected FLAT)",
+      "title": "Radio advance + pointer PUBLISH rate (expected FLAT)",
       "type": "timeseries",
-      "description": "rate(songforge_radio_advances_total[1m]) and rate(songforge_radio_pointer_events_relayed_total[1m]) -- the thesis's direct observable: these should stay flat regardless of how many listeners are connected, because only ONE leader instance drives the clock-triggered advance and pointer events fan out in-process, not per-listener datastore writes.",
+      "description": "rate(songforge_radio_advances_total[1m]) and rate(songforge_radio_pointer_events_published_total[1m]) -- the thesis's direct observable: these stay flat regardless of listener count, because only ONE leader drives the clock-triggered advance and publishes each pointer change ONCE to Redis. (The per-listener relay counter is deliberately NOT here -- it grows with listeners and lives on the 'rises' panel to the left.)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
@@ -44,8 +49,8 @@
           "refId": "A"
         },
         {
-          "expr": "rate(songforge_radio_pointer_events_relayed_total[1m])",
-          "legendFormat": "pointer events relayed/s",
+          "expr": "rate(songforge_radio_pointer_events_published_total[1m])",
+          "legendFormat": "pointer events published/s",
           "refId": "B"
         }
       ],
@@ -58,17 +63,22 @@
       "id": 3,
       "title": "Datastore-op rate (expected FLAT as listener count rises)",
       "type": "timeseries",
-      "description": "rate(songforge_http_requests_total[1m]) broken out alongside job counters -- the datastore-facing request/op volume that should NOT scale with sse_connected_listeners, since a listener holds an in-process SSE connection rather than issuing per-tick datastore reads/writes.",
+      "description": "ACTUAL datastore operations from the exporters -- Postgres transactions (pg_stat_database_xact_commit + xact_rollback) and Redis commands (redis_commands_processed_total). These, not HTTP request volume, are the datastore-facing work that must NOT scale with sse_connected_listeners: a listener holds an in-process SSE connection and never issues a per-tick datastore read/write. (HTTP request rate would rise here just from new /events connections + /metrics scrapes, so it can't establish datastore-independence -- it lives on the Service RED dashboard instead.)",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
         {
-          "expr": "sum by (path) (rate(songforge_http_requests_total[1m]))",
-          "legendFormat": "{{path}}",
+          "expr": "sum(rate(pg_stat_database_xact_commit[1m])) + sum(rate(pg_stat_database_xact_rollback[1m]))",
+          "legendFormat": "postgres transactions/s",
           "refId": "A"
+        },
+        {
+          "expr": "sum(rate(redis_commands_processed_total[1m]))",
+          "legendFormat": "redis commands/s",
+          "refId": "B"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "reqps" },
+        "defaults": { "unit": "ops" },
         "overrides": []
       }
     },
