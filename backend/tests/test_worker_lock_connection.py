@@ -121,6 +121,41 @@ def test_get_worker_lock_engine_passes_tcp_user_timeout_through_connect_args(
     )
 
 
+def test_get_worker_lock_engine_uses_the_worker_direct_url_not_the_web_pooled_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #19 (PRD #6, AC#2): once `WORKER_DATABASE_URL` is set (pointing directly
+    at Postgres while `DATABASE_URL` points at PgBouncer), the advisory-lock engine
+    must be built from that direct URL, never the web tier's pooled one -- otherwise
+    the lock connection would go through the very pooler PRD #74 says it must
+    bypass. The precondition assertion fails today with a clean `AttributeError`
+    (`effective_worker_database_url` doesn't exist yet); once it does, the real
+    assertion is that `create_async_engine` was actually called with that URL, not
+    `settings.database_url`."""
+    captured: dict[str, Any] = {}
+
+    def _fake_create_async_engine(url: str, **kwargs: Any) -> MagicMock:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return MagicMock(name="fake_lock_engine")
+
+    worker_url = "postgresql+asyncpg://u:p@direct-pg:5432/songforge"
+    settings = _settings(
+        DATABASE_URL="postgresql+asyncpg://u:p@pgbouncer:6432/songforge",
+        WORKER_DATABASE_URL=worker_url,
+    )
+    assert settings.effective_worker_database_url == worker_url  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(db_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(db_module, "create_async_engine", _fake_create_async_engine)
+    _clear_lock_engine_cache()
+
+    db_module.get_worker_lock_engine()  # type: ignore[attr-defined]
+
+    assert captured["url"] == worker_url
+    assert captured["url"] != settings.database_url
+
+
 def test_get_worker_lock_engine_is_a_distinct_engine_from_the_pooled_get_engine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
