@@ -110,6 +110,24 @@ def test_effective_worker_database_url_returns_distinct_worker_database_url_when
     assert settings.effective_worker_database_url != settings.database_url
 
 
+def test_effective_worker_database_url_falls_back_when_worker_database_url_is_empty_string() -> (
+    None
+):
+    """Edge case: `WORKER_DATABASE_URL=""` (set-but-empty, e.g. an unset compose/Railway
+    variable interpolated to an empty string) must behave like UNSET, not like a
+    configured-but-blank URL -- `effective_worker_database_url` is implemented as
+    `self.worker_database_url or self.database_url`, and `"" or x == x` in Python, so
+    the empty string correctly falls through to `database_url` rather than winning and
+    handing the worker an unusable blank DSN. If this ever regressed to return `""`,
+    the worker would try to open an advisory-lock connection to nothing."""
+    settings = _settings(
+        DATABASE_URL="postgresql+asyncpg://u:p@127.0.0.1:1/songforge",
+        WORKER_DATABASE_URL="",
+    )
+    assert settings.worker_database_url == ""
+    assert settings.effective_worker_database_url == settings.database_url
+
+
 # ── 2. `Settings.db_pgbouncer_transaction_mode` ─────────────────────────────────
 
 
@@ -153,6 +171,35 @@ def test_worker_asyncpg_dsn_reflects_worker_url_not_web_url_when_they_differ() -
     assert dsn == "postgresql://u:p@direct-pg:5432/songforge"
     assert "+asyncpg" not in dsn
     assert "pgbouncer" not in dsn
+
+
+def test_worker_asyncpg_dsn_is_idempotent_when_url_already_has_no_asyncpg_tag() -> None:
+    """Edge case: a URL with no `+asyncpg` driver tag at all (e.g. a plain
+    `postgresql://` DSN someone already configured directly, or a re-application of
+    this helper) must be returned unchanged rather than mangled -- `str.replace` on a
+    substring that isn't present is a safe no-op, so this pins that the strip is
+    idempotent rather than assuming it without a test."""
+    settings = _settings(DATABASE_URL="postgresql://u:p@127.0.0.1:1/songforge")
+
+    dsn = db_module.worker_asyncpg_dsn(settings)  # type: ignore[attr-defined]
+
+    assert dsn == "postgresql://u:p@127.0.0.1:1/songforge"
+
+
+def test_worker_asyncpg_dsn_preserves_host_port_db_and_query_string_verbatim() -> None:
+    """Only the `+asyncpg` driver tag is stripped -- host, port, database name, and
+    query-string options (e.g. `sslmode`) that a real deploy relies on must survive
+    unchanged, since a broken query string here would silently drop connection
+    options the worker's direct Postgres connection needs."""
+    settings = _settings(
+        DATABASE_URL=(
+            "postgresql+asyncpg://u:p@direct-pg:5432/songforge?sslmode=require"
+        )
+    )
+
+    dsn = db_module.worker_asyncpg_dsn(settings)  # type: ignore[attr-defined]
+
+    assert dsn == "postgresql://u:p@direct-pg:5432/songforge?sslmode=require"
 
 
 # ── 5. `db.get_engine()` PgBouncer transaction-mode statement-cache safety ──────
@@ -209,6 +256,34 @@ def test_get_engine_omits_statement_cache_size_when_pgbouncer_transaction_mode_i
 
     connect_args = captured["kwargs"].get("connect_args", {})
     assert "statement_cache_size" not in connect_args
+
+
+def test_pgbouncer_transaction_mode_does_not_leak_into_worker_lock_engine_connect_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-engine isolation: `db_pgbouncer_transaction_mode=True` is a WEB-tier-only
+    concern (`get_engine`). `get_worker_lock_engine()`'s `connect_args` must keep
+    exactly its own `server_settings`/`tcp_user_timeout` shape and must NOT pick up
+    `statement_cache_size` -- the lock connection is a direct, unpooled asyncpg
+    connection (PRD #74) that was never the reason the flag exists, and a leaked key
+    there would be silent, accidental coupling between two independent engines."""
+    captured: dict[str, Any] = {}
+
+    def _fake_create_async_engine(url: str, **kwargs: Any) -> MagicMock:
+        captured["kwargs"] = kwargs
+        return MagicMock(name="fake_lock_engine")
+
+    settings = _settings(DB_PGBOUNCER_TRANSACTION_MODE="true")
+    monkeypatch.setattr(db_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(db_module, "create_async_engine", _fake_create_async_engine)
+    _clear_engine_caches()
+
+    db_module.get_worker_lock_engine()  # type: ignore[attr-defined]
+
+    connect_args = captured["kwargs"].get("connect_args", {})
+    assert "statement_cache_size" not in connect_args
+    assert "server_settings" in connect_args
+    assert "tcp_user_timeout" in connect_args["server_settings"]
 
 
 # ── 6. The four worker LISTEN/NOTIFY modules use the shared helper ─────────────
@@ -312,3 +387,32 @@ async def test_run_ingest_computes_its_dsn_via_the_shared_worker_asyncpg_dsn_hel
     assert calls == [settings], (
         "run_ingest must derive its LISTEN/NOTIFY DSN via worker_asyncpg_dsn(settings)"
     )
+
+
+# ── 7. `Settings.web_port` (issue #19, PRD #6 AC#4: Railway `$PORT` injection) ──
+
+
+def test_web_port_defaults_to_8000_when_port_env_is_unset() -> None:
+    """Local/compose: nothing sets `$PORT`, so the pre-#19 hardcoded bind port must
+    still be the default -- this is the single-node/dev behavior the AC#4 change must
+    not disturb."""
+    settings = _settings()
+    assert settings.web_port == 8000
+
+
+def test_web_port_reads_the_bare_port_env_var_not_a_web_port_prefixed_one() -> None:
+    """Railway (and Heroku-style PaaS generally) injects the bare `PORT` env var to
+    tell the container which port to bind -- `web_port`'s `validation_alias="PORT"`
+    must actually read THAT name, not a `WEB_PORT` variant, or a real deploy would
+    silently keep binding 8000 while Railway routes traffic to a different port."""
+    settings = _settings(PORT="4321")
+    assert settings.web_port == 4321
+
+
+def test_web_port_is_an_int_not_a_string_even_when_sourced_from_env() -> None:
+    """Env vars are always strings on the wire -- pydantic-settings must coerce
+    `PORT` to `int` (uvicorn's `port=` kwarg rejects a `str`), not just pass the raw
+    text through."""
+    settings = _settings(PORT="4321")
+    assert isinstance(settings.web_port, int)
+    assert settings.web_port == 4321
