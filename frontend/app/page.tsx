@@ -1,5 +1,5 @@
-import Player from "./Player";
+import RadioApp from "./RadioApp";
 
 export default function Home() {
-  return <Player />;
+  return <RadioApp />;
 }
