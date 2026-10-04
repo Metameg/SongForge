@@ -50,6 +50,10 @@ class _InMemoryRateLimitBackend:
             self.ttls_seen[key] = ttl_seconds
         return self._counts[key]
 
+    async def incr_many_with_expiry(self, keys: list[str], ttl_seconds: int) -> None:
+        for key in keys:
+            await self.incr_with_expiry(key, ttl_seconds)
+
     async def get_count(self, key: str) -> int:
         return self._counts.get(key, 0)
 
