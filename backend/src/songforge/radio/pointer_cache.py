@@ -65,6 +65,9 @@ class PointerRecord:
     duration_seconds: int | None
     playback_id: str
     version: int
+    # Last + defaulted: a pointer cached in Redis before issue #36 lacks this key and
+    # must still deserialize (as None).
+    album_cover_path: str | None = None
 
     def to_response(self, *, server_time: datetime) -> dict[str, Any]:
         """Shape this record into the `/now-playing` JSON body.
@@ -85,6 +88,7 @@ class PointerRecord:
             "duration": self.duration_seconds,
             "playback_id": self.playback_id,
             "version": self.version,
+            "album_cover_path": self.album_cover_path,
             "server_time": _isoformat_utc(server_time),
         }
 
@@ -94,6 +98,7 @@ class PointerRecord:
 
     @classmethod
     def from_json(cls, raw: str) -> PointerRecord:
+        # A missing `album_cover_path` (pre-#36 Redis value) falls to the dataclass default None.
         return cls(**json.loads(raw))
 
     @classmethod
@@ -111,6 +116,7 @@ class PointerRecord:
             duration_seconds=view.duration_seconds,
             playback_id=view.playback_id,
             version=view.version,
+            album_cover_path=view.album_cover_path,
         )
 
 
