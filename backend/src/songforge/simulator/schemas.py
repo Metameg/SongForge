@@ -46,6 +46,7 @@ class WebhookPayload(BaseModel):
     conversion_path: str | None = None
     conversion_duration: float | None = None
     title: str | None = None
+    album_cover_path: str | None = None
     # Present on the error/failed fault paths; absent on the happy path.
     status: str | None = None
 
@@ -69,3 +70,4 @@ class ByIdResponse(BaseModel):
     audio_url: str | None = None
     conversion_duration: float | None = None
     title: str | None = None
+    album_cover_path: str | None = None

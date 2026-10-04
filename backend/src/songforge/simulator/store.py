@@ -34,6 +34,8 @@ class TaskRecord:
     title: str
     status: ByIdStatus = ByIdStatus.IN_QUEUE
     current_audio_token: str | None = None
+    # Deterministic placeholder cover URL, derived from conversion_id_1 (issue #36).
+    album_cover_path: str | None = None
 
 
 class TaskStore:
