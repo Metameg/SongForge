@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from songforge.config import Settings
 from songforge.models import (
+    JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
     JOB_STATE_READY,
     JOB_STATE_WAITING_FOR_WEBHOOK,
@@ -167,6 +168,26 @@ async def test_webhook_without_album_cover_path_leaves_job_cover_null(
         job = (await session.scalars(select(Job).where(Job.job_id == "job-1"))).one()
     assert job.state == JOB_STATE_INGEST_PENDING
     assert job.album_cover_path is None  # type: ignore[attr-defined]
+
+
+async def test_failure_webhook_with_cover_but_no_conversion_path_creates_no_song(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_waiting_job(sessionmaker)
+    client = _webhook_client(sessionmaker)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_body(conversion_path=None, album_cover_path=COVER),
+    )
+
+    assert resp.status_code == 200
+    async with sessionmaker() as session:
+        job = (await session.scalars(select(Job).where(Job.job_id == "job-1"))).one()
+        songs = (await session.scalars(select(Song))).all()
+    assert job.state == JOB_STATE_FAILED
+    assert job.album_cover_path is None
+    assert songs == []
 
 
 # ── ingest: Job -> Song ──────────────────────────────────────────────────────────

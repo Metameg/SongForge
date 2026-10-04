@@ -417,6 +417,40 @@ async def test_now_playing_surfaces_the_songs_album_cover_path(
     assert resp.json()["album_cover_path"] == "http://cdn.test/covers/song-1.png"
 
 
+async def test_now_playing_static_song_surfaces_null_album_cover_path(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    async with sessionmaker() as session:
+        session.add(
+            Song(
+                id="static-1",
+                title="Static One",
+                source="static",
+                object_key="audio/static-1.mp3",
+                duration_seconds=180,
+            )
+        )
+        session.add(
+            RadioState(
+                id=1,
+                song_id="static-1",
+                playback_id="pb-s",
+                source="static",
+                started_at=started_at,
+                ends_at=started_at + timedelta(seconds=180),
+                version=1,
+            )
+        )
+        await session.commit()
+
+    body = app_client.get("/now-playing").json()
+
+    assert body["source"] == "static"
+    assert "album_cover_path" in body
+    assert body["album_cover_path"] is None
+
+
 async def test_now_playing_surfaces_null_album_cover_path_when_song_has_none(
     app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:

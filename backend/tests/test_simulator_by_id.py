@@ -66,6 +66,26 @@ async def test_by_id_reports_completed_with_fresh_audio_url_after_delivery(
     assert status_body["conversion_id_2"] == body["conversion_id_2"]
 
 
+async def test_by_id_withholds_album_cover_path_until_completed() -> None:
+    receiver = WebhookReceiver()
+    sleep_fn, gate = make_gated_sleep()
+    app = create_app(http_client=make_webhook_client(receiver), sleep_fn=sleep_fn)
+
+    async with make_sim_client(app) as client:
+        task_id = (await client.post(CREATE_PATH, json=DEFAULT_BODY)).json()["task_id"]
+
+        before = (await client.get("/byId", params={"task_id": task_id})).json()
+        assert before["status"] == "IN_QUEUE"
+        assert before["album_cover_path"] is None
+
+        gate.set()
+        await wait_for_pending_webhooks(app)
+
+        after = (await client.get("/byId", params={"task_id": task_id})).json()
+        assert after["status"] == "COMPLETED"
+        assert after["album_cover_path"]
+
+
 async def test_by_id_unknown_task_id_is_404(rig: SimulatorRig) -> None:
     resp = await rig.client.get("/byId", params={"task_id": "does-not-exist"})
     assert resp.status_code == 404
