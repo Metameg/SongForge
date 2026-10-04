@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from songforge.config import Settings
 from songforge.web.rate_limit import (
     Identity,
@@ -31,6 +33,7 @@ class _InMemoryRateLimitBackend:
     def __init__(self) -> None:
         self._counts: dict[str, int] = {}
         self.ttls_seen: dict[str, int] = {}
+        self.batch_calls: list[list[str]] = []
 
     async def incr_with_expiry(self, key: str, ttl_seconds: int) -> int:
         is_first = key not in self._counts
@@ -38,6 +41,11 @@ class _InMemoryRateLimitBackend:
         if is_first:
             self.ttls_seen[key] = ttl_seconds
         return self._counts[key]
+
+    async def incr_many_with_expiry(self, keys: list[str], ttl_seconds: int) -> None:
+        self.batch_calls.append(list(keys))
+        for key in keys:
+            await self.incr_with_expiry(key, ttl_seconds)
 
     async def get_count(self, key: str) -> int:
         return self._counts.get(key, 0)
@@ -141,6 +149,55 @@ async def test_charge_does_not_roll_back_and_may_exceed_cap() -> None:
     await rl.charge(_anon("u1"), "1.2.3.4")
 
     assert await backend.get_count(cookie_key(s, "u1", _today())) == 2  # exceeded, no rollback
+
+
+async def test_charge_increments_every_scope_in_a_single_atomic_batch() -> None:
+    # PR #33 review: an anon charge's cookie AND ip legs must land in ONE atomic backend
+    # op, never a per-leg loop that could blip between the two -- a partial charge (cookie
+    # yes, ip no) would desync the watchdog refund, which decrements BOTH scopes and would
+    # hand back a shared-IP slot this job never charged.
+    backend = _InMemoryRateLimitBackend()
+    s = _settings()
+    rl = RateLimiter(backend, s)
+
+    await rl.charge(_anon("u1"), "1.2.3.4")
+
+    assert backend.batch_calls == [
+        [cookie_key(s, "u1", _today()), ip_key(s, "1.2.3.4", _today())]
+    ]
+
+
+async def test_charge_all_or_nothing_when_the_backend_fails() -> None:
+    # The atomic op either applies to every scope or none -- a failure leaves no scope
+    # charged, so the refund stays symmetric (errs toward under-counting, the safe
+    # direction). `charge` propagates; the route is what swallows it best-effort.
+    class _FailingBatchBackend(_InMemoryRateLimitBackend):
+        async def incr_many_with_expiry(self, keys: list[str], ttl_seconds: int) -> None:
+            raise RuntimeError("redis unavailable")
+
+    backend = _FailingBatchBackend()
+    s = _settings()
+    rl = RateLimiter(backend, s)
+
+    with pytest.raises(RuntimeError):
+        await rl.charge(_anon("u1"), "1.2.3.4")
+
+    assert backend._counts == {}  # nothing charged -- no partial leg
+
+
+async def test_charge_uses_the_given_day_bucket_not_today() -> None:
+    # PR #33 review: charge must bucket on the persisted job's charge-day, not a
+    # recomputed "today", so a create straddling UTC midnight charges the SAME bucket the
+    # refund (keyed off `Job.created_at`) later hands back.
+    backend = _InMemoryRateLimitBackend()
+    s = _settings()
+    rl = RateLimiter(backend, s)
+
+    await rl.charge(_anon("u1"), "1.2.3.4", day="2025-01-01")
+
+    assert await backend.get_count(cookie_key(s, "u1", "2025-01-01")) == 1
+    assert await backend.get_count(ip_key(s, "1.2.3.4", "2025-01-01")) == 1
+    assert await backend.get_count(cookie_key(s, "u1", _today())) == 0
 
 
 async def test_charge_enforcement_off_is_a_noop() -> None:

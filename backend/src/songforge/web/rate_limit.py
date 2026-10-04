@@ -53,6 +53,24 @@ end
 return current
 """
 
+# KEYS = every applicable counter key. ARGV[1] = TTL seconds. The multi-key analogue of
+# `_INCR_WITH_EXPIRY_LUA`: increments EVERY key and, on each key's first increment,
+# stamps its window expiry -- all inside one EVAL, so an anonymous charge's cookie AND ip
+# legs either BOTH land or NEITHER does. A per-leg loop in Python could fail between the
+# two increments (a Redis blip after the cookie leg), charging one scope and leaving the
+# other uncharged. That desyncs the failure-recovery refund, which decrements EVERY scope
+# the persisted job's identity implies: it would hand back an IP slot this job never
+# charged -- on a shared IP, another user's slot (`charge`'s docstring, PR #33 review).
+_INCR_MANY_WITH_EXPIRY_LUA = """
+for i = 1, #KEYS do
+  local current = redis.call('INCR', KEYS[i])
+  if current == 1 then
+    redis.call('EXPIRE', KEYS[i], ARGV[1])
+  end
+end
+return 1
+"""
+
 # KEYS[1] = the counter key. Floors at 0 (like the semaphore's `_DECREMENT_LUA`): a
 # refund with no matching increment, or a double-refund, must never take a counter
 # negative and hand back quota that was never spent.
@@ -117,6 +135,12 @@ class RateLimitBackend(Protocol):
         expiry. Returns the new count."""
         ...
 
+    async def incr_many_with_expiry(self, keys: list[str], ttl_seconds: int) -> None:
+        """Atomically increment EVERY key; on each key's first increment set its
+        ``ttl_seconds`` expiry. All-or-nothing across the whole batch -- a failure leaves
+        none of the keys incremented (see ``RateLimiter.charge``)."""
+        ...
+
     async def get_count(self, key: str) -> int:
         """Return the current count for ``key`` (0 if unset)."""
         ...
@@ -135,6 +159,13 @@ class RedisRateLimitBackend:
     async def incr_with_expiry(self, key: str, ttl_seconds: int) -> int:
         result = await self._redis.eval(_INCR_WITH_EXPIRY_LUA, 1, key, ttl_seconds)
         return int(result)
+
+    async def incr_many_with_expiry(self, keys: list[str], ttl_seconds: int) -> None:
+        if not keys:
+            return
+        await self._redis.eval(
+            _INCR_MANY_WITH_EXPIRY_LUA, len(keys), *keys, ttl_seconds
+        )
 
     async def get_count(self, key: str) -> int:
         value = await self._redis.get(key)
@@ -279,22 +310,41 @@ class RateLimiter:
             allowed=True, blocked_scope=None, remaining=min(remainders)
         )
 
-    async def charge(self, identity: Identity, ip: str) -> None:
-        """Unconditionally charge one song against every applicable cap.
+    async def charge(self, identity: Identity, ip: str, *, day: str | None = None) -> None:
+        """Unconditionally charge one song against every applicable cap, atomically.
 
-        Called by ``POST /create`` AFTER the job row is durably committed, so the job
-        is guaranteed to exist. Unlike :meth:`consume` there is no cap check and no
-        rollback: the persisted job MUST be charged even if a concurrent create already
-        pushed the counter to its cap (the bounded over-admission trade-off of the
-        check-then-commit-then-charge ordering). No-op when enforcement is off.
+        Called by ``POST /create`` AFTER the job row is durably committed, so the job is
+        guaranteed to exist. Unlike :meth:`consume` there is no cap check and no rollback:
+        the persisted job MUST be charged even if a concurrent create already pushed the
+        counter to its cap (the bounded over-admission trade-off of the
+        check-then-commit-then-charge ordering).
+
+        Every applicable scope is charged in a SINGLE atomic backend op
+        (``incr_many_with_expiry``), so an anonymous create's cookie AND ip legs either
+        both land or neither does. A partial charge (cookie incremented, ip not) would
+        desync the failure-recovery refund, which decrements EVERY scope the persisted
+        job's identity implies: it would hand back an IP slot this job never charged -- on
+        a shared IP, another user's slot. A whole-batch failure (e.g. Redis down) charges
+        nothing and errs toward under-counting, the safe direction under the
+        deterrence-not-prevention stance (the caller logs it and keeps the durable job).
+
+        ``day`` is the UTC date bucket to charge and MUST be the day the persisted job was
+        created (``Job.created_at``'s date), NOT a recomputed ``_today()``. A create that
+        commits just before a UTC-midnight rollover but reaches this call just after it
+        would otherwise charge tomorrow's bucket, while the refund path (keyed off
+        ``Job.created_at`` -- see :meth:`refund` and ``jobs.watchdog``) hands back
+        yesterday's, leaving tomorrow's bucket permanently over-counted by one for a job
+        that failed. Defaults to ``_today()`` only for callers with no persisted-job day
+        to anchor to. No-op when enforcement is off.
         """
         if not self._settings.enforce_rate_limits:
             return
-        for scope in self._scopes(identity, ip, _today()):
-            await self._backend.incr_with_expiry(
-                scope.key, self._settings.rate_limit_window_seconds
-            )
-        log.info("rate_limit_charged", user_id=identity.user_id)
+        charge_day = day or _today()
+        scopes = self._scopes(identity, ip, charge_day)
+        await self._backend.incr_many_with_expiry(
+            [scope.key for scope in scopes], self._settings.rate_limit_window_seconds
+        )
+        log.info("rate_limit_charged", user_id=identity.user_id, day=charge_day)
 
     async def remaining(self, identity: Identity, ip: str) -> int:
         """Read-only "songs left": the tighter of the applicable caps minus current use

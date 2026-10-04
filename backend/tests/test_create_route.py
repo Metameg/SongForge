@@ -357,7 +357,7 @@ async def test_create_is_blocked_with_429_when_the_cookie_cap_is_exceeded(
         async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=False, blocked_scope="cookie", remaining=0)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             raise AssertionError("charge must never run when check denies")
 
         async def remaining(self, identity: Any, ip: str) -> int:
@@ -390,7 +390,7 @@ async def test_create_is_blocked_with_429_when_the_ip_cap_is_exceeded(
         async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=False, blocked_scope="ip", remaining=0)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             raise AssertionError("charge must never run when check denies")
 
         async def remaining(self, identity: Any, ip: str) -> int:
@@ -419,7 +419,7 @@ async def test_create_is_blocked_with_403_when_the_bot_check_fails(
         async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=5)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             raise AssertionError("charge must never run when the bot check fails first")
 
         async def remaining(self, identity: Any, ip: str) -> int:
@@ -453,7 +453,7 @@ async def test_create_succeeds_within_caps_and_increments_the_limiter_counter(
             self.check_calls.append((identity.user_id, ip))
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             self.charge_calls.append((identity.user_id, ip))
 
         async def remaining(self, identity: Any, ip: str) -> int:
@@ -593,7 +593,7 @@ async def test_create_charges_the_quota_slot_after_the_commit(
         async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             self.charge_calls.append((identity.user_id, ip))
             self._events.append("charged")
 
@@ -618,6 +618,48 @@ async def test_create_charges_the_quota_slot_after_the_commit(
     assert len(limiter.charge_calls) == 1
 
 
+async def test_create_charges_the_persisted_jobs_day_not_recomputed_today(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """PR #33 review: the charge is anchored to the committed row's `created_at` date, the
+    same bucket the watchdog refund (also keyed off `Job.created_at`) later hands back --
+    not a recomputed `_today()` that could drift to the next day across a UTC-midnight
+    rollover between the commit and the charge."""
+    from songforge.web.rate_limit import RateLimitDecision
+
+    class _DayRecordingLimiter:
+        def __init__(self) -> None:
+            self.days: list[str | None] = []
+
+        async def check(self, identity: Any, ip: str) -> RateLimitDecision:
+            return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
+
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
+            self.days.append(day)
+
+        async def remaining(self, identity: Any, ip: str) -> int:
+            return 1
+
+        async def refund(self, identity: Any, ip: str) -> None:
+            return None
+
+    events: list[str] = []
+    limiter = _DayRecordingLimiter()
+    client, _ = _build_client_with_gates(
+        sessionmaker, events, rate_limiter=limiter, bot_check=_PassingBotCheck()
+    )
+
+    resp = client.post("/create", json={"prompt": "a song anchored to its row's day"})
+
+    assert resp.status_code == 200
+    rows = await _job_rows(sessionmaker)
+    assert len(rows) == 1
+    expected_day = rows[0].created_at.date().isoformat()
+    # The watchdog derives its refund day the same way (`Job.created_at`'s date), so this
+    # equality is exactly the charge/refund bucket agreement the fix guarantees.
+    assert limiter.days == [expected_day]
+
+
 async def test_create_does_not_charge_quota_when_the_commit_fails(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -633,7 +675,7 @@ async def test_create_does_not_charge_quota_when_the_commit_fails(
         async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             self.charge_calls.append((identity.user_id, ip))
 
         async def remaining(self, identity: Any, ip: str) -> int:
@@ -674,7 +716,7 @@ async def test_create_succeeds_even_when_the_charge_fails(
         async def check(self, identity: Any, ip: str) -> RateLimitDecision:
             return RateLimitDecision(allowed=True, blocked_scope=None, remaining=1)
 
-        async def charge(self, identity: Any, ip: str) -> None:
+        async def charge(self, identity: Any, ip: str, *, day: str | None = None) -> None:
             raise RuntimeError("redis unavailable")
 
         async def remaining(self, identity: Any, ip: str) -> int:

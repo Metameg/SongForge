@@ -203,12 +203,21 @@ async def create_job(
     jobs_created_total.inc()
     log.info("job_created", job_id=job.job_id, user_id=identity.user_id)
 
+    # Anchor the charge to the day Postgres actually stamped on the row (`created_at` is
+    # a `server_default`, so it's unset on the in-memory object until refreshed). The
+    # watchdog's refund derives its day the same way (`Job.created_at`'s UTC date), so
+    # charge and refund always target the SAME bucket -- a create that commits just
+    # before UTC midnight but charges just after it must not charge tomorrow while the
+    # refund hands back yesterday (PR #33 review).
+    await session.refresh(job, attribute_names=["created_at"])
+    charge_day = job.created_at.date().isoformat()
+
     # Charge the quota slot only now that the job is durably persisted. Best-effort: a
     # charge failure (e.g. Redis blip) must never un-create a committed job -- it errs
     # toward under-counting, the safe direction under the deterrence-not-prevention
     # quota stance, and the row still exists for the watchdog/refund seam.
     try:
-        await rate_limiter.charge(identity, ip)
+        await rate_limiter.charge(identity, ip, day=charge_day)
     except Exception:  # noqa: BLE001 - accounting must not fail a durable create
         log.warning(
             "rate_limit_charge_failed", job_id=job.job_id, user_id=identity.user_id
