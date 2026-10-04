@@ -19,6 +19,8 @@ export interface NowPlaying {
   playback_id: string;
   version: number;
   server_time: string;
+  /** Cover art URL/path for generated songs; null for static songs or when absent. */
+  album_cover_path: string | null;
 }
 
 export interface RadioIdle {
