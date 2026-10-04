@@ -47,11 +47,15 @@
  * of the ordinary hard pause/play swap; an ordinary boundary (the outgoing song
  * actually finished) or the `ended`-safeguard path both naturally read as "not an
  * interrupt" since the outgoing song's remaining time is ~0 by then.
+ *
+ * Issue #36: this component is now a prop-driven playback engine hosted by `RadioApp`,
+ * which owns the single `EventSource("/events")` connection and the quota read. Feed
+ * state arrives via the `nowPlaying` prop (and the `ended` re-fetch reports back through
+ * `onRefetched`); the sync / gapless / drift engine described above is unchanged.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
-import { fetchQuota, formatSongsLeft, type QuotaResponse } from "../lib/quota";
 import {
   computeExpectedOffsetSeconds,
   computeOffsetSeconds,
@@ -120,13 +124,18 @@ function rampVolume(
   requestAnimationFrame(step);
 }
 
-export default function Player() {
-  const [state, setState] = useState<NowPlayingState | null>(null);
+export interface PlayerProps {
+  /** Latest feed state from RadioApp (SSE song-change / idle / refetch). */
+  nowPlaying: NowPlayingState | null;
+  /** Called with the result of the on-ended /now-playing re-fetch (RadioApp merges it). */
+  onRefetched: (state: NowPlayingState) => void;
+}
+
+export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
+  // Issue #36: the pointer state is now owned by RadioApp (which holds the single
+  // `EventSource("/events")`) and arrives as a prop; the engine below is unchanged.
+  const state = nowPlaying;
   const [hasStarted, setHasStarted] = useState(false);
-  // Issue #15, criterion #5: remaining daily "songs left", read once on mount from the
-  // same-origin `/quota` proxy. Null until it loads (the indicator stays hidden), so a
-  // slow/unreachable backend never blocks the player.
-  const [quota, setQuota] = useState<QuotaResponse | null>(null);
   const audioARef = useRef<HTMLAudioElement | null>(null);
   const audioBRef = useRef<HTMLAudioElement | null>(null);
   // Which buffer is currently "live" (the other is preloading/idle). A ref, not state:
@@ -160,7 +169,6 @@ export default function Player() {
     prevPlaybackIdRef.current = next.playback_id;
     prevPointerRef.current = next;
     skewMsRef.current = computeSkewMs(Date.parse(next.server_time), Date.now());
-    setState(next);
     if (!isChange) return;
 
     // Issue #14, criterion #3: crossfade an interrupt instead of hard-cutting. Inferred
@@ -207,29 +215,20 @@ export default function Player() {
     activeBufferRef.current = nextPreloadSlot(activeBufferRef.current);
   }, []);
 
-  // Open the SSE connection once. The server sends the current pointer immediately on
-  // connect (sync-on-arrival) and on every push/heartbeat thereafter (criterion #4); a
-  // dropped connection is handled by the browser's native `EventSource` auto-reconnect,
-  // whose first frame on the new connection is again the current truth.
+  // React to the feed state handed down by RadioApp (which owns the SSE connection: the
+  // server sends the current pointer on connect, on every push and on each heartbeat;
+  // the browser's native `EventSource` auto-reconnect re-sends the current truth). A
+  // heartbeat re-emit of the same `playback_id` flows through `applyPlaying` and takes the
+  // re-anchor/drift path rather than restarting playback.
   useEffect(() => {
-    const source = new EventSource("/events");
-
-    const handleSongChange = (event: MessageEvent<string>) => {
-      applyPlaying(JSON.parse(event.data) as NowPlaying);
-    };
-    const handleIdle = () => {
+    if (!nowPlaying) return;
+    if (nowPlaying.status === "playing") {
+      applyPlaying(nowPlaying);
+    } else {
       prevPlaybackIdRef.current = null;
       prevPointerRef.current = null;
-      setState({ status: "idle" });
-    };
-
-    source.addEventListener("song-change", handleSongChange);
-    source.addEventListener("idle", handleIdle);
-
-    return () => {
-      source.close();
-    };
-  }, [applyPlaying]);
+    }
+  }, [nowPlaying, applyPlaying]);
 
   const handlePlay = () => {
     if (!state || state.status !== "playing") return;
@@ -249,13 +248,9 @@ export default function Player() {
       return;
     }
     const next = await fetchNowPlaying(NOW_PLAYING_BASE);
-    if (next.status === "playing") {
-      applyPlaying(next);
-    } else {
-      prevPlaybackIdRef.current = null;
-      prevPointerRef.current = null;
-      setState(next);
-    }
+    // RadioApp merges this into the feed; the effect above then routes a genuinely new
+    // pointer through `applyPlaying` (gapless swap) or resets the refs on idle.
+    onRefetched(next);
   };
 
   // Continuous drift correction (issue #9, criterion #1 / design D6): on every
@@ -277,45 +272,10 @@ export default function Player() {
     }
   };
 
-  // Issue #15, criterion #5: load "songs left" once on mount. Best-effort — a failure
-  // leaves the indicator hidden and never disrupts playback.
-  useEffect(() => {
-    let cancelled = false;
-    fetchQuota(NOW_PLAYING_BASE)
-      .then((q) => {
-        if (!cancelled) setQuota(q);
-      })
-      .catch(() => {
-        /* backend unreachable — leave the indicator hidden */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const isPlaying = state?.status === "playing";
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: "1rem",
-        padding: "1rem",
-      }}
-    >
-      <h1 style={{ margin: 0, fontSize: "2rem" }}>SongForge</h1>
-      <p style={{ opacity: 0.7, margin: 0 }}>
-        {isPlaying ? (state as NowPlaying).title : "The station is quiet right now."}
-      </p>
-      {quota !== null && (
-        <p style={{ opacity: 0.5, margin: 0, fontSize: "0.85rem" }}>
-          {formatSongsLeft(quota)}
-        </p>
-      )}
+    <div data-started={hasStarted ? "true" : "false"}>
       <button
         onClick={handlePlay}
         disabled={!isPlaying}
@@ -334,6 +294,6 @@ export default function Player() {
       </button>
       <audio ref={audioARef} preload="auto" onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
       <audio ref={audioBRef} preload="auto" onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
-    </main>
+    </div>
   );
 }
