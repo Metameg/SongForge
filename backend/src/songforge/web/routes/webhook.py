@@ -64,6 +64,7 @@ class WebhookPayload(BaseModel):
     conversion_path: str | None = None
     conversion_duration: float | None = None
     title: str | None = None
+    album_cover_path: str | None = None
     status: str | None = None
 
 
@@ -221,6 +222,7 @@ async def receive_webhook(
         job.audio_url = body.conversion_path
         job.audio_duration = body.conversion_duration
         job.title = body.title
+        job.album_cover_path = body.album_cover_path
         job.state = JOB_STATE_INGEST_PENDING
         await session.commit()
         webhooks_received_total.labels(outcome="ingest_pending").inc()
