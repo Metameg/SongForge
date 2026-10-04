@@ -35,7 +35,16 @@ def _alembic_config() -> Config:
 
 
 def run_migrations() -> None:
-    """Upgrade the database to the latest schema revision."""
+    """Upgrade the database to the latest schema revision.
+
+    Issue #19 Phase-5 fix: the actual connection URL used is
+    ``Settings.sync_worker_database_url`` (set in ``migrations/env.py``), a DIRECT
+    connection that bypasses PgBouncer -- not the web tier's pooled ``database_url``.
+    This matters because ``songforge-boot`` (this function's caller) is Railway's
+    ``releaseCommand``, which runs inside the ``web`` service and would otherwise
+    inherit its pooled ``DATABASE_URL``, running Alembic DDL through a transaction-mode
+    pooler.
+    """
     log.info("migrations_started")
     command.upgrade(_alembic_config(), "head")
     log.info("migrations_complete")

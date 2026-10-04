@@ -48,11 +48,32 @@ class Settings(BaseSettings):
     environment: Environment = "local"
     service_name: str = "songforge"
     log_level: str = "INFO"
+    # Issue #19 (PRD #6 AC#4): the web tier's bind port. Aliased to the bare `PORT`
+    # env var (not `WEB_PORT`) because that's the variable Railway (and Heroku-style
+    # PaaS in general) injects into the container to tell it which port to listen
+    # on -- config.py stays the single env-read source of truth, so `__main__.py`
+    # reads this setting rather than `os.environ` directly. Defaults to 8000 for
+    # local/compose, where nothing sets `PORT` and the old hard-coded value applies.
+    web_port: int = Field(default=8000, validation_alias="PORT")
 
     # ── Datastores ──────────────────────────────────────────────────────────
     # Async driver (asyncpg) is the runtime default; Alembic derives a sync URL.
     database_url: str
     redis_url: str
+    # Issue #19 (PRD #6 AC#2): optional direct/unpooled URL for the worker's
+    # advisory-lock + LISTEN/NOTIFY connections, so they can bypass PgBouncer while
+    # `database_url` (web tier) points AT PgBouncer. Left unset (`None`), the worker
+    # falls back to `database_url` -- unchanged behavior for dev/tests/single-node,
+    # where there is no pooler in front of Postgres. See `effective_worker_database_url`.
+    worker_database_url: str | None = None
+    # Issue #19 (PRD #6 AC#2): gates disabling asyncpg's server-side prepared-statement
+    # cache on the pooled web engine (`db.get_engine()`). asyncpg caches prepared
+    # statements per physical connection; under PgBouncer's TRANSACTION pooling mode a
+    # logical "connection" can be handed a different backend session between queries,
+    # so a statement prepared against one backend can silently vanish (or, worse,
+    # collide with an unrelated statement) on the next. Default `False` keeps today's
+    # behavior (no PgBouncer in front, cache stays on) for dev/tests/single-node.
+    db_pgbouncer_transaction_mode: bool = False
 
     # ── Object storage (S3 API: MinIO locally, Cloudflare R2 in prod) ───────
     s3_endpoint_url: str
@@ -291,6 +312,34 @@ class Settings(BaseSettings):
         two can never drift.
         """
         return self.database_url.replace("+asyncpg", "+psycopg", 1)
+
+    @property
+    def effective_worker_database_url(self) -> str:
+        """URL the worker's advisory-lock + LISTEN/NOTIFY connections should use.
+
+        Issue #19 (PRD #6 AC#2): returns :attr:`worker_database_url` when set (a direct
+        Postgres URL bypassing PgBouncer), else falls back to :attr:`database_url` so
+        dev/tests/single-node deployments (no separate worker URL configured) are
+        unchanged -- worker and web share the same URL, exactly like today.
+        """
+        return self.worker_database_url or self.database_url
+
+    @property
+    def sync_worker_database_url(self) -> str:
+        """Sync SQLAlchemy URL Alembic should use for migrations (Phase-5 fix, issue #19).
+
+        Derived from :attr:`effective_worker_database_url` rather than :attr:`database_url`
+        (which is what :attr:`sync_database_url` derives from): on Railway, the boot step's
+        ``releaseCommand`` runs inside the ``web`` service and inherits *its* env, which
+        points ``database_url`` at PgBouncer in transaction-pooling mode -- exactly the
+        connection class Alembic DDL (and its own migration locking) must never run
+        through. Setting ``WORKER_DATABASE_URL`` on that service gives the release step a
+        direct URL to migrate through, while `web`'s request-serving connections stay
+        pooled. Falls back to `database_url` when no override is set, so local/single-node
+        (no pooler in front of Postgres at all) is unchanged -- identical to
+        `sync_database_url` in that case.
+        """
+        return self.effective_worker_database_url.replace("+asyncpg", "+psycopg", 1)
 
     @property
     def public_audio_base_url(self) -> str:

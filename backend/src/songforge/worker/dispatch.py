@@ -26,7 +26,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from songforge.config import Settings
-from songforge.db import get_sessionmaker
+from songforge.db import get_sessionmaker, worker_asyncpg_dsn
 from songforge.jobs.dispatch import (
     NotifyReleaseFn,
     claim_next_job,
@@ -103,9 +103,10 @@ async def run_dispatch(settings: Settings, stop: asyncio.Event) -> None:
     sessionmaker = get_sessionmaker()
     redis = get_redis()
     semaphore = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
-    # asyncpg wants a plain postgres DSN; the app-wide URL carries the `+asyncpg`
-    # SQLAlchemy driver tag, which asyncpg.connect() doesn't understand.
-    dsn = settings.database_url.replace("+asyncpg", "")
+    # Issue #19: the worker's direct/unpooled URL (bypassing PgBouncer), with the
+    # `+asyncpg` SQLAlchemy driver tag stripped -- asyncpg.connect() wants a plain
+    # postgres DSN and doesn't understand that suffix.
+    dsn = worker_asyncpg_dsn(settings)
 
     while not stop.is_set():
         try:

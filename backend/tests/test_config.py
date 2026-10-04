@@ -61,6 +61,28 @@ def test_sync_database_url_derived_for_alembic() -> None:
     assert settings.sync_database_url == "postgresql+psycopg://u:p@db:5432/songforge"
 
 
+def test_sync_worker_database_url_falls_back_to_web_url() -> None:
+    """Phase-5 fix (issue #19): with no WORKER_DATABASE_URL override, migrations use the
+    same sync URL as the web tier -- local/single-node behavior is unchanged."""
+    settings = Settings(_env=_base_env())
+    assert settings.sync_worker_database_url == settings.sync_database_url
+    assert settings.sync_worker_database_url == "postgresql+psycopg://u:p@db:5432/songforge"
+
+
+def test_sync_worker_database_url_prefers_direct_override() -> None:
+    """Phase-5 fix (issue #19): a direct WORKER_DATABASE_URL (bypassing PgBouncer) is
+    what Alembic migrations use, even when DATABASE_URL points at a pooler."""
+    settings = Settings(
+        _env={
+            **_base_env(),
+            "DATABASE_URL": "postgresql+asyncpg://u:p@pgbouncer:6432/songforge",
+            "WORKER_DATABASE_URL": "postgresql+asyncpg://u:p@postgres:5432/songforge",
+        }
+    )
+    assert settings.sync_worker_database_url == "postgresql+psycopg://u:p@postgres:5432/songforge"
+    assert settings.sync_database_url == "postgresql+psycopg://u:p@pgbouncer:6432/songforge"
+
+
 def test_missing_required_field_raises() -> None:
     env = _base_env()
     del env["DATABASE_URL"]
