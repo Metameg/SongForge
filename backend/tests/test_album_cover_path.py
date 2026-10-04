@@ -473,3 +473,12 @@ def test_song_model_column_is_nullable() -> None:
 
     assert column is not None
     assert column.nullable is True
+
+
+def test_album_cover_path_columns_are_wide_enough_for_signed_urls() -> None:
+    """A cover is an external URL (prod: a signed CDN URL that can exceed 512 chars).
+    The column must be at least as wide as audio_url (1024), or the webhook commit
+    fails on Postgres (where VARCHAR length is enforced; SQLite ignores it)."""
+    audio_url_len = Job.__table__.c.audio_url.type.length
+    assert Job.__table__.c.album_cover_path.type.length >= audio_url_len
+    assert Song.__table__.c.album_cover_path.type.length >= audio_url_len

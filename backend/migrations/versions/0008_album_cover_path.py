@@ -23,8 +23,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("songs", sa.Column("album_cover_path", sa.String(length=512), nullable=True))
-    op.add_column("jobs", sa.Column("album_cover_path", sa.String(length=512), nullable=True))
+    op.add_column("songs", sa.Column("album_cover_path", sa.String(length=1024), nullable=True))
+    op.add_column("jobs", sa.Column("album_cover_path", sa.String(length=1024), nullable=True))
 
 
 def downgrade() -> None:
