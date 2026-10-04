@@ -385,8 +385,10 @@ def test_migration_0008_chains_after_0007() -> None:
 
 def test_migration_0008_adds_nullable_column_without_touching_existing_rows() -> None:
     """Runs the real upgrade()/downgrade() through alembic Operations on in-memory SQLite
-    against a legacy-shaped `songs` table (0001-0007 use PG-specific DDL, so they are not
-    replayed; only the table shape 0008 acts on is recreated)."""
+    against legacy-shaped `songs` and `jobs` tables (0001-0007 use PG-specific DDL, so they
+    are not replayed; only the table shapes 0008 acts on are recreated). Migration 0008 adds
+    the column to BOTH tables, so both must exist in the legacy fixture (a real pre-0008 DB
+    has a `jobs` table from migration 0003)."""
     import sqlalchemy as sa
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
@@ -407,6 +409,13 @@ def test_migration_0008_adds_nullable_column_without_touching_existing_rows() ->
                 " VALUES ('old-1', 'Old Song', 'static', 'audio/old-1.mp3', 120)"
             )
         )
+        # Minimal legacy `jobs` table: 0008 adds a column to it too, so it must pre-exist.
+        conn.execute(
+            sa.text("CREATE TABLE jobs (job_id VARCHAR(64) PRIMARY KEY, title VARCHAR(255))")
+        )
+        conn.execute(
+            sa.text("INSERT INTO jobs (job_id, title) VALUES ('job-old-1', 'Old Job')")
+        )
         with Operations.context(MigrationContext.configure(conn)):
             mod.upgrade()
 
@@ -421,10 +430,21 @@ def test_migration_0008_adds_nullable_column_without_touching_existing_rows() ->
         ).one()
         assert tuple(row) == ("old-1", "Old Song", "static", "audio/old-1.mp3", 120, None)
 
+        # The jobs column is added nullable too, leaving the existing job row untouched.
+        job_cols = {c["name"]: c for c in sa.inspect(conn).get_columns("jobs")}
+        assert "album_cover_path" in job_cols
+        assert job_cols["album_cover_path"]["nullable"] is True
+        job_row = conn.execute(
+            sa.text("SELECT job_id, title, album_cover_path FROM jobs")
+        ).one()
+        assert tuple(job_row) == ("job-old-1", "Old Job", None)
+
         with Operations.context(MigrationContext.configure(conn)):
             mod.downgrade()
         cols_after = {c["name"] for c in sa.inspect(conn).get_columns("songs")}
         assert "album_cover_path" not in cols_after
+        job_cols_after = {c["name"] for c in sa.inspect(conn).get_columns("jobs")}
+        assert "album_cover_path" not in job_cols_after
 
 
 def test_song_model_column_is_nullable() -> None:
