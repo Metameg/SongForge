@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useState } from "react";
+import { fetchQueue, wireQueueRefetch, type QueueResponse } from "@/lib/queue";
 import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
@@ -11,6 +12,7 @@ import Composer from "./Composer";
 import GenerationProgressView from "./GenerationProgress";
 import LiveIndicator from "./LiveIndicator";
 import Player from "./Player";
+import QueueStatus from "./QueueStatus";
 import RadioStage from "./RadioStage";
 
 /**
@@ -24,6 +26,8 @@ export default function RadioApp() {
   const [mySongIds, setMySongIds] = useState<Set<string>>(() => new Set());
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
 
+  const [queue, setQueue] = useState<QueueResponse | null>(null);
+
   const refreshQuota = useCallback(async () => {
     try {
       setQuota(await fetchQuota(""));
@@ -32,7 +36,16 @@ export default function RadioApp() {
     }
   }, []);
 
+  const refreshQueue = useCallback(async () => {
+    try {
+      setQueue(await fetchQueue(""));
+    } catch {
+      /* keep last known */
+    }
+  }, []);
+
   useEffect(() => {
+    let unwireQueue: (() => void) | null = null;
     let source: EventSource | null = null;
     let cancelled = false;
     // Establish the signed identity cookie BEFORE opening the stream. The backend
@@ -46,6 +59,10 @@ export default function RadioApp() {
       await refreshQuota();
       if (cancelled) return;
       source = new EventSource("/events");
+      // Queue is read once now (cookie established above), then refetched reactively on
+      // song-change / the viewer's own job-progress / job-ready -- no timer polling.
+      unwireQueue = wireQueueRefetch(source, () => void refreshQueue());
+      void refreshQueue();
       source.onopen = () => dispatch({ type: "open" });
       source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
       source.addEventListener("song-change", (e) =>
@@ -64,9 +81,10 @@ export default function RadioApp() {
     })();
     return () => {
       cancelled = true;
+      unwireQueue?.();
       source?.close();
     };
-  }, [refreshQuota]);
+  }, [refreshQuota, refreshQueue]);
   useEffect(() => {
     setMySongIds(loadMySongs()); // post-mount: avoids an SSR/hydration mismatch
   }, []);
@@ -116,6 +134,7 @@ export default function RadioApp() {
           {feed.state?.status === "playing" && (
             <p style={{ opacity: 0.7, margin: "8px 0" }}>{feed.state.title}</p>
           )}
+          <QueueStatus queue={queue} />
           <Player nowPlaying={feed.state} onRefetched={onRefetched} />
         </section>
       </div>
