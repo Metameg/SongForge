@@ -451,6 +451,7 @@ async def test_run_ingest_poll_backstop_redrains_when_no_notify_ever_arrives(
         sessionmaker: object, storage: object, generation_client: object,
         downloader: object, settings: Settings, notify_ready: object = None,
         semaphore: object = None,
+        publish_user_event: object = None,
     ) -> None:
         nonlocal drain_calls
         drain_calls += 1
@@ -477,3 +478,138 @@ async def test_run_ingest_poll_backstop_redrains_when_no_notify_ever_arrives(
     # `_FakeAsyncpgConnection.add_listener` never invoked a wake callback, so nothing
     # but the backstop could have driven passes 2 and 3.
     assert drain_calls == 3
+
+
+# ── Per-user `job-ready` publish at ingest (issue #37) ────────────────────────────
+
+
+class _ReadyJob:
+    def __init__(self, job_id: str, user_id: str = "user-1") -> None:
+        self.job_id = job_id
+        self.user_id = user_id
+        self.state = "INGEST_PENDING"
+        self.song_id: str | None = None
+        self.title: str | None = "My Song"
+
+
+async def test_drain_publishes_job_ready_post_commit_when_a_job_reaches_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    remaining = iter(["job-1", None])
+    events: list[str] = []
+
+    class _TrackingSession(_NullSession):
+        async def commit(self) -> None:
+            events.append("commit")
+
+    class _TrackingCtx:
+        async def __aenter__(self) -> _TrackingSession:
+            return _TrackingSession()
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    async def _fake_claim(session: object) -> _ReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _ReadyJob(job_id)
+
+    async def _fake_ingest(job: _ReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = "song-xyz"
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    published: list[tuple[str, str]] = []
+
+    async def _publish(user_id: str, message: str) -> None:
+        events.append("publish")
+        published.append((user_id, message))
+
+    await _drain_ingest_pending(
+        lambda: _TrackingCtx(),  # type: ignore[arg-type,return-value]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        publish_user_event=_publish,
+    )
+
+    assert len(published) == 1
+    user_id, message = published[0]
+    assert user_id == "user-1"
+    assert json.loads(message) == {
+        "event": "job-ready",
+        "job_id": "job-1",
+        "song_id": "song-xyz",
+        "title": "My Song",
+    }
+    assert events == ["commit", "publish"]
+
+
+@pytest.mark.parametrize("final_state", ["INGEST_PENDING", "FAILED"])
+async def test_drain_does_not_publish_job_ready_when_the_job_requeues_or_fails(
+    monkeypatch: pytest.MonkeyPatch, final_state: str
+) -> None:
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _ReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _ReadyJob(job_id)
+
+    async def _fake_ingest(job: _ReadyJob, **kwargs: object) -> None:
+        job.state = final_state
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    published: list[tuple[str, str]] = []
+
+    async def _publish(user_id: str, message: str) -> None:
+        published.append((user_id, message))
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        publish_user_event=_publish,
+    )
+
+    assert published == []
+
+
+async def test_drain_swallows_a_raising_ready_publisher_and_drains_the_next_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", "job-2", None])
+    ingested: list[str] = []
+
+    async def _fake_claim(session: object) -> _ReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _ReadyJob(job_id)
+
+    async def _fake_ingest(job: _ReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = f"song-{job.job_id}"
+        ingested.append(job.job_id)
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    async def _boom(user_id: str, message: str) -> None:
+        raise RuntimeError("redis down")
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        publish_user_event=_boom,
+    )
+
+    assert ingested == ["job-1", "job-2"]

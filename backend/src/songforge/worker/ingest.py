@@ -45,6 +45,12 @@ from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Sema
 from songforge.logging_setup import get_logger
 from songforge.metrics import semaphore_released_total
 from songforge.models import JOB_STATE_FAILED, JOB_STATE_READY
+from songforge.radio.user_events import (
+    PublishUserEventFn,
+    ready_message,
+    redis_user_event_publisher,
+    safe_publish_user_event,
+)
 from songforge.redis_client import get_redis
 from songforge.storage import ObjectStorage
 
@@ -91,6 +97,7 @@ async def _drain_ingest_pending(
     settings: Settings,
     notify_ready: NotifyReadyFn | None = None,
     semaphore: Semaphore | None = None,
+    publish_user_event: PublishUserEventFn | None = None,
 ) -> None:
     """Ingest every currently-claimable job, one at a time, until none remain. Each
     claim + ingest + commit happens in its own session so the row lock (and the
@@ -109,6 +116,11 @@ async def _drain_ingest_pending(
     ``ACTIVE_JOB_STATES`` -- its generation-semaphore slot is released, POST-COMMIT,
     best-effort. A job requeued back to INGEST_PENDING (the in-claim retry wasn't
     resolved) is still active and must NOT release.
+
+    ``publish_user_event`` is optional (issue #37): when a job reaches READY in this
+    commit, its creator's private channel gets a ``job-ready`` message, POST-COMMIT and
+    best-effort. Built inside the session scope (title falls back to "Untitled",
+    matching the ``Song.title`` ``jobs.ingest._finalize_ready`` wrote).
     """
     while True:
         async with sessionmaker() as session:
@@ -139,9 +151,23 @@ async def _drain_ingest_pending(
                 if semaphore is not None and job.state in (JOB_STATE_READY, JOB_STATE_FAILED)
                 else None
             )
+            ready_event: tuple[str, str] | None = None
+            if (
+                publish_user_event is not None
+                and job.state == JOB_STATE_READY
+                and job.song_id is not None
+            ):
+                ready_event = (
+                    job.user_id,
+                    ready_message(job.job_id, job.song_id, job.title or "Untitled"),
+                )
 
         if notify_ready is not None and ready_song_id is not None:
             await _safe_notify_ready(notify_ready, ready_song_id)
+        if publish_user_event is not None and ready_event is not None:
+            await safe_publish_user_event(
+                publish_user_event, *ready_event, log_event="job_ready_publish_failed"
+            )
         if semaphore is not None and release_user_id is not None:
             await _safe_release_semaphore(semaphore, release_user_id)
 
@@ -168,7 +194,11 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
     # site for the slot-leak fix (issue #16): a job dispatch acquired before the
     # generation API call is only released, on this loop's side, once it reaches
     # READY/FAILED here.
-    semaphore = RedisSemaphore(RedisSemaphoreBackend(get_redis()), settings)
+    redis = get_redis()
+    semaphore = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
+    publish_user_event = redis_user_event_publisher(
+        redis, settings.user_events_channel_prefix
+    )
     # Issue #19: the worker's direct/unpooled URL (bypassing PgBouncer), with the
     # `+asyncpg` SQLAlchemy driver tag stripped -- asyncpg.connect() wants a plain
     # postgres DSN and doesn't understand that suffix.
@@ -216,6 +246,7 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
                                 settings,
                                 _notify_ready,
                                 semaphore,
+                                publish_user_event=publish_user_event,
                             )
                             wake.clear()
                             try:

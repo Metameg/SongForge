@@ -36,6 +36,13 @@ from songforge.jobs.dispatch import (
 from songforge.jobs.generation_client import GenerationClient, HttpGenerationClient
 from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
 from songforge.logging_setup import get_logger
+from songforge.models import JOB_STATE_WAITING_FOR_WEBHOOK
+from songforge.radio.user_events import (
+    PublishUserEventFn,
+    progress_message,
+    redis_user_event_publisher,
+    safe_publish_user_event,
+)
 from songforge.redis_client import get_redis
 
 log = get_logger(__name__)
@@ -47,11 +54,18 @@ async def _drain_ready_jobs(
     client: GenerationClient,
     settings: Settings,
     notify_release: NotifyReleaseFn,
+    publish_user_event: PublishUserEventFn | None = None,
 ) -> None:
     """Dispatch every currently-claimable job, one at a time, until none remain or
     the semaphore denies a slot. Each claim + dispatch + commit happens in its own
     short-lived session so a slow generation-API call never holds a DB transaction
     (and the row lock it took to claim) open for longer than necessary.
+
+    ``publish_user_event`` is optional (issue #37): when a job reaches
+    WAITING_FOR_WEBHOOK in this commit, its creator's private channel gets a
+    ``job-progress`` message (carrying the generation API's ETA), POST-COMMIT and
+    best-effort. The message is built inside the session scope so no ORM attribute is
+    touched after the session closes.
     """
     while True:
         async with sessionmaker() as session:
@@ -71,6 +85,20 @@ async def _drain_ready_jobs(
                 notify_release=notify_release,
             )
             await session.commit()
+            progress: tuple[str, str] | None = None
+            if (
+                publish_user_event is not None
+                and job.state == JOB_STATE_WAITING_FOR_WEBHOOK
+            ):
+                progress = (
+                    job.user_id,
+                    progress_message(job.job_id, job.state, job.eta),
+                )
+
+        if publish_user_event is not None and progress is not None:
+            await safe_publish_user_event(
+                publish_user_event, *progress, log_event="job_progress_publish_failed"
+            )
 
         if not handled:
             # No slot was available -- claim_next_job will likely hand back the same
@@ -103,6 +131,9 @@ async def run_dispatch(settings: Settings, stop: asyncio.Event) -> None:
     sessionmaker = get_sessionmaker()
     redis = get_redis()
     semaphore = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
+    publish_user_event = redis_user_event_publisher(
+        redis, settings.user_events_channel_prefix
+    )
     # Issue #19: the worker's direct/unpooled URL (bypassing PgBouncer), with the
     # `+asyncpg` SQLAlchemy driver tag stripped -- asyncpg.connect() wants a plain
     # postgres DSN and doesn't understand that suffix.
@@ -142,7 +173,12 @@ async def run_dispatch(settings: Settings, stop: asyncio.Event) -> None:
                         client = HttpGenerationClient(settings, http_client)
                         while not stop.is_set():
                             await _drain_ready_jobs(
-                                sessionmaker, semaphore, client, settings, _notify_release
+                                sessionmaker,
+                                semaphore,
+                                client,
+                                settings,
+                                _notify_release,
+                                publish_user_event,
                             )
                             wake.clear()
                             try:

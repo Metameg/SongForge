@@ -68,6 +68,24 @@ def get_user_event_broadcaster(request: Request) -> UserEventBroadcaster:
     return cast(UserEventBroadcaster, request.app.state.user_event_broadcaster)
 
 
+_USER_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
+    "job-failed": ("job_id",),
+    "job-progress": ("job_id", "state", "eta"),
+    "job-ready": ("job_id", "song_id", "title"),
+}
+
+
+def _format_user_event(message: dict[str, Any]) -> str:
+    """SSE frame for a per-user message, named by its `event` key (default
+    `job-failed` for legacy messages). Fields are whitelisted so no stray identity
+    data can leak onto the wire."""
+    name = message.get("event") or "job-failed"
+    fields = _USER_EVENT_FIELDS.get(name)
+    if fields is None:
+        name, fields = "job-failed", _USER_EVENT_FIELDS["job-failed"]
+    return _format_event(name, {f: message.get(f) for f in fields})
+
+
 def _format_event(event: str, payload: dict[str, Any]) -> str:
     """Hand-build one `text/event-stream` frame: a named event + a JSON data line."""
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
@@ -149,7 +167,7 @@ async def events(
                 if user_task in done:
                     message = user_task.result()
                     user_task = None
-                    yield _format_event("job-failed", {"job_id": message.get("job_id")})
+                    yield _format_user_event(message)
         finally:
             for task in (pointer_task, user_task):
                 if task is not None and not task.done():

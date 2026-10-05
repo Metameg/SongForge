@@ -42,6 +42,12 @@ from songforge.models import (
     JOB_STATE_WAITING_FOR_WEBHOOK,
     Job,
 )
+from songforge.radio.user_events import (
+    PublishUserEventFn,
+    progress_message,
+    redis_user_event_publisher,
+    safe_publish_user_event,
+)
 from songforge.redis_client import get_redis
 
 router = APIRouter(tags=["webhook"])
@@ -115,6 +121,15 @@ def get_notify_dependency(
     return _notify
 
 
+def get_publish_user_event_dependency() -> PublishUserEventFn:
+    """The per-user SSE publisher (issue #37); overridden in tests with a spy. Built
+    from ``get_settings()``/``get_redis()`` per request (``Redis.from_url`` is lazy,
+    so this does no I/O until the publish itself)."""
+    return redis_user_event_publisher(
+        get_redis(), get_settings().user_events_channel_prefix
+    )
+
+
 def get_semaphore_dependency() -> Semaphore:
     """The generation semaphore (issue #16 slot-leak fix); overridden in tests with a
     fake so edge tests need no live Redis. Mirrors ``web/routes/create.py``'s
@@ -142,6 +157,9 @@ async def receive_webhook(
     session: AsyncSession = Depends(get_session),
     notify: Notifier = Depends(get_notify_dependency),
     semaphore: Semaphore = Depends(get_semaphore_dependency),
+    publish_user_event: PublishUserEventFn = Depends(
+        get_publish_user_event_dependency
+    ),
 ) -> WebhookResponse:
     """Look up the job by ``task_id``, transition it, NOTIFY, and return 200.
 
@@ -225,9 +243,18 @@ async def receive_webhook(
         job.album_cover_path = body.album_cover_path
         job.state = JOB_STATE_INGEST_PENDING
         await session.commit()
+        progress = (
+            job.user_id,
+            progress_message(job.job_id, job.state, job.eta),
+        )
         webhooks_received_total.labels(outcome="ingest_pending").inc()
         log.info("webhook_ingest_pending", task_id=body.task_id, job_id=job.job_id)
 
         await _safe_notify(notify, settings.ingest_channel, job.job_id)
+        # Issue #37: tell the creator (and only the creator) the audio is now being
+        # ingested; post-commit, best-effort like the NOTIFY above.
+        await safe_publish_user_event(
+            publish_user_event, *progress, log_event="webhook_publish_user_event_failed"
+        )
 
         return WebhookResponse()
