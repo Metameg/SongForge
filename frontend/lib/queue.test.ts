@@ -128,4 +128,81 @@ describe("wireQueueRefetch", () => {
       expect(source.removeEventListener).toHaveBeenCalledWith(name, fn);
     }
   });
+  it("calling cleanup twice does not throw", () => {
+    const source = fakeSource();
+    const cleanup = wireQueueRefetch(source, vi.fn());
+    expect(() => {
+      cleanup();
+      cleanup();
+    }).not.toThrow();
+  });
+  it("two wirings use independent handlers", () => {
+    const source = fakeSource();
+    const r1 = vi.fn();
+    const r2 = vi.fn();
+    wireQueueRefetch(source, r1);
+    wireQueueRefetch(source, r2);
+    const handlers = source.addEventListener.mock.calls.map((c) => c[1] as () => void);
+    expect(new Set(handlers).size).toBe(2);
+    handlers[0]();
+    expect(r1).toHaveBeenCalledTimes(1);
+    expect(r2).not.toHaveBeenCalled();
+  });
+});
+
+describe("parseQueue edge inputs", () => {
+  it("clamps a negative, NaN or Infinity depth to 0", () => {
+    for (const depth of [-3, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(parseQueue({ depth, positions: [] }).depth).toBe(0);
+    }
+  });
+  it("floors a fractional depth", () => {
+    expect(parseQueue({ depth: 2.9, positions: [] }).depth).toBe(2);
+  });
+  it("drops malformed position entries, keeping the valid ones", () => {
+    const parsed = parseQueue({
+      depth: 4,
+      positions: [
+        null,
+        "x",
+        7,
+        { job_id: "no-pos" },
+        { position: 2 },
+        { job_id: 5, position: 2 },
+        { job_id: "str-pos", position: "2" },
+        { job_id: "zero", position: 0 },
+        { job_id: "neg", position: -1 },
+        { job_id: "frac", position: 1.5 },
+        { job_id: "ok", position: 3 },
+      ],
+    });
+    expect(parsed).toEqual({ depth: 4, positions: [{ job_id: "ok", position: 3 }] });
+  });
+  it("strips extra fields from the response and from position entries", () => {
+    const parsed = parseQueue({
+      depth: 1,
+      extra: true,
+      positions: [{ job_id: "j", position: 1, secret: "x" }],
+    });
+    expect(parsed).toEqual({ depth: 1, positions: [{ job_id: "j", position: 1 }] });
+  });
+  it("treats a boolean as an empty queue", () => {
+    expect(parseQueue(true)).toEqual({ depth: 0, positions: [] });
+  });
+});
+
+describe("formatQueueLine / myPosition / fetchQueue edges", () => {
+  it("renders 1 and a large N", () => {
+    expect(formatQueueLine(q(1))).toBe("Queue · 1 waiting");
+    expect(formatQueueLine(q(1234))).toBe("Queue · 1234 waiting");
+  });
+  it("myPosition does not mutate or reorder the positions", () => {
+    const queue = q(9, [5, 1, 3]);
+    expect(myPosition(queue)).toBe(1);
+    expect(queue.positions.map((p) => p.position)).toEqual([5, 1, 3]);
+  });
+  it("fetchQueue degrades a malformed body to an empty queue", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ json: async () => "oops" }));
+    await expect(fetchQueue("")).resolves.toEqual({ depth: 0, positions: [] });
+  });
 });

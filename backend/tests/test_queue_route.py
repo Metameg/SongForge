@@ -271,3 +271,81 @@ async def test_get_queue_never_sets_an_identity_cookie(
     assert resp.status_code == 200
     assert "set-cookie" not in resp.headers
     assert get_settings().identity_cookie_name not in resp.cookies
+
+
+async def test_all_rows_played_means_zero_depth_and_no_positions(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    me = mint()
+    await _seed(sessionmaker, [(1, "job-a", me, True), (2, "job-b", me, True)])
+    client = _with_cookie(_build_client(sessionmaker), me)
+
+    assert client.get("/queue").json() == {"depth": 0, "positions": []}
+
+
+async def test_callers_positions_are_non_contiguous_and_sorted_by_rank(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    me, a, b = mint(), mint(), mint()
+    await _seed(
+        sessionmaker,
+        [
+            (50, "job-me-2", me, False),
+            (10, "job-a-1", a, False),
+            (20, "job-me-1", me, False),
+            (30, "job-b-1", b, False),
+            (40, "job-a-2", a, False),
+            (60, "job-b-2", b, False),
+        ],
+    )
+    client = _with_cookie(_build_client(sessionmaker), me)
+
+    body = client.get("/queue").json()
+
+    assert body["depth"] == 6
+    assert body["positions"] == [
+        {"job_id": "job-me-1", "position": 2},
+        {"job_id": "job-me-2", "position": 5},
+    ]
+
+
+async def test_tampered_cookie_is_read_only_identity_with_correct_depth(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    me = mint()
+    await _seed(sessionmaker, [(1, "job-me", me, False), (2, "job-x", mint(), False)])
+    client = _build_client(sessionmaker)
+    client.cookies.set(get_settings().identity_cookie_name, f"{me}.not-a-valid-signature")
+
+    resp = client.get("/queue")
+
+    assert resp.json() == {"depth": 2, "positions": []}
+    assert "set-cookie" not in resp.headers
+
+
+async def test_empty_cookie_value_does_not_error_or_set_cookie(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client = _build_client(sessionmaker)
+    client.cookies.set(get_settings().identity_cookie_name, "")
+
+    resp = client.get("/queue")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"depth": 0, "positions": []}
+    assert "set-cookie" not in resp.headers
+
+
+async def test_larger_queue_ranks_every_callers_row_by_id(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    me, other = mint(), mint()
+    rows = [(i, f"job-{i}", me if i % 3 == 0 else other, False) for i in range(1, 31)]
+    await _seed(sessionmaker, rows)
+    client = _with_cookie(_build_client(sessionmaker), me)
+
+    body = client.get("/queue").json()
+
+    assert body["depth"] == 30
+    assert [p["position"] for p in body["positions"]] == list(range(3, 31, 3))
+    assert [p["job_id"] for p in body["positions"]] == [f"job-{i}" for i in range(3, 31, 3)]

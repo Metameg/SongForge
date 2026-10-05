@@ -52,4 +52,36 @@ describe("GET /queue proxy", () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ depth: 0, positions: [] });
   });
+
+  it("relays a 503 idle body verbatim along with its content-type", async () => {
+    const body = JSON.stringify({ status: "idle" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(body, { status: 503, headers: { "content-type": "application/json" } }),
+      ),
+    );
+    const res = await GET(req());
+    expect(res.status).toBe(503);
+    expect(await res.text()).toBe(body);
+    expect(res.headers.get("content-type")).toContain("application/json");
+  });
+
+  it("does not relay an upstream set-cookie to the browser", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(okBody, { status: 200, headers: { "set-cookie": "sf_uid=x; Path=/" } }),
+      ),
+    );
+    const res = await GET(req());
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("requests the upstream uncached", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(okResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    await GET(req());
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ cache: "no-store" });
+  });
 });
