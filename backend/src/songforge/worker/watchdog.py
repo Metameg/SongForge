@@ -33,7 +33,6 @@ own notify connection); sweep 4's per-user notification is wired to a plain
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable
 
 import asyncpg
@@ -64,7 +63,11 @@ from songforge.metrics import (
     user_notifications_total,
 )
 from songforge.models import JOB_STATE_FAILED
-from songforge.radio.user_events import user_channel
+from songforge.radio.user_events import (
+    PublishUserEventFn,
+    failed_message,
+    user_channel,
+)
 from songforge.redis_client import get_redis
 from songforge.web.rate_limit import Identity, RateLimiter, RedisRateLimitBackend
 
@@ -81,7 +84,6 @@ NotifyFn = Callable[[str, str], Awaitable[None]]
 # receives as a `job-failed` SSE frame. Production wires this to
 # `redis.publish(user_channel(settings.user_events_channel_prefix, user_id), message)`
 # (see `radio/user_events.py`).
-PublishUserEventFn = Callable[[str, str], Awaitable[None]]
 
 
 async def _safe_notify(notify: NotifyFn, channel: str, payload: str) -> None:
@@ -309,7 +311,7 @@ async def _drain_terminal_failures(
             await _safe_refund(rate_limiter, intent.identity, intent.ip, intent.day)
             quota_refunded_total.inc()
 
-            message = json.dumps({"event": "job-failed", "job_id": intent.job_id})
+            message = failed_message(intent.job_id)
             await _safe_publish_user_event(publish_user_event, intent.user_id, message)
             user_notifications_total.labels(type="job_failed").inc()
 

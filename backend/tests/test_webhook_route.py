@@ -709,3 +709,121 @@ async def test_webhook_unknown_task_increments_unknown_task_counter(
 
     assert resp.status_code == 200
     assert _outcome_count("unknown_task") == before + 1
+
+
+# ── Per-user `job-progress` publish at webhook (issue #37) ────────────────────────
+
+
+class _PublishSpy:
+    """Records `(user_id, message)` calls; injected via
+    `get_publish_user_event_dependency`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, user_id: str, message: str) -> None:
+        self.calls.append((user_id, message))
+
+
+def _build_client_with_publish(
+    sessionmaker: async_sessionmaker[AsyncSession], publish: Any = None
+) -> tuple[TestClient, _PublishSpy]:
+    from songforge.web.routes.webhook import get_publish_user_event_dependency
+
+    client, _notify = _build_client(sessionmaker)
+    spy = _PublishSpy()
+    client.app.dependency_overrides[get_publish_user_event_dependency] = (  # type: ignore[attr-defined]
+        lambda: (publish or spy)
+    )
+    return client, spy
+
+
+async def test_webhook_success_publishes_job_progress_for_the_jobs_user(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    import json
+
+    await _insert_job(sessionmaker, user_id="user-42", eta=60)
+    client, spy = _build_client_with_publish(sessionmaker)
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert len(spy.calls) == 1
+    user_id, message = spy.calls[0]
+    assert user_id == "user-42"
+    assert json.loads(message) == {
+        "event": "job-progress",
+        "job_id": "job-1",
+        "state": JOB_STATE_INGEST_PENDING,
+        "eta": 60,
+    }
+
+
+async def test_webhook_publishes_job_progress_after_the_persisting_commit(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    states_seen_at_publish: list[str] = []
+
+    async def _publish(user_id: str, message: str) -> None:
+        # A fresh session only sees the state if the transition was committed.
+        states_seen_at_publish.append((await _get_job(sessionmaker, "job-1")).state)
+
+    client, _ = _build_client_with_publish(sessionmaker, publish=_publish)
+
+    client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert states_seen_at_publish == [JOB_STATE_INGEST_PENDING]
+
+
+async def test_duplicate_webhook_does_not_republish_job_progress(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, spy = _build_client_with_publish(sessionmaker)
+
+    client.post("/api/generation/webhook", json=_webhook_body())
+    client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert len(spy.calls) == 1
+
+
+async def test_webhook_for_an_unknown_task_does_not_publish_job_progress(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    client, spy = _build_client_with_publish(sessionmaker)
+
+    client.post("/api/generation/webhook", json=_webhook_body(task_id="nope"))
+
+    assert spy.calls == []
+
+
+async def test_webhook_failure_status_does_not_publish_job_progress(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, spy = _build_client_with_publish(sessionmaker)
+
+    client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(status="FAILED", conversion_path=None),
+    )
+
+    assert spy.calls == []
+
+
+async def test_webhook_returns_200_even_if_the_progress_publisher_raises(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+
+    async def _boom(user_id: str, message: str) -> None:
+        raise RuntimeError("redis down")
+
+    client, _ = _build_client_with_publish(sessionmaker, publish=_boom)
+
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert (await _get_job(sessionmaker, "job-1")).state == JOB_STATE_INGEST_PENDING

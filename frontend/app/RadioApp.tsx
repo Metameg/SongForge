@@ -2,9 +2,13 @@
 
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { fetchQuota, type QuotaResponse } from "@/lib/quota";
+import { parseJobEvent, type JobEventName } from "@/lib/events";
+import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
+import { INITIAL_PROGRESS, reduceProgress } from "@/lib/progress";
 import { INITIAL_FEED, reduceFeed } from "@/lib/radio";
 import type { NowPlayingState } from "@/lib/nowPlaying";
 import Composer from "./Composer";
+import GenerationProgressView from "./GenerationProgress";
 import LiveIndicator from "./LiveIndicator";
 import Player from "./Player";
 import RadioStage from "./RadioStage";
@@ -16,18 +20,9 @@ import RadioStage from "./RadioStage";
  */
 export default function RadioApp() {
   const [feed, dispatch] = useReducer(reduceFeed, INITIAL_FEED);
+  const [progress, dispatchProgress] = useReducer(reduceProgress, INITIAL_PROGRESS);
+  const [mySongIds, setMySongIds] = useState<Set<string>>(() => new Set());
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
-
-  useEffect(() => {
-    const source = new EventSource("/events");
-    source.onopen = () => dispatch({ type: "open" });
-    source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
-    source.addEventListener("song-change", (e) =>
-      dispatch({ type: "song-change", data: (e as MessageEvent<string>).data }),
-    );
-    source.addEventListener("idle", () => dispatch({ type: "idle" }));
-    return () => source.close();
-  }, []);
 
   const refreshQuota = useCallback(async () => {
     try {
@@ -36,9 +31,56 @@ export default function RadioApp() {
       /* keep last known */
     }
   }, []);
+
   useEffect(() => {
-    void refreshQuota();
+    let source: EventSource | null = null;
+    let cancelled = false;
+    // Establish the signed identity cookie BEFORE opening the stream. The backend
+    // `GET /events` only READS identity (it never Set-Cookies one), while `GET /quota`
+    // mints and Set-Cookies the identity on a first visit. Opening the stream first
+    // would register it under a throwaway identity the backend discards, so this
+    // viewer's own job-progress/job-ready/job-failed -- published to their real cookie
+    // identity once they create -- would never reach them until a reconnect/reload.
+    // Awaiting the quota read first means the EventSource request carries that cookie.
+    void (async () => {
+      await refreshQuota();
+      if (cancelled) return;
+      source = new EventSource("/events");
+      source.onopen = () => dispatch({ type: "open" });
+      source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
+      source.addEventListener("song-change", (e) =>
+        dispatch({ type: "song-change", data: (e as MessageEvent<string>).data }),
+      );
+      source.addEventListener("idle", () => dispatch({ type: "idle" }));
+      const onJob = (name: JobEventName) => (e: Event) => {
+        const ev = parseJobEvent(name, (e as MessageEvent<string>).data);
+        if (!ev) return;
+        dispatchProgress(ev);
+        if (ev.type === "ready") setMySongIds(addMySong(ev.song_id));
+      };
+      source.addEventListener("job-progress", onJob("job-progress"));
+      source.addEventListener("job-ready", onJob("job-ready"));
+      source.addEventListener("job-failed", onJob("job-failed"));
+    })();
+    return () => {
+      cancelled = true;
+      source?.close();
+    };
   }, [refreshQuota]);
+  useEffect(() => {
+    setMySongIds(loadMySongs()); // post-mount: avoids an SSR/hydration mismatch
+  }, []);
+  useEffect(() => {
+    if (progress.status === "failed") void refreshQuota(); // credit was refunded
+  }, [progress.status, refreshQuota]);
+  const handleCreated = useCallback(
+    (jobId: string) => {
+      dispatchProgress({ type: "started", jobId });
+      void refreshQuota();
+    },
+    [refreshQuota],
+  );
+  const isMine = feed.state?.status === "playing" && hasMySong(mySongIds, feed.state.song_id);
 
   const onRefetched = useCallback(
     (state: NowPlayingState) => dispatch({ type: "refetched", state }),
@@ -68,7 +110,7 @@ export default function RadioApp() {
         <header>
           <h1 style={{ fontSize: 20, margin: "0 0 12px" }}>SongForge</h1>
         </header>
-        <RadioStage state={feed.state} />
+        <RadioStage state={feed.state} isMine={isMine} />
         <section aria-label="Status" style={{ textAlign: "center", marginTop: 16 }}>
           <LiveIndicator feed={feed} />
           {feed.state?.status === "playing" && (
@@ -78,8 +120,12 @@ export default function RadioApp() {
         </section>
       </div>
       <div style={{ width: "100%", maxWidth: 720, margin: "0 auto", position: "sticky", bottom: 0 }}>
-        {/* generationActive stays false in #36: per-user job progress is a later slice. */}
-        <Composer quota={quota} generationActive={false} onCreated={refreshQuota} />
+        <GenerationProgressView progress={progress} />
+        <Composer
+          quota={quota}
+          generationActive={progress.status === "generating"}
+          onCreated={handleCreated}
+        />
       </div>
     </div>
   );

@@ -612,3 +612,142 @@ async def test_metrics_endpoint_exposes_the_new_sse_metrics() -> None:
         assert "songforge_sse_connected_listeners" in body
         assert "songforge_radio_pointer_events_published_total" in body
         assert "songforge_radio_pointer_events_relayed_total" in body
+
+
+# ── Per-user job-progress / job-ready dispatch + privacy (issue #37) ──────────────
+#
+# `/events` picks the SSE frame name from the per-user message's `event` field
+# (default `job-failed` for a message with no `event` key -- backward compat).
+
+
+async def _first_user_frame_after_publish(message: str) -> tuple[str, dict[str, Any]]:
+    from songforge.config import get_settings
+    from songforge.radio.user_events import user_channel
+    from songforge.web.identity import mint, sign
+
+    redis = _FakeRedis()
+    async with _running_app(redis) as (_app, client):
+        settings = get_settings()
+        user_id = mint()
+        client.cookies.set(
+            settings.identity_cookie_name, sign(user_id, secret=settings.session_secret)
+        )
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)  # idle on connect
+            await redis.publish(
+                user_channel(settings.user_events_channel_prefix, user_id), message
+            )
+            return await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+
+
+async def test_events_emits_a_job_progress_frame_with_state_and_eta() -> None:
+    name, payload = await _first_user_frame_after_publish(
+        '{"event": "job-progress", "job_id": "job-1", "state": "WAITING_FOR_WEBHOOK", "eta": 90}'
+    )
+    assert name == "job-progress"
+    assert payload == {"job_id": "job-1", "state": "WAITING_FOR_WEBHOOK", "eta": 90}
+
+
+async def test_events_job_progress_frame_carries_a_null_eta() -> None:
+    name, payload = await _first_user_frame_after_publish(
+        '{"event": "job-progress", "job_id": "job-1", "state": "INGEST_PENDING", "eta": null}'
+    )
+    assert name == "job-progress"
+    assert payload["eta"] is None
+
+
+async def test_events_emits_a_job_ready_frame_with_song_id_and_title() -> None:
+    name, payload = await _first_user_frame_after_publish(
+        '{"event": "job-ready", "job_id": "job-1", "song_id": "song-9", "title": "My Song"}'
+    )
+    assert name == "job-ready"
+    assert payload == {"job_id": "job-1", "song_id": "song-9", "title": "My Song"}
+
+
+async def test_events_still_emits_job_failed_with_only_the_job_id() -> None:
+    name, payload = await _first_user_frame_after_publish(
+        '{"event": "job-failed", "job_id": "job-1"}'
+    )
+    assert name == "job-failed"
+    assert payload == {"job_id": "job-1"}
+
+
+async def test_events_a_user_message_without_an_event_key_defaults_to_job_failed() -> None:
+    name, payload = await _first_user_frame_after_publish('{"job_id": "job-legacy"}')
+    assert name == "job-failed"
+    assert payload == {"job_id": "job-legacy"}
+
+
+async def test_events_drops_an_unknown_event_name_and_keeps_streaming() -> None:
+    from songforge.config import get_settings
+    from songforge.radio.user_events import user_channel
+    from songforge.web.identity import mint, sign
+
+    redis = _FakeRedis()
+    async with _running_app(redis) as (_app, client):
+        settings = get_settings()
+        user_id = mint()
+        client.cookies.set(
+            settings.identity_cookie_name, sign(user_id, secret=settings.session_secret)
+        )
+        channel = user_channel(settings.user_events_channel_prefix, user_id)
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)  # idle on connect
+            await redis.publish(channel, '{"event": "job-from-the-future", "job_id": "x"}')
+            await redis.publish(channel, '{"event": "job-ready", "job_id": "j", "song_id": "s", "title": "T"}')
+            name, payload = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name == "job-ready"
+            assert payload["job_id"] == "j"
+
+
+async def _assert_other_identity_never_receives(message: str) -> None:
+    """Publish `message` on user A's channel; A sees it, B's next frame is only the
+    heartbeat `song-change` (mirrors the job-failed privacy test above)."""
+    from songforge.config import get_settings
+    from songforge.radio.user_events import user_channel
+    from songforge.web.identity import mint, sign
+
+    redis = _FakeRedis()
+    async with _running_app(redis, heartbeat_seconds=0.2) as (app, client):
+        app.state.pointer_cache.set(_record(song_id="song-isolation", version=1, playback_id="pb-iso"))
+        settings = get_settings()
+        user_a = mint()
+        user_b = mint()
+        async with httpx.AsyncClient(
+            base_url=str(client.base_url),
+            cookies={settings.identity_cookie_name: sign(user_a, secret=settings.session_secret)},
+        ) as client_a, httpx.AsyncClient(
+            base_url=str(client.base_url),
+            cookies={settings.identity_cookie_name: sign(user_b, secret=settings.session_secret)},
+        ) as client_b:
+            async with client_a.stream("GET", "/events") as resp_a, client_b.stream(
+                "GET", "/events"
+            ) as resp_b:
+                iter_a = _sse_events(resp_a)
+                iter_b = _sse_events(resp_b)
+                await asyncio.wait_for(iter_a.__anext__(), timeout=2.0)
+                await asyncio.wait_for(iter_b.__anext__(), timeout=2.0)
+
+                await redis.publish(
+                    user_channel(settings.user_events_channel_prefix, user_a), message
+                )
+
+                name_a, _ = await asyncio.wait_for(iter_a.__anext__(), timeout=2.0)
+                assert name_a in {"job-progress", "job-ready", "job-failed"}
+
+                name_b, _ = await asyncio.wait_for(iter_b.__anext__(), timeout=2.0)
+                assert name_b == "song-change"
+
+
+async def test_events_job_progress_never_reaches_a_different_identity() -> None:
+    await _assert_other_identity_never_receives(
+        '{"event": "job-progress", "job_id": "only-a", "state": "WAITING_FOR_WEBHOOK", "eta": 5}'
+    )
+
+
+async def test_events_job_ready_never_reaches_a_different_identity() -> None:
+    await _assert_other_identity_never_receives(
+        '{"event": "job-ready", "job_id": "only-a", "song_id": "song-a", "title": "Mine"}'
+    )

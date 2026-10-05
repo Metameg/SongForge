@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from redis.asyncio import Redis
@@ -41,6 +42,51 @@ _QUEUE_MAXSIZE = 8
 # Mirrors `PointerBroadcaster._ERROR_BACKOFF_SECONDS`: backs off a Redis-outage hot
 # loop instead of busy-spinning + flooding logs.
 _ERROR_BACKOFF_SECONDS = 0.5
+
+
+# Publishes one JSON message onto a user's channel: ``publish(user_id, message_json)``.
+PublishUserEventFn = Callable[[str, str], Awaitable[None]]
+
+
+def failed_message(job_id: str) -> str:
+    """Wire JSON for ``job-failed``. The builders below are the single source of truth
+    for per-user message shapes (the `event` key selects the SSE frame name in
+    `web/routes/events.py`). No payload ever carries the creator's identity."""
+    return json.dumps({"event": "job-failed", "job_id": job_id})
+
+
+def progress_message(job_id: str, state: str, eta: int | None) -> str:
+    """Wire JSON for ``job-progress``; ``eta`` (seconds) is null when unknown."""
+    return json.dumps(
+        {"event": "job-progress", "job_id": job_id, "state": state, "eta": eta}
+    )
+
+
+def ready_message(job_id: str, song_id: str, title: str) -> str:
+    """Wire JSON for ``job-ready``."""
+    return json.dumps(
+        {"event": "job-ready", "job_id": job_id, "song_id": song_id, "title": title}
+    )
+
+
+def redis_user_event_publisher(redis: Redis, prefix: str) -> PublishUserEventFn:
+    """The real publisher: ``PUBLISH`` onto the user's own channel."""
+
+    async def _publish(user_id: str, message: str) -> None:
+        await redis.publish(user_channel(prefix, user_id), message)
+
+    return _publish
+
+
+async def safe_publish_user_event(
+    publish: PublishUserEventFn, user_id: str, message: str, *, log_event: str
+) -> None:
+    """Best-effort post-commit publish: a Redis blip must never abort or undo an
+    already-committed Postgres transition, so errors are logged and swallowed."""
+    try:
+        await publish(user_id, message)
+    except Exception:
+        log.exception(log_event, user_id=user_id)
 
 
 def user_channel(prefix: str, user_id: str) -> str:

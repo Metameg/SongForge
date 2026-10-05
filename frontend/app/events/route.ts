@@ -21,8 +21,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
+  // The backend only READS identity on /events (never mints), so the cookie must be
+  // forwarded or the stream is anonymous and the creator never gets their per-user events.
+  const cookie = request.headers.get("cookie");
   const upstream = await fetch(`${backendUrl}/events`, {
     cache: "no-store",
+    headers: cookie ? { cookie } : {},
     signal: request.signal,
   });
   return new Response(upstream.body, {

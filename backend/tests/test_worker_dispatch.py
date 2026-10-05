@@ -180,7 +180,8 @@ async def test_run_dispatch_poll_backstop_redrains_when_no_notify_ever_arrives(
     stop = asyncio.Event()
 
     async def _fake_drain(sessionmaker: object, semaphore: object, client: object,
-                           settings: Settings, notify_release: object) -> None:
+                           settings: Settings, notify_release: object,
+                           publish_user_event: object = None) -> None:
         nonlocal drain_calls
         drain_calls += 1
         if drain_calls >= 3:
@@ -206,3 +207,156 @@ async def test_run_dispatch_poll_backstop_redrains_when_no_notify_ever_arrives(
     # `_FakeAsyncpgConnection.add_listener` never invoked a wake callback, so nothing
     # but the backstop could have driven passes 2 and 3.
     assert drain_calls == 3
+
+
+# ── Per-user `job-progress` publish at dispatch (issue #37) ───────────────────────
+
+
+class _ProgressJob:
+    def __init__(self, job_id: str, user_id: str = "user-1") -> None:
+        self.job_id = job_id
+        self.user_id = user_id
+        self.state = "QUEUED"
+        self.eta: int | None = None
+
+
+async def test_drain_publishes_job_progress_post_commit_when_job_reaches_waiting_for_webhook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    remaining = iter(["job-1", None])
+    events: list[str] = []
+
+    class _TrackingSession(_NullSession):
+        async def commit(self) -> None:
+            events.append("commit")
+
+    class _TrackingCtx:
+        async def __aenter__(self) -> _TrackingSession:
+            return _TrackingSession()
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    async def _fake_claim(session: object) -> _ProgressJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _ProgressJob(job_id)
+
+    async def _fake_dispatch(job: _ProgressJob, **kwargs: object) -> bool:
+        job.state = "WAITING_FOR_WEBHOOK"
+        job.eta = 90
+        return True
+
+    monkeypatch.setattr("songforge.worker.dispatch.claim_next_job", _fake_claim)
+    monkeypatch.setattr("songforge.worker.dispatch.dispatch_claimed_job", _fake_dispatch)
+
+    published: list[tuple[str, str]] = []
+
+    async def _publish(user_id: str, message: str) -> None:
+        events.append("publish")
+        published.append((user_id, message))
+
+    await _drain_ready_jobs(
+        lambda: _TrackingCtx(),  # type: ignore[arg-type,return-value]
+        object(), object(), _settings(), _noop_notify,  # type: ignore[arg-type]
+        publish_user_event=_publish,
+    )
+
+    assert len(published) == 1
+    user_id, message = published[0]
+    assert user_id == "user-1"
+    assert json.loads(message) == {
+        "event": "job-progress",
+        "job_id": "job-1",
+        "state": "WAITING_FOR_WEBHOOK",
+        "eta": 90,
+    }
+    assert events == ["commit", "publish"]
+
+
+async def test_drain_does_not_publish_job_progress_when_no_slot_was_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_claim(session: object) -> _ProgressJob:
+        return _ProgressJob("job-1")
+
+    async def _fake_dispatch(job: _ProgressJob, **kwargs: object) -> bool:
+        return False  # no slot; job stays QUEUED
+
+    monkeypatch.setattr("songforge.worker.dispatch.claim_next_job", _fake_claim)
+    monkeypatch.setattr("songforge.worker.dispatch.dispatch_claimed_job", _fake_dispatch)
+
+    published: list[tuple[str, str]] = []
+
+    async def _publish(user_id: str, message: str) -> None:
+        published.append((user_id, message))
+
+    await _drain_ready_jobs(
+        _sessionmaker, object(), object(), _settings(), _noop_notify,  # type: ignore[arg-type]
+        publish_user_event=_publish,
+    )
+
+    assert published == []
+
+
+async def test_drain_does_not_publish_job_progress_when_the_job_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _ProgressJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _ProgressJob(job_id)
+
+    async def _fake_dispatch(job: _ProgressJob, **kwargs: object) -> bool:
+        job.state = "FAILED"
+        return True
+
+    monkeypatch.setattr("songforge.worker.dispatch.claim_next_job", _fake_claim)
+    monkeypatch.setattr("songforge.worker.dispatch.dispatch_claimed_job", _fake_dispatch)
+
+    published: list[tuple[str, str]] = []
+
+    async def _publish(user_id: str, message: str) -> None:
+        published.append((user_id, message))
+
+    await _drain_ready_jobs(
+        _sessionmaker, object(), object(), _settings(), _noop_notify,  # type: ignore[arg-type]
+        publish_user_event=_publish,
+    )
+
+    assert published == []
+
+
+async def test_drain_swallows_a_raising_progress_publisher_and_drains_the_next_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", "job-2", None])
+    dispatched: list[str] = []
+
+    async def _fake_claim(session: object) -> _ProgressJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _ProgressJob(job_id)
+
+    async def _fake_dispatch(job: _ProgressJob, **kwargs: object) -> bool:
+        job.state = "WAITING_FOR_WEBHOOK"
+        dispatched.append(job.job_id)
+        return True
+
+    monkeypatch.setattr("songforge.worker.dispatch.claim_next_job", _fake_claim)
+    monkeypatch.setattr("songforge.worker.dispatch.dispatch_claimed_job", _fake_dispatch)
+
+    attempts: list[str] = []
+
+    async def _boom(user_id: str, message: str) -> None:
+        attempts.append(user_id)
+        raise RuntimeError("redis down")
+
+    await _drain_ready_jobs(
+        _sessionmaker, object(), object(), _settings(), _noop_notify,  # type: ignore[arg-type]
+        publish_user_event=_boom,
+    )
+
+    assert dispatched == ["job-1", "job-2"]
+    assert len(attempts) == 2

@@ -15,6 +15,7 @@ assertion fails).
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -277,3 +278,40 @@ async def test_a_message_for_an_unregistered_user_is_a_noop() -> None:
         assert registered_elsewhere.empty()  # never mis-delivered to an unrelated user
     finally:
         await broadcaster.stop()
+
+
+# ── Wire-shape builders (issue #37): ONE source of truth for the per-user JSON ─────
+
+
+def test_failed_message_builds_the_job_failed_wire_shape() -> None:
+    from songforge.radio.user_events import failed_message
+
+    assert json.loads(failed_message("job-1")) == {"event": "job-failed", "job_id": "job-1"}
+
+
+def test_progress_message_builds_the_job_progress_wire_shape() -> None:
+    from songforge.radio.user_events import progress_message
+
+    assert json.loads(progress_message("job-1", "WAITING_FOR_WEBHOOK", 90)) == {
+        "event": "job-progress",
+        "job_id": "job-1",
+        "state": "WAITING_FOR_WEBHOOK",
+        "eta": 90,
+    }
+
+
+def test_progress_message_carries_a_null_eta_when_unknown() -> None:
+    from songforge.radio.user_events import progress_message
+
+    assert json.loads(progress_message("job-1", "INGEST_PENDING", None))["eta"] is None
+
+
+def test_ready_message_builds_the_job_ready_wire_shape() -> None:
+    from songforge.radio.user_events import ready_message
+
+    assert json.loads(ready_message("job-1", "song-9", "My Song")) == {
+        "event": "job-ready",
+        "job_id": "job-1",
+        "song_id": "song-9",
+        "title": "My Song",
+    }

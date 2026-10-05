@@ -85,6 +85,10 @@ from songforge.storage import ObjectStorage, audio_key
 
 log = get_logger(__name__)
 
+# Fallback title for a job with no title. Shared with the worker's `job-ready` event so the
+# event title always equals `Song.title`.
+DEFAULT_SONG_TITLE = "Untitled"
+
 
 class AudioDownloadError(Exception):
     """The audio URL could not be fetched (network error, timeout, or a non-200
@@ -227,7 +231,7 @@ async def _finalize_ready(session: AsyncSession, job: Job, song_id: str, key: st
         session.add(
             Song(
                 id=song_id,
-                title=job.title or "Untitled",
+                title=job.title or DEFAULT_SONG_TITLE,
                 source=SOURCE_GENERATED,
                 object_key=key,
                 duration_seconds=duration,
