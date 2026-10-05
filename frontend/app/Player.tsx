@@ -52,10 +52,21 @@
  * which owns the single `EventSource("/events")` connection and the quota read. Feed
  * state arrives via the `nowPlaying` prop (and the `ended` re-fetch reports back through
  * `onRefetched`); the sync / gapless / drift engine described above is unchanged.
+ *
+ * Issue #36 (local pause): the button is a toggle over a LOCAL `userPlaying` intent. A
+ * pause stops only this viewer's `<audio>` — the SSE feed keeps flowing, the global radio
+ * keeps advancing, and the active buffer keeps tracking the current song exactly as it
+ * does before first play (the buffer `src`-load + active-flip in `applyPlaying` run
+ * regardless of play state; only the seek/play/crossfade actions are gated on
+ * `userPlaying`). Pressing Play therefore re-anchors to the CURRENT live offset via the
+ * same `seekToLiveOffset` path, even if songs changed while paused. `hasStarted` remains a
+ * sticky "has ever played" flag (autoplay anchor granted); `userPlaying` is the live
+ * listen/pause intent.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchNowPlaying, type NowPlaying, type NowPlayingState } from "../lib/nowPlaying";
+import { resolvePlayButton } from "../lib/playback";
 import {
   computeExpectedOffsetSeconds,
   computeOffsetSeconds,
@@ -135,16 +146,21 @@ export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
   // Issue #36: the pointer state is now owned by RadioApp (which holds the single
   // `EventSource("/events")`) and arrives as a prop; the engine below is unchanged.
   const state = nowPlaying;
+  // Sticky "has ever played" — the autoplay anchor, granted on the first Play and never
+  // cleared (drives `data-started`). Distinct from `userPlaying` (the live listen intent).
   const [hasStarted, setHasStarted] = useState(false);
+  // Local listen/pause intent (issue #36). A pause flips this to false and pauses the
+  // `<audio>` buffers; the station keeps advancing and the active buffer keeps tracking it,
+  // so the next Play re-syncs to the current live offset. A ref mirror is read inside the
+  // stable `applyPlaying` callback (which cannot close over fresh state each render).
+  const [userPlaying, setUserPlaying] = useState(false);
+  const userPlayingRef = useRef(false);
   const audioARef = useRef<HTMLAudioElement | null>(null);
   const audioBRef = useRef<HTMLAudioElement | null>(null);
   // Which buffer is currently "live" (the other is preloading/idle). A ref, not state:
   // nothing in the render depends on it (both `<audio>` elements are rendered
   // unconditionally; their `src` is set imperatively), so it need not trigger a re-render.
   const activeBufferRef = useRef<PreloadSlot>("a");
-  // Mirrors `hasStarted` for use inside `applyPlaying`, which is created once (stable
-  // callback identity) and so cannot close over a fresh `hasStarted` from each render.
-  const hasStartedRef = useRef(false);
   // The last pointer's `playback_id` applied to the buffers — lets `shouldReanchorOnPointer`
   // tell a genuine song change apart from a heartbeat re-send of the same one.
   const prevPlaybackIdRef = useRef<string | null>(null);
@@ -176,7 +192,7 @@ export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
     // genuine boundary (or the `ended` safeguard, which only fires once the outgoing
     // song has actually played out) has ~0 remaining and reads as "cut" for free.
     let transition: "crossfade" | "cut" = "cut";
-    if (outgoingPointer && hasStartedRef.current) {
+    if (outgoingPointer && userPlayingRef.current) {
       const serverNowMs = correctedServerNowMs(Date.now(), skewMsRef.current);
       const offsetIntoOutgoingSeconds = computeOffsetSeconds(
         serverNowMs,
@@ -193,14 +209,18 @@ export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
     const outgoing = bufferElement(activeBufferRef.current, audioARef, audioBRef);
     const incoming = bufferElement(nextPreloadSlot(activeBufferRef.current), audioARef, audioBRef);
     if (incoming) {
+      // Load the current track into the inactive buffer and flip to it REGARDLESS of play
+      // state, so the active buffer always holds whatever is airing now — this is what lets
+      // a Play after a local pause re-sync instantly to the current song. Only the audible
+      // seek/play/crossfade is gated on `userPlaying`.
       incoming.src = next.audio_url;
-      if (hasStartedRef.current) {
+      if (userPlayingRef.current) {
         seekToLiveOffset(incoming, next);
         incoming.volume = transition === "crossfade" ? 0 : 1;
         void incoming.play();
       }
     }
-    if (hasStartedRef.current) {
+    if (userPlayingRef.current) {
       if (transition === "crossfade" && incoming && outgoing) {
         rampVolume(outgoing, "outgoing", CROSSFADE_DURATION_MS, () => {
           outgoing.pause();
@@ -230,14 +250,27 @@ export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
     }
   }, [nowPlaying, applyPlaying]);
 
-  const handlePlay = () => {
+  // Toggle LOCAL playback. Pause stops only this viewer's `<audio>` (both buffers) and
+  // flips `userPlaying` off — the global radio keeps advancing and the active buffer keeps
+  // tracking it via the SSE feed. Play/resume re-anchors to the CURRENT live offset (the
+  // active buffer already holds whatever is airing now) and plays; the station's position
+  // is read from the in-memory pointer, so no re-fetch is needed.
+  const handleToggle = () => {
     if (!state || state.status !== "playing") return;
+    if (userPlayingRef.current) {
+      audioARef.current?.pause();
+      audioBRef.current?.pause();
+      userPlayingRef.current = false;
+      setUserPlaying(false);
+      return;
+    }
     const audio = bufferElement(activeBufferRef.current, audioARef, audioBRef);
     if (!audio) return;
     seekToLiveOffset(audio, state);
     void audio.play();
-    hasStartedRef.current = true;
-    setHasStarted(true);
+    userPlayingRef.current = true;
+    setUserPlaying(true);
+    if (!hasStarted) setHasStarted(true);
   };
 
   // The current track finished with no next-song push having arrived yet — re-fetch
@@ -261,7 +294,7 @@ export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
   const handleTimeUpdate = (event: React.SyntheticEvent<HTMLAudioElement>) => {
     const audio = bufferElement(activeBufferRef.current, audioARef, audioBRef);
     if (event.currentTarget !== audio) return;
-    if (!hasStarted || !audio || !state || state.status !== "playing") return;
+    if (!userPlaying || !audio || !state || state.status !== "playing") return;
     const expected = computeExpectedOffsetSeconds(
       Date.parse(state.started_at),
       Date.now(),
@@ -272,25 +305,27 @@ export default function Player({ nowPlaying, onRefetched }: PlayerProps) {
     }
   };
 
-  const isPlaying = state?.status === "playing";
+  const radioPlaying = state?.status === "playing";
+  const { label, disabled } = resolvePlayButton({ radioPlaying, userPlaying });
 
   return (
-    <div data-started={hasStarted ? "true" : "false"}>
+    <div data-started={hasStarted ? "true" : "false"} data-playing={userPlaying ? "true" : "false"}>
       <button
-        onClick={handlePlay}
-        disabled={!isPlaying}
+        onClick={handleToggle}
+        disabled={disabled}
+        aria-label={label}
         style={{
           padding: "0.75rem 2rem",
           fontSize: "1rem",
           borderRadius: "999px",
           border: "none",
-          cursor: isPlaying ? "pointer" : "not-allowed",
+          cursor: disabled ? "not-allowed" : "pointer",
           background: "#f2f2f2",
           color: "#0b0b0f",
-          opacity: isPlaying ? 1 : 0.5,
+          opacity: disabled ? 0.5 : 1,
         }}
       >
-        Play
+        {label}
       </button>
       <audio ref={audioARef} preload="auto" onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
       <audio ref={audioBRef} preload="auto" onEnded={handleEnded} onTimeUpdate={handleTimeUpdate} />
