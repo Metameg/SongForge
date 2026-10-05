@@ -44,30 +44,38 @@ async def get_queue_status(session: AsyncSession, user_id: str) -> QueueStatus:
     ``job_id`` count toward depth and rank but join to no job, so never appear in
     ``positions``.
     """
-    waiting = (
+    # ONE statement, one scan: rank the whole waiting set once, carrying the total
+    # (``count(*) over ()``) on every ranked row, then keep only the caller's rows
+    # plus rank 1 (so depth is still reported when the caller has nothing queued).
+    # Depth and positions therefore come from the same snapshot -- a position can
+    # never exceed depth, even under READ COMMITTED.
+    ranked = (
         select(
             PlaybackQueue.job_id.label("job_id"),
             func.row_number().over(order_by=PlaybackQueue.id).label("pos"),
+            func.count().over().label("total"),
         )
         .where(PlaybackQueue.played_at.is_(None))
         .subquery()
     )
-    depth = (
-        await session.scalar(
-            select(func.count())
-            .select_from(PlaybackQueue)
-            .where(PlaybackQueue.played_at.is_(None))
+    rows = (
+        await session.execute(
+            select(ranked.c.pos, ranked.c.total, Job.job_id)
+            .outerjoin(
+                Job, (Job.job_id == ranked.c.job_id) & (Job.user_id == user_id)
+            )
+            .where(Job.job_id.is_not(None) | (ranked.c.pos == 1))
+            .order_by(ranked.c.pos)
         )
-    ) or 0
-    rows = await session.execute(
-        select(waiting.c.job_id, waiting.c.pos)
-        .join(Job, Job.job_id == waiting.c.job_id)
-        .where(Job.user_id == user_id)
-        .order_by(waiting.c.pos)
-    )
+    ).all()
+    depth = int(rows[0].total) if rows else 0
     return QueueStatus(
         depth=depth,
-        positions=[QueuePositionEntry(job_id=str(j), position=int(p)) for j, p in rows.all()],
+        positions=[
+            QueuePositionEntry(job_id=str(job_id), position=int(pos))
+            for pos, _total, job_id in rows
+            if job_id is not None
+        ],
     )
 
 

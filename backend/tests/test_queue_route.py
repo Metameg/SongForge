@@ -349,3 +349,29 @@ async def test_larger_queue_ranks_every_callers_row_by_id(
     assert body["depth"] == 30
     assert [p["position"] for p in body["positions"]] == list(range(3, 31, 3))
     assert [p["job_id"] for p in body["positions"]] == [f"job-{i}" for i in range(3, 31, 3)]
+
+
+async def test_every_returned_position_is_within_depth(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Consistency invariant: depth and positions come from one snapshot, so no
+    position can exceed depth (incl. when the caller owns the tail of the queue)."""
+    me, other = mint(), mint()
+    await _seed(
+        sessionmaker,
+        [
+            (1, "job-o-1", other, True),
+            (2, "job-o-2", other, False),
+            (3, None, None, False),
+            (4, "job-me-1", me, False),
+            (5, "job-o-3", other, False),
+            (6, "job-me-2", me, False),
+        ],
+    )
+    client = _with_cookie(_build_client(sessionmaker), me)
+
+    body = client.get("/queue").json()
+
+    assert body["depth"] == 5
+    assert body["positions"]
+    assert all(1 <= p["position"] <= body["depth"] for p in body["positions"])
