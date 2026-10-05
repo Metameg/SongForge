@@ -11,10 +11,36 @@ the caller's own ``AsyncSession`` directly (same pattern as querying ``Song`` in
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from songforge.models import PlaybackQueue
+
+
+@dataclass(frozen=True)
+class QueuePositionEntry:
+    """One of the caller's own waiting jobs and its 1-based GLOBAL position in the FIFO."""
+
+    job_id: str
+    position: int
+
+
+@dataclass(frozen=True)
+class QueueStatus:
+    """Waiting-queue snapshot: total ``depth`` plus the caller's own ``positions``."""
+
+    depth: int
+    positions: list[QueuePositionEntry]
+
+
+async def get_queue_status(session: AsyncSession, user_id: str) -> QueueStatus:
+    """Depth of the waiting FIFO (``played_at IS NULL``) and ``user_id``'s own positions.
+
+    STUB (issue #38 TDD red) -- the implementer replaces this body.
+    """
+    raise NotImplementedError("get_queue_status is not implemented yet (issue #38)")
 
 
 async def enqueue_song(
