@@ -6,15 +6,77 @@ own decision logic stays unit-testable against ``sqlite+aiosqlite``, without nee
 mock/port abstraction the way Redis-backed collaborators do -- ``playback_queue`` lives
 in the SAME Postgres database as ``radio_state``/``songs``, so these functions just take
 the caller's own ``AsyncSession`` directly (same pattern as querying ``Song`` in
-``radio.coordinator``).
+``radio.coordinator``). Also hosts the waiting-queue status read (issue #38).
 """
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from dataclasses import dataclass
+
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from songforge.models import PlaybackQueue
+from songforge.models import Job, PlaybackQueue
+
+
+@dataclass(frozen=True)
+class QueuePositionEntry:
+    """One of the caller's own waiting jobs and its 1-based GLOBAL position in the FIFO."""
+
+    job_id: str
+    position: int
+
+
+@dataclass(frozen=True)
+class QueueStatus:
+    """Waiting-queue snapshot: total ``depth`` plus the caller's own ``positions``."""
+
+    depth: int
+    positions: list[QueuePositionEntry]
+
+
+async def get_queue_status(session: AsyncSession, user_id: str) -> QueueStatus:
+    """Depth of the waiting FIFO (``played_at IS NULL``) and ``user_id``'s own positions.
+
+    Order is ``playback_queue.id`` (the FIFO key ``pop_next_user_song`` also uses). Rank
+    is computed over ALL waiting rows (a window function) *before* filtering to the
+    caller, so a position is where the song sits in the whole queue. Rows with a null
+    ``job_id`` count toward depth and rank but join to no job, so never appear in
+    ``positions``.
+    """
+    # ONE statement, one scan: rank the whole waiting set once, carrying the total
+    # (``count(*) over ()``) on every ranked row, then keep only the caller's rows
+    # plus rank 1 (so depth is still reported when the caller has nothing queued).
+    # Depth and positions therefore come from the same snapshot -- a position can
+    # never exceed depth, even under READ COMMITTED.
+    ranked = (
+        select(
+            PlaybackQueue.job_id.label("job_id"),
+            func.row_number().over(order_by=PlaybackQueue.id).label("pos"),
+            func.count().over().label("total"),
+        )
+        .where(PlaybackQueue.played_at.is_(None))
+        .subquery()
+    )
+    rows = (
+        await session.execute(
+            select(ranked.c.pos, ranked.c.total, Job.job_id)
+            .outerjoin(
+                Job, (Job.job_id == ranked.c.job_id) & (Job.user_id == user_id)
+            )
+            .where(Job.job_id.is_not(None) | (ranked.c.pos == 1))
+            .order_by(ranked.c.pos)
+        )
+    ).all()
+    depth = int(rows[0].total) if rows else 0
+    return QueueStatus(
+        depth=depth,
+        positions=[
+            QueuePositionEntry(job_id=str(job_id), position=int(pos))
+            for pos, _total, job_id in rows
+            if job_id is not None
+        ],
+    )
 
 
 async def enqueue_song(

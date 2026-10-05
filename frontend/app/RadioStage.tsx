@@ -25,9 +25,11 @@ export default function RadioStage({
     aspectRatio: "1 / 1",
     maxWidth: 420,
     margin: "0 auto",
-    borderRadius: 16,
+    borderRadius: 18,
     overflow: "hidden",
-    background: "#16161d",
+    background: "var(--sf-surface)",
+    border: "1px solid var(--sf-border)",
+    boxShadow: "var(--sf-shadow)",
     position: "relative",
   } as const;
   return (
@@ -72,7 +74,8 @@ export default function RadioStage({
                 width: 6,
                 height: "60%",
                 borderRadius: 3,
-                background: "#f2f2f2",
+                background: "var(--sf-accent-grad)",
+                boxShadow: "0 0 10px -2px var(--sf-accent-glow)",
                 transformOrigin: "center",
                 animation: `sf-bar ${0.9 + (i % 5) * 0.15}s ease-in-out ${i * 0.04}s infinite`,
               }}
@@ -82,18 +85,8 @@ export default function RadioStage({
       )}
       {isMine && state?.status === "playing" && (
         <span
-          style={{
-            position: "absolute",
-            top: 12,
-            left: 12,
-            padding: "4px 10px",
-            borderRadius: 999,
-            fontSize: 12,
-            fontWeight: 600,
-            background: "#0b0b0f",
-            color: "#8ab4ff",
-            border: "1px solid #8ab4ff",
-          }}
+          className="sf-badge sf-badge-next"
+          style={{ position: "absolute", top: 12, left: 12, fontSize: 12 }}
         >
           Your song
         </span>

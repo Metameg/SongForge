@@ -1,5 +1,21 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
+import { DM_Sans, Space_Grotesk } from "next/font/google";
+import "./globals.css";
+
+const display = Space_Grotesk({
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+  variable: "--font-display",
+  display: "swap",
+});
+
+const body = DM_Sans({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-body",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "SongForge",
@@ -8,17 +24,8 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <body
-        style={{
-          margin: 0,
-          fontFamily: "system-ui, sans-serif",
-          background: "#0b0b0f",
-          color: "#f2f2f2",
-        }}
-      >
-        {children}
-      </body>
+    <html lang="en" className={`${display.variable} ${body.variable}`}>
+      <body>{children}</body>
     </html>
   );
 }

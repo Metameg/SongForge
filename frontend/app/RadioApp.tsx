@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { fetchQueue, makeLatestGuard, wireQueueRefetch, type QueueResponse } from "@/lib/queue";
 import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
@@ -11,6 +12,7 @@ import Composer from "./Composer";
 import GenerationProgressView from "./GenerationProgress";
 import LiveIndicator from "./LiveIndicator";
 import Player from "./Player";
+import QueueStatus from "./QueueStatus";
 import RadioStage from "./RadioStage";
 
 /**
@@ -24,6 +26,8 @@ export default function RadioApp() {
   const [mySongIds, setMySongIds] = useState<Set<string>>(() => new Set());
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
 
+  const [queue, setQueue] = useState<QueueResponse | null>(null);
+
   const refreshQuota = useCallback(async () => {
     try {
       setQuota(await fetchQuota(""));
@@ -32,7 +36,21 @@ export default function RadioApp() {
     }
   }, []);
 
+  // Only the newest refresh applies: rapid SSE events fire concurrent fetches, and an
+  // older-but-slower response must not overwrite a newer one with a stale position.
+  const queueGuard = useRef(makeLatestGuard());
+  const refreshQueue = useCallback(async () => {
+    const token = queueGuard.current.begin();
+    try {
+      const next = await fetchQueue("");
+      if (queueGuard.current.isCurrent(token)) setQueue(next);
+    } catch {
+      /* keep last known */
+    }
+  }, []);
+
   useEffect(() => {
+    let unwireQueue: (() => void) | null = null;
     let source: EventSource | null = null;
     let cancelled = false;
     // Establish the signed identity cookie BEFORE opening the stream. The backend
@@ -46,6 +64,10 @@ export default function RadioApp() {
       await refreshQuota();
       if (cancelled) return;
       source = new EventSource("/events");
+      // Queue is read once now (cookie established above), then refetched reactively on
+      // song-change / the viewer's own job-progress / job-ready -- no timer polling.
+      unwireQueue = wireQueueRefetch(source, () => void refreshQueue());
+      void refreshQueue();
       source.onopen = () => dispatch({ type: "open" });
       source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
       source.addEventListener("song-change", (e) =>
@@ -64,9 +86,10 @@ export default function RadioApp() {
     })();
     return () => {
       cancelled = true;
+      unwireQueue?.();
       source?.close();
     };
-  }, [refreshQuota]);
+  }, [refreshQuota, refreshQueue]);
   useEffect(() => {
     setMySongIds(loadMySongs()); // post-mount: avoids an SSR/hydration mismatch
   }, []);
@@ -107,15 +130,36 @@ export default function RadioApp() {
           flex: 1,
         }}
       >
-        <header>
-          <h1 style={{ fontSize: 20, margin: "0 0 12px" }}>SongForge</h1>
+        <header style={{ display: "flex", justifyContent: "center", padding: "4px 0 18px" }}>
+          <h1
+            className="sf-wordmark"
+            style={{ fontSize: 24, margin: 0, display: "inline-flex", alignItems: "center", gap: 9 }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: 9,
+                height: 9,
+                borderRadius: "50%",
+                background: "var(--sf-accent-grad)",
+                boxShadow: "0 0 12px 0 var(--sf-accent-glow)",
+              }}
+            />
+            Song<span style={{ color: "var(--sf-accent)" }}>Forge</span>
+          </h1>
         </header>
         <RadioStage state={feed.state} isMine={isMine} />
-        <section aria-label="Status" style={{ textAlign: "center", marginTop: 16 }}>
+        <section aria-label="Status" style={{ textAlign: "center", marginTop: 18 }}>
           <LiveIndicator feed={feed} />
           {feed.state?.status === "playing" && (
-            <p style={{ opacity: 0.7, margin: "8px 0" }}>{feed.state.title}</p>
+            <p
+              className="sf-wordmark"
+              style={{ fontSize: 17, fontWeight: 600, color: "var(--sf-text)", margin: "10px 0 2px" }}
+            >
+              {feed.state.title}
+            </p>
           )}
+          <QueueStatus queue={queue} />
           <Player nowPlaying={feed.state} onRefetched={onRefetched} />
         </section>
       </div>
