@@ -10,6 +10,7 @@ import {
   formatQueueLine,
   myPosition,
   parseQueue,
+  positionLabel,
   wireQueueRefetch,
   type QueueResponse,
 } from "./queue";
@@ -45,6 +46,17 @@ describe("formatQueueLine", () => {
   });
   it("renders zero as '0 waiting'", () => {
     expect(formatQueueLine(q(0))).toBe("Queue · 0 waiting");
+  });
+});
+
+describe("positionLabel", () => {
+  it("celebrates the next-up spot for position 1", () => {
+    expect(positionLabel(1)).toBe("Your song is next up!");
+  });
+
+  it("renders a plain in-line label for later positions", () => {
+    expect(positionLabel(2)).toBe("You're #2 in line");
+    expect(positionLabel(7)).toBe("You're #7 in line");
   });
 });
 

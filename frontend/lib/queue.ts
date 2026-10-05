@@ -53,6 +53,14 @@ export function myPosition(q: QueueResponse): number | null {
   return Math.min(...q.positions.map((p) => p.position));
 }
 
+/**
+ * Human-facing label for the viewer's own queue position. Position 1 gets a celebratory
+ * "next up" message; later positions get a plain in-line label.
+ */
+export function positionLabel(position: number): string {
+  return position === 1 ? "Your song is next up!" : `You're #${position} in line`;
+}
+
 /** Fetch via the same-origin proxy. */
 export async function fetchQueue(baseUrl: string): Promise<QueueResponse> {
   const response = await fetch(`${baseUrl}/queue`, { cache: "no-store" });
