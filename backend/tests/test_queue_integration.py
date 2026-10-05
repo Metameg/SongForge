@@ -22,7 +22,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from songforge.radio.queue import get_queue_status
+from songforge.models import JOB_STATE_READY, Job, Song
+from songforge.radio.queue import enqueue_song, get_queue_status
 
 pytestmark = pytest.mark.integration
 
@@ -188,3 +189,55 @@ async def test_null_job_id_row_counts_in_depth_but_not_positions(session: AsyncS
 
     assert status.depth == base + 2
     assert [(p.job_id, p.position) for p in status.positions] == [(mine, base + 2)]
+
+
+async def test_positions_via_real_enqueue_song_path(session: AsyncSession) -> None:
+    """Rows written by the REAL `enqueue_song` (as `_finalize_ready` does) rank correctly."""
+    base = await _own_depth_baseline(session)
+    jobs: dict[str, str] = {}
+    for name, user in (("r1", _BOB), ("r2", _ALICE), ("r3", _ALICE)):
+        song_id, job_id = f"{_PREFIX}song-{name}", f"{_PREFIX}job-{name}"
+        session.add(
+            Song(id=song_id, title="t", source="generated", object_key=f"audio/{song_id}.mp3")
+        )
+        session.add(
+            Job(job_id=job_id, user_id=user, prompt="p", state=JOB_STATE_READY, attempts=0)
+        )
+        await session.flush()
+        await enqueue_song(session, song_id, job_id)
+        await session.commit()  # commit per row so the Identity ids are strictly ordered
+        jobs[name] = job_id
+
+    alice = await get_queue_status(session, _ALICE)
+
+    assert alice.depth == base + 3
+    assert {p.job_id: p.position for p in alice.positions} == {
+        jobs["r2"]: base + 2,
+        jobs["r3"]: base + 3,
+    }
+
+
+async def test_caller_with_several_jobs_gets_each_global_rank_in_order(
+    session: AsyncSession,
+) -> None:
+    base = await _own_depth_baseline(session)
+    a1 = await _enqueue(session, "a1", _ALICE)
+    await _enqueue(session, "b1", _BOB)
+    await _enqueue(session, "b2", _BOB)
+    a2 = await _enqueue(session, "a2", _ALICE)
+
+    alice = await get_queue_status(session, _ALICE)
+
+    assert [(p.job_id, p.position) for p in alice.positions] == [
+        (a1, base + 1),
+        (a2, base + 4),
+    ]
+
+
+async def test_caller_with_only_played_rows_has_no_positions(session: AsyncSession) -> None:
+    await _enqueue(session, "aired1", _ALICE, played=True)
+    await _enqueue(session, "aired2", _ALICE, played=True)
+
+    status = await get_queue_status(session, _ALICE)
+
+    assert status.positions == []
