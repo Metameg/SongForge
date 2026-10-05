@@ -7,7 +7,13 @@ import { stageView } from "@/lib/stage";
 const BARS = 24;
 
 /** Zone 1: album art / animated waveform / gradient fallback (never a broken image). */
-export default function RadioStage({ state }: { state: NowPlayingState | null }) {
+export default function RadioStage({
+  state,
+  isMine = false,
+}: {
+  state: NowPlayingState | null;
+  isMine?: boolean;
+}) {
   const [imageFailed, setImageFailed] = useState(false);
   const songId = state?.status === "playing" ? state.song_id : null;
   useEffect(() => {
@@ -22,6 +28,7 @@ export default function RadioStage({ state }: { state: NowPlayingState | null })
     borderRadius: 16,
     overflow: "hidden",
     background: "#16161d",
+    position: "relative",
   } as const;
   return (
     <section aria-label="Now playing" style={frame}>
@@ -72,6 +79,24 @@ export default function RadioStage({ state }: { state: NowPlayingState | null })
             />
           ))}
         </div>
+      )}
+      {isMine && state?.status === "playing" && (
+        <span
+          style={{
+            position: "absolute",
+            top: 12,
+            left: 12,
+            padding: "4px 10px",
+            borderRadius: 999,
+            fontSize: 12,
+            fontWeight: 600,
+            background: "#0b0b0f",
+            color: "#8ab4ff",
+            border: "1px solid #8ab4ff",
+          }}
+        >
+          Your song
+        </span>
       )}
       {view.kind === "idle" && <div style={{ width: "100%", height: "100%" }} />}
     </section>

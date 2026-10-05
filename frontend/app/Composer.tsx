@@ -9,7 +9,7 @@ export interface ComposerProps {
   /** Hard-wired false in #36; job progress is a later slice. */
   generationActive: boolean;
   /** RadioApp refreshes quota after a successful create. */
-  onCreated: () => void;
+  onCreated: (jobId: string) => void;
 }
 
 const field: CSSProperties = {
@@ -51,7 +51,7 @@ export default function Composer({ quota, generationActive, onCreated }: Compose
         setPrompt("");
         setLyrics("");
         setShowLyrics(false);
-        onCreated();
+        onCreated(result.jobId);
       } else {
         setError(result.message);
       }
