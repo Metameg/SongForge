@@ -241,3 +241,20 @@ async def test_caller_with_only_played_rows_has_no_positions(session: AsyncSessi
     status = await get_queue_status(session, _ALICE)
 
     assert status.positions == []
+
+
+async def test_partial_index_exists_on_waiting_playback_queue(session: AsyncSession) -> None:
+    """The depth/positions scan filters `played_at IS NULL`; a partial index on the
+    waiting set keeps it off the ever-growing played rows. Matched by definition shape
+    (mentions `played_at` + a `WHERE`), not a hard-coded name."""
+    rows = (
+        await session.execute(
+            text("SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'playback_queue'")
+        )
+    ).all()
+    partial = [
+        r
+        for r in rows
+        if "played_at" in r.indexdef.lower() and "where" in r.indexdef.lower()
+    ]
+    assert partial, f"no partial index on playback_queue(played_at IS NULL); had: {rows}"
