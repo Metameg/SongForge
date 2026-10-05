@@ -56,6 +56,9 @@ export function myPosition(q: QueueResponse): number | null {
 /** Fetch via the same-origin proxy. */
 export async function fetchQueue(baseUrl: string): Promise<QueueResponse> {
   const response = await fetch(`${baseUrl}/queue`, { cache: "no-store" });
+  // A non-OK response (e.g. the proxy's 503 fallback) must NOT be parsed as an empty
+  // queue: throw so the caller keeps its last known queue line.
+  if (!response.ok) throw new Error(`queue fetch failed: ${response.status}`);
   return parseQueue(await response.json());
 }
 

@@ -63,17 +63,22 @@ describe("myPosition", () => {
 describe("fetchQueue", () => {
   it("reads `${baseUrl}/queue` uncached and returns the parsed body", async () => {
     const body = { depth: 2, positions: [{ job_id: "j1", position: 1 }] };
-    const fetchMock = vi.fn().mockResolvedValue({ json: async () => body });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => body });
     vi.stubGlobal("fetch", fetchMock);
     await expect(fetchQueue("")).resolves.toEqual(body);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/queue");
     expect(init).toMatchObject({ cache: "no-store" });
   });
+  it("rejects on a non-OK response so callers keep the last known queue", async () => {
+    const json = vi.fn().mockResolvedValue({ depth: 0, positions: [] });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503, json }));
+    await expect(fetchQueue("")).rejects.toThrow();
+  });
   it("honours a non-empty base url", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue({ json: async () => ({ depth: 0, positions: [] }) });
+      .mockResolvedValue({ ok: true, json: async () => ({ depth: 0, positions: [] }) });
     vi.stubGlobal("fetch", fetchMock);
     await fetchQueue("http://api.test");
     expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/queue");
@@ -202,7 +207,7 @@ describe("formatQueueLine / myPosition / fetchQueue edges", () => {
     expect(queue.positions.map((p) => p.position)).toEqual([5, 1, 3]);
   });
   it("fetchQueue degrades a malformed body to an empty queue", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ json: async () => "oops" }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => "oops" }));
     await expect(fetchQueue("")).resolves.toEqual({ depth: 0, positions: [] });
   });
 });
