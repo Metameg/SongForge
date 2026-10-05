@@ -1,7 +1,8 @@
-/** Queue depth + the viewer's own position (issue #38). STUB for TDD red. */
+/** `/queue` fetch, parsing, formatting and SSE refetch wiring (issue #38). */
 
 export interface QueuePosition {
   job_id: string;
+  /** 1-based GLOBAL position in the waiting FIFO. */
   position: number;
 }
 export interface QueueResponse {
@@ -15,25 +16,60 @@ export interface QueueEventSource {
   removeEventListener(name: string, listener: () => void): void;
 }
 
-export function parseQueue(_raw: unknown): QueueResponse {
-  return { depth: 0, positions: [] };
+/** Tolerant parse: anything malformed degrades to empty/zero rather than throwing. */
+export function parseQueue(raw: unknown): QueueResponse {
+  if (typeof raw !== "object" || raw === null) return { depth: 0, positions: [] };
+  const o = raw as Record<string, unknown>;
+  const depth =
+    typeof o.depth === "number" && Number.isFinite(o.depth) && o.depth > 0
+      ? Math.floor(o.depth)
+      : 0;
+  const positions: QueuePosition[] = [];
+  if (Array.isArray(o.positions)) {
+    for (const p of o.positions) {
+      if (typeof p !== "object" || p === null) continue;
+      const r = p as Record<string, unknown>;
+      if (
+        typeof r.job_id === "string" &&
+        typeof r.position === "number" &&
+        Number.isInteger(r.position) &&
+        r.position >= 1
+      ) {
+        positions.push({ job_id: r.job_id, position: r.position });
+      }
+    }
+  }
+  return { depth, positions };
 }
 
-export function formatQueueLine(_q: QueueResponse): string {
-  return "";
+/** The always-visible queue line. */
+export function formatQueueLine(q: QueueResponse): string {
+  return `Queue · ${q.depth} waiting`;
 }
 
-export function myPosition(_q: QueueResponse): number | null {
-  return null;
+/** The viewer's soonest position (lowest number), or null when they have none queued. */
+export function myPosition(q: QueueResponse): number | null {
+  if (q.positions.length === 0) return null;
+  return Math.min(...q.positions.map((p) => p.position));
 }
 
-export async function fetchQueue(_baseUrl: string): Promise<QueueResponse> {
-  throw new Error("fetchQueue not implemented (issue #38)");
+/** Fetch via the same-origin proxy. */
+export async function fetchQueue(baseUrl: string): Promise<QueueResponse> {
+  const response = await fetch(`${baseUrl}/queue`, { cache: "no-store" });
+  return parseQueue(await response.json());
 }
 
+/** Events after which the queue may have changed (advance, or the viewer's own job moved). */
+const REFETCH_EVENTS = ["song-change", "job-progress", "job-ready"] as const;
+
+/** Refetch on queue-relevant SSE events (no polling). Returns a cleanup that detaches. */
 export function wireQueueRefetch(
-  _source: QueueEventSource,
-  _refetch: () => void,
+  source: QueueEventSource,
+  refetch: () => void,
 ): () => void {
-  return () => {};
+  const handler = () => refetch();
+  for (const name of REFETCH_EVENTS) source.addEventListener(name, handler);
+  return () => {
+    for (const name of REFETCH_EVENTS) source.removeEventListener(name, handler);
+  };
 }
