@@ -13,6 +13,7 @@ import pytest
 import songforge.worker.dispatch as worker_dispatch_module
 import songforge.worker.ingest as worker_ingest_module
 from songforge.config import Settings
+from songforge.jobs.ingest import DEFAULT_SONG_TITLE
 from songforge.web.routes.events import _format_user_event
 from songforge.worker.dispatch import _drain_ready_jobs
 from songforge.worker.ingest import _drain_ingest_pending
@@ -48,7 +49,8 @@ def _sessionmaker():  # type: ignore[no-untyped-def]
     return _NullSessionCtx()
 
 
-def _parse_frame(frame: str) -> tuple[str, dict[str, Any]]:
+def _parse_frame(frame: str | None) -> tuple[str, dict[str, Any]]:
+    assert frame is not None
     event_line, data_line = frame.strip().split("\n")
     assert event_line.startswith("event: ") and data_line.startswith("data: ")
     return event_line[len("event: "):], json.loads(data_line[len("data: "):])
@@ -57,17 +59,15 @@ def _parse_frame(frame: str) -> tuple[str, dict[str, Any]]:
 # ── /events wire formatter ────────────────────────────────────────────────────────
 
 
-def test_unknown_event_value_falls_back_to_job_failed() -> None:
-    name, payload = _parse_frame(_format_user_event({"event": "job-exploded", "job_id": "j1"}))
-    assert name == "job-failed"
-    assert payload == {"job_id": "j1"}
+def test_unknown_event_value_is_dropped() -> None:
+    assert _format_user_event({"event": "job-exploded", "job_id": "j1"}) is None
 
 
-def test_unknown_event_fallback_never_leaks_extra_fields() -> None:
-    frame = _format_user_event(
-        {"event": "weird", "job_id": "j1", "user_id": "secret-user", "state": "X", "title": "T"}
+def test_absent_event_key_falls_back_to_job_failed_without_leaking_fields() -> None:
+    name, payload = _parse_frame(
+        _format_user_event({"job_id": "j1", "user_id": "secret-user", "state": "X", "title": "T"})
     )
-    _, payload = _parse_frame(frame)
+    assert name == "job-failed"
     assert payload == {"job_id": "j1"}
 
 
@@ -80,12 +80,13 @@ def test_unknown_event_fallback_never_leaks_extra_fields() -> None:
     ],
 )
 def test_known_events_never_leak_the_user_id(message: dict[str, Any]) -> None:
-    assert "secret-user" not in _format_user_event(message)
+    frame = _format_user_event(message)
+    assert frame is not None
+    assert "secret-user" not in frame
 
 
-def test_empty_event_value_falls_back_to_job_failed() -> None:
-    name, _ = _parse_frame(_format_user_event({"event": "", "job_id": "j1"}))
-    assert name == "job-failed"
+def test_empty_event_value_is_dropped() -> None:
+    assert _format_user_event({"event": "", "job_id": "j1"}) is None
 
 
 def test_job_progress_message_missing_eta_serialises_eta_as_null() -> None:
@@ -236,7 +237,7 @@ async def test_ingest_ready_with_no_title_publishes_untitled(
         monkeypatch, _IngestJob("job-1", title=None), _ready("song-1"), publish_user_event=_publish
     )
 
-    assert json.loads(published[0][1])["title"] == "Untitled"
+    assert json.loads(published[0][1])["title"] == DEFAULT_SONG_TITLE == "Untitled"
 
 
 async def test_ingest_raising_publisher_does_not_skip_notify_ready_or_semaphore_release(

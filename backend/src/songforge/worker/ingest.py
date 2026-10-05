@@ -36,6 +36,7 @@ from songforge.config import Settings
 from songforge.db import get_sessionmaker, worker_asyncpg_dsn
 from songforge.jobs.generation_client import GenerationClient, HttpGenerationClient
 from songforge.jobs.ingest import (
+    DEFAULT_SONG_TITLE,
     Downloader,
     HttpAudioDownloader,
     claim_next_ingest_job,
@@ -119,7 +120,7 @@ async def _drain_ingest_pending(
 
     ``publish_user_event`` is optional (issue #37): when a job reaches READY in this
     commit, its creator's private channel gets a ``job-ready`` message, POST-COMMIT and
-    best-effort. Built inside the session scope (title falls back to "Untitled",
+    best-effort. Built inside the session scope (title falls back to ``DEFAULT_SONG_TITLE``,
     matching the ``Song.title`` ``jobs.ingest._finalize_ready`` wrote).
     """
     while True:
@@ -159,7 +160,7 @@ async def _drain_ingest_pending(
             ):
                 ready_event = (
                     job.user_id,
-                    ready_message(job.job_id, job.song_id, job.title or "Untitled"),
+                    ready_message(job.job_id, job.song_id, job.title or DEFAULT_SONG_TITLE),
                 )
 
         if notify_ready is not None and ready_song_id is not None:

@@ -679,6 +679,29 @@ async def test_events_a_user_message_without_an_event_key_defaults_to_job_failed
     assert payload == {"job_id": "job-legacy"}
 
 
+async def test_events_drops_an_unknown_event_name_and_keeps_streaming() -> None:
+    from songforge.config import get_settings
+    from songforge.radio.user_events import user_channel
+    from songforge.web.identity import mint, sign
+
+    redis = _FakeRedis()
+    async with _running_app(redis) as (_app, client):
+        settings = get_settings()
+        user_id = mint()
+        client.cookies.set(
+            settings.identity_cookie_name, sign(user_id, secret=settings.session_secret)
+        )
+        channel = user_channel(settings.user_events_channel_prefix, user_id)
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)  # idle on connect
+            await redis.publish(channel, '{"event": "job-from-the-future", "job_id": "x"}')
+            await redis.publish(channel, '{"event": "job-ready", "job_id": "j", "song_id": "s", "title": "T"}')
+            name, payload = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name == "job-ready"
+            assert payload["job_id"] == "j"
+
+
 async def _assert_other_identity_never_receives(message: str) -> None:
     """Publish `message` on user A's channel; A sees it, B's next frame is only the
     heartbeat `song-change` (mirrors the job-failed privacy test above)."""

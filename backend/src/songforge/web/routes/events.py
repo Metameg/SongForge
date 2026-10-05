@@ -75,14 +75,15 @@ _USER_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _format_user_event(message: dict[str, Any]) -> str:
-    """SSE frame for a per-user message, named by its `event` key (default
-    `job-failed` for legacy messages). Fields are whitelisted so no stray identity
-    data can leak onto the wire."""
-    name = message.get("event") or "job-failed"
-    fields = _USER_EVENT_FIELDS.get(name)
+def _format_user_event(message: dict[str, Any]) -> str | None:
+    """SSE frame for a per-user message, named by its `event` key. A message with NO
+    `event` key is a legacy `job-failed`; a message whose `event` is present but unknown
+    returns `None` (dropped) so a future/malformed event never masquerades as a failure.
+    Fields are whitelisted so no stray identity data can leak onto the wire."""
+    name = message["event"] if "event" in message else "job-failed"
+    fields = _USER_EVENT_FIELDS.get(name) if isinstance(name, str) else None
     if fields is None:
-        name, fields = "job-failed", _USER_EVENT_FIELDS["job-failed"]
+        return None
     return _format_event(name, {f: message.get(f) for f in fields})
 
 
@@ -167,7 +168,9 @@ async def events(
                 if user_task in done:
                     message = user_task.result()
                     user_task = None
-                    yield _format_user_event(message)
+                    frame = _format_user_event(message)
+                    if frame is not None:
+                        yield frame
         finally:
             for task in (pointer_task, user_task):
                 if task is not None and not task.done():
