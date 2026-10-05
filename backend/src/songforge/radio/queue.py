@@ -6,17 +6,17 @@ own decision logic stays unit-testable against ``sqlite+aiosqlite``, without nee
 mock/port abstraction the way Redis-backed collaborators do -- ``playback_queue`` lives
 in the SAME Postgres database as ``radio_state``/``songs``, so these functions just take
 the caller's own ``AsyncSession`` directly (same pattern as querying ``Song`` in
-``radio.coordinator``).
+``radio.coordinator``). Also hosts the waiting-queue status read (issue #38).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from songforge.models import PlaybackQueue
+from songforge.models import Job, PlaybackQueue
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,37 @@ class QueueStatus:
 async def get_queue_status(session: AsyncSession, user_id: str) -> QueueStatus:
     """Depth of the waiting FIFO (``played_at IS NULL``) and ``user_id``'s own positions.
 
-    STUB (issue #38 TDD red) -- the implementer replaces this body.
+    Order is ``playback_queue.id`` (the FIFO key ``pop_next_user_song`` also uses). Rank
+    is computed over ALL waiting rows (a window function) *before* filtering to the
+    caller, so a position is where the song sits in the whole queue. Rows with a null
+    ``job_id`` count toward depth and rank but join to no job, so never appear in
+    ``positions``.
     """
-    raise NotImplementedError("get_queue_status is not implemented yet (issue #38)")
+    waiting = (
+        select(
+            PlaybackQueue.job_id.label("job_id"),
+            func.row_number().over(order_by=PlaybackQueue.id).label("pos"),
+        )
+        .where(PlaybackQueue.played_at.is_(None))
+        .subquery()
+    )
+    depth = (
+        await session.scalar(
+            select(func.count())
+            .select_from(PlaybackQueue)
+            .where(PlaybackQueue.played_at.is_(None))
+        )
+    ) or 0
+    rows = await session.execute(
+        select(waiting.c.job_id, waiting.c.pos)
+        .join(Job, Job.job_id == waiting.c.job_id)
+        .where(Job.user_id == user_id)
+        .order_by(waiting.c.pos)
+    )
+    return QueueStatus(
+        depth=depth,
+        positions=[QueuePositionEntry(job_id=str(j), position=int(p)) for j, p in rows.all()],
+    )
 
 
 async def enqueue_song(
