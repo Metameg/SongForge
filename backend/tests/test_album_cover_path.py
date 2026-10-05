@@ -335,6 +335,20 @@ def test_pointer_record_from_json_defaults_missing_cover_to_none() -> None:
     assert restored.album_cover_path is None
 
 
+def test_pointer_record_from_json_ignores_unknown_future_keys() -> None:
+    """Rolling/independent web+worker deploys mean a pointer may be written by a NEWER
+    replica carrying a field this reader does not know yet. `from_json` must drop unknown
+    keys rather than raise, or the relay would choke and SSE listeners would go stale."""
+    from songforge.radio.pointer_cache import PointerRecord
+
+    payload = json.loads(PointerRecord.from_view(_view(album_cover_path=COVER)).to_json())
+    payload["some_future_field"] = "value-this-version-does-not-know"
+
+    restored = PointerRecord.from_json(json.dumps(payload))
+
+    assert restored.album_cover_path == COVER
+
+
 def test_now_playing_view_to_response_includes_album_cover_path() -> None:
     now = datetime.now(timezone.utc)
 
