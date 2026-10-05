@@ -28,6 +28,8 @@ const BACKEND_SHAPED_PAYLOAD = {
   playback_id: "pb-1",
   version: 3,
   server_time: "2026-09-15T12:00:30.500000+00:00",
+  // Issue #36: nullable cover path threaded simulator -> webhook -> Song -> now-playing.
+  album_cover_path: "http://cdn.test/covers/song-1.png",
 };
 
 afterEach(() => {
@@ -102,5 +104,56 @@ describe("fetchNowPlaying", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://backend:8000/now-playing", {
       cache: "no-store",
     });
+  });
+});
+
+describe("album_cover_path contract (issue #36)", () => {
+  // Contract guard: the backend body carries exactly these keys (see
+  // `backend/tests/test_now_playing.py::EXPECTED_BODY_KEYS`). A drift in either direction
+  // (renamed / dropped / extra field) should fail here.
+  it("BACKEND_SHAPED_PAYLOAD carries exactly the backend's 13 keys, including album_cover_path", () => {
+    expect(Object.keys(BACKEND_SHAPED_PAYLOAD).sort()).toEqual(
+      [
+        "album_cover_path",
+        "audio_url",
+        "duration",
+        "ends_at",
+        "object_key",
+        "playback_id",
+        "server_time",
+        "song_id",
+        "source",
+        "started_at",
+        "status",
+        "title",
+        "version",
+      ].sort(),
+    );
+  });
+
+  it("exposes album_cover_path on the parsed NowPlaying", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ json: async () => BACKEND_SHAPED_PAYLOAD }),
+    );
+
+    const result = (await fetchNowPlaying("http://backend")) as NowPlaying;
+
+    expect(result.album_cover_path).toBe("http://cdn.test/covers/song-1.png");
+  });
+
+  it("is typed nullable: a null cover round-trips as null (type-level guard)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        json: async () => ({ ...BACKEND_SHAPED_PAYLOAD, album_cover_path: null }),
+      }),
+    );
+
+    const result = (await fetchNowPlaying("http://backend")) as NowPlaying;
+
+    // Compile-time: fails `tsc` until `NowPlaying.album_cover_path: string | null` exists.
+    const cover: string | null = result.album_cover_path;
+    expect(cover).toBeNull();
   });
 });

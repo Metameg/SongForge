@@ -53,12 +53,14 @@ class NowPlayingView:
     duration_seconds: int | None
     playback_id: str
     version: int
+    # Nullable cover art reference (issue #36); LAST + defaulted so existing callers work.
+    album_cover_path: str | None = None
 
     def to_response(self, *, server_time: datetime) -> dict[str, Any]:
         """Shape this pointer into the ``/now-playing`` JSON body (criterion #3).
 
         Body per the PRD: ``song_id, title, source, object_key, audio_url, started_at,
-        ends_at, duration, playback_id, version, server_time`` — timestamps as ISO-8601
+        ends_at, duration, playback_id, version, album_cover_path (nullable), server_time`` — timestamps as ISO-8601
         UTC strings.
 
         Carries an explicit ``status: "playing"`` discriminator, symmetric with the idle
@@ -79,6 +81,7 @@ class NowPlayingView:
             "duration": self.duration_seconds,
             "playback_id": self.playback_id,
             "version": self.version,
+            "album_cover_path": self.album_cover_path,
             "server_time": _isoformat_utc(server_time),
         }
 
@@ -110,4 +113,5 @@ async def get_now_playing(session: AsyncSession) -> NowPlayingView | None:
         duration_seconds=song.duration_seconds,
         playback_id=pointer.playback_id,
         version=pointer.version,
+        album_cover_path=song.album_cover_path,
     )

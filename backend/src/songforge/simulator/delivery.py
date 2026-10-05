@@ -85,6 +85,7 @@ async def _deliver(app: FastAPI, record: TaskRecord, delay: float) -> None:
         conversion_path=build_audio_url(settings, token),
         conversion_duration=record.duration,
         title=record.title,
+        album_cover_path=record.album_cover_path,
     )
     await _post(app, record.webhook_url, payload)
     if fault is Fault.DUPLICATE_WEBHOOK:

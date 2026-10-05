@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from typing import Any
 
@@ -65,6 +65,9 @@ class PointerRecord:
     duration_seconds: int | None
     playback_id: str
     version: int
+    # Last + defaulted: a pointer cached in Redis before issue #36 lacks this key and
+    # must still deserialize (as None).
+    album_cover_path: str | None = None
 
     def to_response(self, *, server_time: datetime) -> dict[str, Any]:
         """Shape this record into the `/now-playing` JSON body.
@@ -85,6 +88,7 @@ class PointerRecord:
             "duration": self.duration_seconds,
             "playback_id": self.playback_id,
             "version": self.version,
+            "album_cover_path": self.album_cover_path,
             "server_time": _isoformat_utc(server_time),
         }
 
@@ -94,7 +98,16 @@ class PointerRecord:
 
     @classmethod
     def from_json(cls, raw: str) -> PointerRecord:
-        return cls(**json.loads(raw))
+        # Tolerate wire-format skew in both directions across a rolling / independently
+        # ordered web+worker deploy:
+        #  - a MISSING known key (e.g. `album_cover_path` from a pre-#36 writer) falls to the
+        #    dataclass default (None);
+        #  - an UNKNOWN key (a field a NEWER replica added that this reader doesn't know yet)
+        #    is dropped rather than raising TypeError — otherwise this replica's pub/sub relay
+        #    would choke on every new pointer and its SSE listeners would go stale.
+        data = json.loads(raw)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     @classmethod
     def from_view(cls, view: NowPlayingView) -> PointerRecord:
@@ -111,6 +124,7 @@ class PointerRecord:
             duration_seconds=view.duration_seconds,
             playback_id=view.playback_id,
             version=view.version,
+            album_cover_path=view.album_cover_path,
         )
 
 

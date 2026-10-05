@@ -18,6 +18,7 @@ import pytest
 from songforge.metrics import REGISTRY
 from songforge.models import Base, RadioState, Song
 from songforge.radio.coordinator import advance, initialize_if_absent
+from songforge.radio.pointer_cache import PointerRecord
 
 
 class _StubHistory:
@@ -566,3 +567,82 @@ async def test_advance_publish_failure_does_not_fail_the_advance(
         assert after is not None
         assert after.version == current_version + 1
         assert after.song_id != current_song_id
+
+
+# ── album_cover_path threading through the real PointerRecord builder (issue #36) ─────
+
+COVER_URL = "http://cdn.test/covers/cover-song.png"
+
+
+async def _add_song_with_cover(
+    sessionmaker: async_sessionmaker[AsyncSession], song_id: str, cover: str | None
+) -> None:
+    async with sessionmaker() as session:
+        session.add(
+            Song(
+                id=song_id,
+                title=song_id,
+                source="static",
+                object_key=f"audio/{song_id}.mp3",
+                duration_seconds=180,
+                album_cover_path=cover,
+            )
+        )
+        await session.commit()
+
+
+async def test_initialize_pointer_write_carries_the_songs_album_cover_path(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_song_with_cover(sessionmaker, "cover-song", COVER_URL)
+    redis = _FakeRedis()
+
+    async with sessionmaker() as session:
+        assert await initialize_if_absent(session, _StubHistory(), redis=redis) is True
+
+    cached = PointerRecord.from_json(redis._store[RADIO_POINTER_REDIS_KEY])
+    assert cached.song_id == "cover-song"
+    assert cached.album_cover_path == COVER_URL
+
+
+async def test_initialize_pointer_publish_carries_the_same_album_cover_path(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_song_with_cover(sessionmaker, "cover-song", COVER_URL)
+    redis = _FakeRedis()
+
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory(), redis=redis)
+
+    assert len(redis.publish_calls) == 1
+    published = json.loads(redis.publish_calls[0][1])
+    assert published["album_cover_path"] == COVER_URL
+
+
+async def test_advance_pointer_write_carries_the_songs_album_cover_path(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    # Single song: "never empty" replays it, so the advanced pointer is the covered song.
+    await _add_song_with_cover(sessionmaker, "cover-song", COVER_URL)
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        applied = await advance(session, _StubHistory(), expected_version=0, redis=redis)
+    assert applied is True
+
+    cached = PointerRecord.from_json(redis._store[RADIO_POINTER_REDIS_KEY])
+    assert cached.version == 1
+    assert cached.album_cover_path == COVER_URL
+
+
+async def test_pointer_write_leaves_album_cover_path_null_when_song_has_none(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_song_with_cover(sessionmaker, "plain", None)
+    redis = _FakeRedis()
+
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory(), redis=redis)
+
+    cached = PointerRecord.from_json(redis._store[RADIO_POINTER_REDIS_KEY])
+    assert cached.album_cover_path is None

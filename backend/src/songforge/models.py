@@ -55,6 +55,10 @@ class Song(Base):
     # Immutable object-storage key (audio/<id>.mp3).
     object_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Placeholder/generated cover art URL or path (issue #36). Nullable: static songs and
+    # rows that predate migration 0008 have none; the frontend falls back to a gradient.
+    # Width matches audio_url (1024): prod cover URLs are signed CDN links that can exceed 512.
+    album_cover_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -201,6 +205,10 @@ class Job(Base):
     audio_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     audio_duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Cover art reference recorded by the webhook and copied onto the Song at ingest
+    # (issue #36); mirrors audio_url/title as webhook-recorded metadata. Width matches
+    # audio_url (1024): a signed CDN cover URL can exceed 512 chars.
+    album_cover_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     # Set at READY (issue #13, criterion #3): the playable Song this job produced.
     # `Song.id` is the job's `conversion_id_1` (the canonical conversion the PRD says

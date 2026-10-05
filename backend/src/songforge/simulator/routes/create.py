@@ -26,6 +26,11 @@ _CREDIT_ESTIMATE = 1.0
 _SAMPLE_DURATION_SECONDS = 120.0
 
 
+def build_cover_path(public_base_url: str, conversion_id: str) -> str:
+    """Deterministic placeholder cover URL for a conversion (no bytes are served)."""
+    return f"{public_base_url.rstrip('/')}/covers/{conversion_id}.svg"
+
+
 def _parse_delay(raw: str | None) -> float | None:
     if raw is None:
         return None
@@ -62,6 +67,7 @@ async def create_music(body: CreateRequest, request: Request) -> CreateResponse:
         fault=fault,
         duration=_SAMPLE_DURATION_SECONDS,
         title=f"[SIM] {body.prompt[:50]}",
+        album_cover_path=build_cover_path(settings.public_base_url, conversion_id_1),
     )
     store.add(record)
 

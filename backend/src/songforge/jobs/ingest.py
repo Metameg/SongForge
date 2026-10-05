@@ -231,6 +231,7 @@ async def _finalize_ready(session: AsyncSession, job: Job, song_id: str, key: st
                 source=SOURCE_GENERATED,
                 object_key=key,
                 duration_seconds=duration,
+                album_cover_path=job.album_cover_path,
             )
         )
         await session.flush()

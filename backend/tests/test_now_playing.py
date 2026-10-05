@@ -40,6 +40,7 @@ EXPECTED_BODY_KEYS = {
     "playback_id",
     "version",
     "server_time",
+    "album_cover_path",
 }
 
 
@@ -369,3 +370,95 @@ async def test_now_playing_idle_503_unchanged_when_redis_down_and_no_pg_pointer(
     assert resp.status_code == 503
     assert resp.json() == {"status": "idle"}
     assert calls["count"] == 1
+
+
+# ── album_cover_path threading (issue #36) ───────────────────────────────────────
+
+
+async def _seed_pointer_with_cover(
+    sessionmaker: async_sessionmaker[AsyncSession], *, album_cover_path: str | None
+) -> None:
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    async with sessionmaker() as session:
+        session.add(
+            Song(
+                id="song-1",
+                title="Song One",
+                source="generated",
+                object_key="audio/song-1.mp3",
+                duration_seconds=180,
+                album_cover_path=album_cover_path,  # type: ignore[call-arg]
+            )
+        )
+        session.add(
+            RadioState(
+                id=1,
+                song_id="song-1",
+                playback_id="pb-1",
+                source="generated",
+                started_at=started_at,
+                ends_at=started_at + timedelta(seconds=180),
+                version=1,
+            )
+        )
+        await session.commit()
+
+
+async def test_now_playing_surfaces_the_songs_album_cover_path(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    await _seed_pointer_with_cover(
+        sessionmaker, album_cover_path="http://cdn.test/covers/song-1.png"
+    )
+
+    resp = app_client.get("/now-playing")
+
+    assert resp.status_code == 200
+    assert resp.json()["album_cover_path"] == "http://cdn.test/covers/song-1.png"
+
+
+async def test_now_playing_static_song_surfaces_null_album_cover_path(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    async with sessionmaker() as session:
+        session.add(
+            Song(
+                id="static-1",
+                title="Static One",
+                source="static",
+                object_key="audio/static-1.mp3",
+                duration_seconds=180,
+            )
+        )
+        session.add(
+            RadioState(
+                id=1,
+                song_id="static-1",
+                playback_id="pb-s",
+                source="static",
+                started_at=started_at,
+                ends_at=started_at + timedelta(seconds=180),
+                version=1,
+            )
+        )
+        await session.commit()
+
+    body = app_client.get("/now-playing").json()
+
+    assert body["source"] == "static"
+    assert "album_cover_path" in body
+    assert body["album_cover_path"] is None
+
+
+async def test_now_playing_surfaces_null_album_cover_path_when_song_has_none(
+    app_client: TestClient, sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    await _seed_pointer_with_cover(sessionmaker, album_cover_path=None)
+
+    resp = app_client.get("/now-playing")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "album_cover_path" in body
+    assert body["album_cover_path"] is None

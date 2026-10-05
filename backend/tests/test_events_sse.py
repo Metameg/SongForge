@@ -72,6 +72,7 @@ EXPECTED_BODY_KEYS = {
     "playback_id",
     "version",
     "server_time",
+    "album_cover_path",
 }
 
 

@@ -97,6 +97,7 @@ async def _write_pointer_best_effort(
                 duration_seconds=song.duration_seconds,
                 playback_id=playback_id,
                 version=version,
+                album_cover_path=song.album_cover_path,
             )
         )
         payload = record.to_json()

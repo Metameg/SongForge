@@ -41,4 +41,5 @@ async def by_id(task_id: str, request: Request) -> ByIdResponse:
         audio_url=audio_url,
         conversion_duration=record.duration if completed else None,
         title=record.title if completed else None,
+        album_cover_path=record.album_cover_path if completed else None,
     )
