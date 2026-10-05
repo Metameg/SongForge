@@ -24,26 +24,6 @@ export default function RadioApp() {
   const [mySongIds, setMySongIds] = useState<Set<string>>(() => new Set());
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
 
-  useEffect(() => {
-    const source = new EventSource("/events");
-    source.onopen = () => dispatch({ type: "open" });
-    source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
-    source.addEventListener("song-change", (e) =>
-      dispatch({ type: "song-change", data: (e as MessageEvent<string>).data }),
-    );
-    source.addEventListener("idle", () => dispatch({ type: "idle" }));
-    const onJob = (name: JobEventName) => (e: Event) => {
-      const ev = parseJobEvent(name, (e as MessageEvent<string>).data);
-      if (!ev) return;
-      dispatchProgress(ev);
-      if (ev.type === "ready") setMySongIds(addMySong(ev.song_id));
-    };
-    source.addEventListener("job-progress", onJob("job-progress"));
-    source.addEventListener("job-ready", onJob("job-ready"));
-    source.addEventListener("job-failed", onJob("job-failed"));
-    return () => source.close();
-  }, []);
-
   const refreshQuota = useCallback(async () => {
     try {
       setQuota(await fetchQuota(""));
@@ -51,8 +31,41 @@ export default function RadioApp() {
       /* keep last known */
     }
   }, []);
+
   useEffect(() => {
-    void refreshQuota();
+    let source: EventSource | null = null;
+    let cancelled = false;
+    // Establish the signed identity cookie BEFORE opening the stream. The backend
+    // `GET /events` only READS identity (it never Set-Cookies one), while `GET /quota`
+    // mints and Set-Cookies the identity on a first visit. Opening the stream first
+    // would register it under a throwaway identity the backend discards, so this
+    // viewer's own job-progress/job-ready/job-failed -- published to their real cookie
+    // identity once they create -- would never reach them until a reconnect/reload.
+    // Awaiting the quota read first means the EventSource request carries that cookie.
+    void (async () => {
+      await refreshQuota();
+      if (cancelled) return;
+      source = new EventSource("/events");
+      source.onopen = () => dispatch({ type: "open" });
+      source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
+      source.addEventListener("song-change", (e) =>
+        dispatch({ type: "song-change", data: (e as MessageEvent<string>).data }),
+      );
+      source.addEventListener("idle", () => dispatch({ type: "idle" }));
+      const onJob = (name: JobEventName) => (e: Event) => {
+        const ev = parseJobEvent(name, (e as MessageEvent<string>).data);
+        if (!ev) return;
+        dispatchProgress(ev);
+        if (ev.type === "ready") setMySongIds(addMySong(ev.song_id));
+      };
+      source.addEventListener("job-progress", onJob("job-progress"));
+      source.addEventListener("job-ready", onJob("job-ready"));
+      source.addEventListener("job-failed", onJob("job-failed"));
+    })();
+    return () => {
+      cancelled = true;
+      source?.close();
+    };
   }, [refreshQuota]);
   useEffect(() => {
     setMySongIds(loadMySongs()); // post-mount: avoids an SSR/hydration mismatch
