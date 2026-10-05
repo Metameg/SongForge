@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchQueue,
   formatQueueLine,
+  makeLatestGuard,
   myPosition,
   parseQueue,
   positionLabel,
@@ -46,6 +47,29 @@ describe("formatQueueLine", () => {
   });
   it("renders zero as '0 waiting'", () => {
     expect(formatQueueLine(q(0))).toBe("Queue · 0 waiting");
+  });
+});
+
+describe("makeLatestGuard", () => {
+  it("treats only the most recently begun token as current", () => {
+    const g = makeLatestGuard();
+    const first = g.begin();
+    const second = g.begin();
+    // Out-of-order completion: the stale (first) response must be rejected, the newest kept.
+    expect(g.isCurrent(first)).toBe(false);
+    expect(g.isCurrent(second)).toBe(true);
+  });
+
+  it("issues strictly increasing tokens and keeps the latest current after more begins", () => {
+    const g = makeLatestGuard();
+    const a = g.begin();
+    const b = g.begin();
+    const c = g.begin();
+    expect(b).toBeGreaterThan(a);
+    expect(c).toBeGreaterThan(b);
+    expect(g.isCurrent(a)).toBe(false);
+    expect(g.isCurrent(b)).toBe(false);
+    expect(g.isCurrent(c)).toBe(true);
   });
 });
 

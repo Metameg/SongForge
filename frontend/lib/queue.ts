@@ -70,6 +70,24 @@ export async function fetchQueue(baseUrl: string): Promise<QueueResponse> {
   return parseQueue(await response.json());
 }
 
+/**
+ * Monotonic guard so only the newest in-flight refresh applies its result. Rapid SSE
+ * events fire concurrent `fetchQueue` calls; without this an older-but-slower response
+ * could resolve last and overwrite a newer one, leaving a stale depth/position until the
+ * next event. Each refresh calls `begin()` for a token and only commits when
+ * `isCurrent(token)` still holds at resolve time.
+ */
+export function makeLatestGuard(): {
+  begin: () => number;
+  isCurrent: (token: number) => boolean;
+} {
+  let current = 0;
+  return {
+    begin: () => ++current,
+    isCurrent: (token: number) => token === current,
+  };
+}
+
 /** Events after which the queue may have changed (advance, or the viewer's own job moved). */
 const REFETCH_EVENTS = ["song-change", "job-progress", "job-ready"] as const;
 

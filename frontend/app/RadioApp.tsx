@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useReducer, useState } from "react";
-import { fetchQueue, wireQueueRefetch, type QueueResponse } from "@/lib/queue";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { fetchQueue, makeLatestGuard, wireQueueRefetch, type QueueResponse } from "@/lib/queue";
 import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
@@ -36,9 +36,14 @@ export default function RadioApp() {
     }
   }, []);
 
+  // Only the newest refresh applies: rapid SSE events fire concurrent fetches, and an
+  // older-but-slower response must not overwrite a newer one with a stale position.
+  const queueGuard = useRef(makeLatestGuard());
   const refreshQueue = useCallback(async () => {
+    const token = queueGuard.current.begin();
     try {
-      setQueue(await fetchQueue(""));
+      const next = await fetchQueue("");
+      if (queueGuard.current.isCurrent(token)) setQueue(next);
     } catch {
       /* keep last known */
     }
