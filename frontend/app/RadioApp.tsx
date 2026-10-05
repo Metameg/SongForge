@@ -125,14 +125,34 @@ export default function RadioApp() {
           flex: 1,
         }}
       >
-        <header>
-          <h1 style={{ fontSize: 20, margin: "0 0 12px" }}>SongForge</h1>
+        <header style={{ display: "flex", justifyContent: "center", padding: "4px 0 18px" }}>
+          <h1
+            className="sf-wordmark"
+            style={{ fontSize: 24, margin: 0, display: "inline-flex", alignItems: "center", gap: 9 }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: 9,
+                height: 9,
+                borderRadius: "50%",
+                background: "var(--sf-accent-grad)",
+                boxShadow: "0 0 12px 0 var(--sf-accent-glow)",
+              }}
+            />
+            Song<span style={{ color: "var(--sf-accent)" }}>Forge</span>
+          </h1>
         </header>
         <RadioStage state={feed.state} isMine={isMine} />
-        <section aria-label="Status" style={{ textAlign: "center", marginTop: 16 }}>
+        <section aria-label="Status" style={{ textAlign: "center", marginTop: 18 }}>
           <LiveIndicator feed={feed} />
           {feed.state?.status === "playing" && (
-            <p style={{ opacity: 0.7, margin: "8px 0" }}>{feed.state.title}</p>
+            <p
+              className="sf-wordmark"
+              style={{ fontSize: 17, fontWeight: 600, color: "var(--sf-text)", margin: "10px 0 2px" }}
+            >
+              {feed.state.title}
+            </p>
           )}
           <QueueStatus queue={queue} />
           <Player nowPlaying={feed.state} onRefetched={onRefetched} />

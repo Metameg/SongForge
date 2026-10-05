@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type CSSProperties, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { canCreate, submitCreate } from "@/lib/create";
 import { formatSongsLeft, type QuotaResponse } from "@/lib/quota";
 
@@ -11,19 +11,6 @@ export interface ComposerProps {
   /** RadioApp refreshes quota after a successful create. */
   onCreated: (jobId: string) => void;
 }
-
-const field: CSSProperties = {
-  width: "100%",
-  boxSizing: "border-box",
-  background: "#16161d",
-  color: "#f2f2f2",
-  border: "1px solid #2a2a35",
-  borderRadius: 12,
-  padding: "10px 12px",
-  fontSize: 16,
-  fontFamily: "inherit",
-  resize: "vertical",
-};
 
 /** Zone 3: pinned composer. All gating/error logic lives in `lib/create.ts`. */
 export default function Composer({ quota, generationActive, onCreated }: ComposerProps) {
@@ -67,40 +54,29 @@ export default function Composer({ quota, generationActive, onCreated }: Compose
       style={{
         position: "sticky",
         bottom: 0,
-        background: "#0b0b0f",
-        padding: "12px 16px",
-        borderTop: "1px solid #22222b",
+        background: "linear-gradient(180deg, rgba(11,11,15,0) 0%, var(--sf-bg) 22%)",
+        padding: "16px 16px 18px",
+        borderTop: "1px solid var(--sf-border)",
         boxSizing: "border-box",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 10,
       }}
     >
       <textarea
         aria-label="Describe your song"
-        placeholder="Describe the song you want to hear"
+        placeholder="Describe the song you want to hear…"
         rows={2}
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
-        style={field}
+        className="sf-field"
       />
       <button
         type="button"
         aria-expanded={showLyrics}
         onClick={() => setShowLyrics((v) => !v)}
-        style={{
-          alignSelf: "flex-start",
-          background: "none",
-          border: "none",
-          color: "#f2f2f2",
-          opacity: 0.7,
-          cursor: "pointer",
-          padding: 0,
-          fontSize: 14,
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-        }}
+        className="sf-toggle"
+        style={{ alignSelf: "flex-start" }}
       >
         <svg
           width="12"
@@ -120,30 +96,24 @@ export default function Composer({ quota, generationActive, onCreated }: Compose
           rows={4}
           value={lyrics}
           onChange={(e) => setLyrics(e.target.value)}
-          style={field}
+          className="sf-field sf-rise"
         />
       )}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <span style={{ opacity: 0.5, fontSize: 13 }}>{quota ? formatSongsLeft(quota) : ""}</span>
-        <button
-          type="submit"
-          disabled={!enabled}
-          style={{
-            padding: "0.65rem 1.5rem",
-            fontSize: "1rem",
-            borderRadius: 999,
-            border: "none",
-            cursor: enabled ? "pointer" : "not-allowed",
-            background: "#f2f2f2",
-            color: "#0b0b0f",
-            opacity: enabled ? 1 : 0.5,
-          }}
-        >
-          {inFlight ? "Creating..." : "Create Song"}
+        {quota ? (
+          <span className="sf-chip">
+            <span className="sf-chip-dot" aria-hidden="true" />
+            {formatSongsLeft(quota)}
+          </span>
+        ) : (
+          <span />
+        )}
+        <button type="submit" disabled={!enabled} className="sf-btn sf-btn-primary">
+          {inFlight ? "Creating…" : "Create Song"}
         </button>
       </div>
       {error && (
-        <p role="alert" style={{ margin: 0, fontSize: 14 }}>
+        <p role="alert" className="sf-alert sf-rise">
           {error}
         </p>
       )}
