@@ -45,11 +45,13 @@ class ObjectStorage:
         public_read: bool = True,
         connect_timeout: float = 10.0,
         read_timeout: float = 30.0,
+        presigned_download_ttl: int = 300,
     ) -> None:
         self.bucket = bucket
         self.endpoint_url = endpoint_url.rstrip("/")
         self._public_base_url = public_base_url.rstrip("/") if public_base_url else None
         self._public_read = public_read
+        self._presigned_download_ttl = presigned_download_ttl
         self._client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
@@ -81,6 +83,7 @@ class ObjectStorage:
             public_read=settings.s3_public_bucket,
             connect_timeout=settings.s3_connect_timeout_seconds,
             read_timeout=settings.s3_read_timeout_seconds,
+            presigned_download_ttl=settings.s3_presigned_download_ttl_seconds,
         )
 
     def public_url(self, key: str) -> str:
@@ -153,6 +156,21 @@ class ObjectStorage:
             CacheControl=IMMUTABLE_CACHE_CONTROL,
         )
         return self.public_url(key)
+
+    def presigned_download_url(
+        self, key: str, filename: str, expires_in: int | None = None
+    ) -> str:
+        """Short-TTL presigned GET URL forcing an attachment download (issue #39)."""
+        url: str = self._client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": self.bucket,
+                "Key": key,
+                "ResponseContentDisposition": f'attachment; filename="{filename}"',
+            },
+            ExpiresIn=expires_in or self._presigned_download_ttl,
+        )
+        return url
 
     def download(self, key: str) -> bytes:
         response = self._client.get_object(Bucket=self.bucket, Key=key)

@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     # unbounded, unlike the rest of this module's explicit timeouts.
     s3_connect_timeout_seconds: float = 10.0
     s3_read_timeout_seconds: float = 30.0
+    # TTL of presigned download URLs (issue #39).
+    s3_presigned_download_ttl_seconds: int = 300
 
     # ── Static library (seeded at boot; spec #76) ───────────────────────────
     # Directory of curated *.mp3 files uploaded + cataloged on boot. Bind-mounted
