@@ -43,3 +43,29 @@ def test_default_ttl_comes_from_settings() -> None:
 
     url = _storage().presigned_download_url("audio/s.mp3", "s.mp3")
     assert _query(url)["X-Amz-Expires"] == [str(get_settings().s3_presigned_download_ttl_seconds)]
+
+
+def test_explicit_ttl_overrides_configured_default() -> None:
+    from songforge.config import get_settings
+
+    configured = get_settings().s3_presigned_download_ttl_seconds
+    url = _storage().presigned_download_url("audio/s.mp3", "s.mp3", expires_in=configured + 7)
+    assert _query(url)["X-Amz-Expires"] == [str(configured + 7)]
+
+
+def test_default_ttl_follows_overridden_setting(monkeypatch) -> None:
+    from songforge.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("S3_PRESIGNED_DOWNLOAD_TTL_SECONDS", "42")
+    try:
+        storage = ObjectStorage.from_settings()
+    finally:
+        get_settings.cache_clear()
+    url = storage.presigned_download_url("audio/s.mp3", "s.mp3")
+    assert _query(url)["X-Amz-Expires"] == ["42"]
+
+
+def test_unicode_filename_survives_in_disposition() -> None:
+    url = _storage().presigned_download_url("audio/s.mp3", "Café 夜.mp3")
+    assert _query(url)["response-content-disposition"] == ['attachment; filename="Café 夜.mp3"']
