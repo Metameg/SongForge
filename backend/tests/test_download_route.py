@@ -6,6 +6,7 @@ streams audio bytes) and 404s for an unknown song. Storage is a fake -- no netwo
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 
 from urllib.parse import parse_qs, urlparse
@@ -144,7 +145,9 @@ async def test_real_storage_location_carries_title_attachment_disposition(
     resp = client.get("/download/song-1", follow_redirects=False)
 
     query = parse_qs(urlparse(resp.headers["location"]).query)
-    assert query["response-content-disposition"] == ['attachment; filename="Neon Rain.mp3"']
+    assert query["response-content-disposition"] == [
+        "attachment; filename=\"Neon Rain.mp3\"; filename*=UTF-8''Neon%20Rain.mp3"
+    ]
 
 
 async def test_unknown_song_404_body_leaks_no_metadata(
@@ -209,7 +212,7 @@ async def test_signed_disposition_is_a_single_line_header_value(
         "response-content-disposition"
     ][0]
     assert disposition.startswith('attachment; filename="')
-    assert disposition.endswith('.mp3"')
+    assert re.fullmatch(r"attachment; filename=\"[^\"\\\r\n]*\.mp3\"; filename\*=UTF-8''[A-Za-z0-9%._~-]+\.mp3", disposition)
     assert not any(ch in disposition for ch in "\r\n\x00")
     assert disposition.count('"') == 2
 

@@ -25,7 +25,8 @@ export async function GET(
     });
     const location = upstream.headers.get("location");
     if (upstream.status >= 300 && upstream.status < 400 && location) {
-      return new NextResponse(null, { status: 302, headers: { location } });
+      return new NextResponse(null, { status: 302, headers: { location, "cache-control": "no-store" },
+      });
     }
     return new NextResponse(null, { status: upstream.ok ? 502 : upstream.status });
   } catch {

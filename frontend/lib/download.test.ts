@@ -41,6 +41,16 @@ describe("reduceHistory", () => {
     const twice = reduceHistory(once, b);
     expect(reduceHistory(twice, b)).toEqual({ nowPlaying: b, justPlayed: a });
   });
+  it("same song_id with a changed title updates the title in place without shifting", () => {
+    const s = reduceHistory(reduceHistory(emptyHistory, { song_id: "a", title: "x" }), {
+      song_id: "a",
+      title: "y",
+    });
+    expect(s).toEqual({ nowPlaying: { song_id: "a", title: "y" }, justPlayed: null });
+    const withPrev = reduceHistory(reduceHistory(emptyHistory, b), { song_id: "a", title: "x" });
+    const renamed = reduceHistory(withPrev, { song_id: "a", title: "y" });
+    expect(renamed.justPlayed).toEqual(b);
+  });
 });
 
 describe("downloadHref", () => {

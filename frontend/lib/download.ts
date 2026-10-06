@@ -17,9 +17,15 @@ export const emptyHistory: DownloadHistory = { nowPlaying: null, justPlayed: nul
 
 export const DOWNLOAD_UNAVAILABLE = "Download unavailable";
 
-/** Record a witnessed now-playing song. A repeat of the current song_id is a no-op. */
+/**
+ * Record a witnessed now-playing song. A repeat of the current song_id never shifts
+ * history; it only refreshes the stored title if that changed.
+ */
 export function reduceHistory(state: DownloadHistory, song: HistoryEntry): DownloadHistory {
-  if (state.nowPlaying?.song_id === song.song_id) return state;
+  if (state.nowPlaying?.song_id === song.song_id) {
+    if (state.nowPlaying.title === song.title) return state;
+    return { ...state, nowPlaying: song };
+  }
   return { nowPlaying: song, justPlayed: state.nowPlaying };
 }
 

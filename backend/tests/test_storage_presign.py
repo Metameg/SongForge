@@ -5,7 +5,12 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-from songforge.storage import ObjectStorage
+from songforge.storage import (
+    MAX_TITLE_CHARS,
+    ObjectStorage,
+    content_disposition,
+    download_filename,
+)
 
 
 def _storage() -> ObjectStorage:
@@ -30,7 +35,9 @@ def test_url_targets_the_object_key() -> None:
 
 def test_url_carries_attachment_disposition_with_filename() -> None:
     url = _storage().presigned_download_url("audio/song-1.mp3", "My Song.mp3")
-    assert _query(url)["response-content-disposition"] == ['attachment; filename="My Song.mp3"']
+    assert _query(url)["response-content-disposition"] == [
+        "attachment; filename=\"My Song.mp3\"; filename*=UTF-8''My%20Song.mp3"
+    ]
 
 
 def test_explicit_ttl_is_embedded() -> None:
@@ -66,6 +73,27 @@ def test_default_ttl_follows_overridden_setting(monkeypatch) -> None:
     assert _query(url)["X-Amz-Expires"] == ["42"]
 
 
-def test_unicode_filename_survives_in_disposition() -> None:
+def test_unicode_filename_gets_ascii_fallback_and_rfc5987_name() -> None:
     url = _storage().presigned_download_url("audio/s.mp3", "Café 夜.mp3")
-    assert _query(url)["response-content-disposition"] == ['attachment; filename="Café 夜.mp3"']
+    assert _query(url)["response-content-disposition"] == [
+        "attachment; filename=\"Caf_ _.mp3\"; filename*=UTF-8''Caf%C3%A9%20%E5%A4%9C.mp3"
+    ]
+
+
+def test_crlf_and_quotes_are_neutralised_in_disposition() -> None:
+    header = content_disposition('a"b\r\nc\\d.mp3')
+    assert header == "attachment; filename=\"abcd.mp3\"; filename*=UTF-8''abcd.mp3"
+
+
+def test_download_filename_bounds_title_length() -> None:
+    name = download_filename("x" * 1000, "song-1")
+    assert name == "x" * MAX_TITLE_CHARS + ".mp3"
+
+
+def test_download_filename_falls_back_when_title_empty() -> None:
+    assert download_filename(' "" ', "song-1") == "song-1.mp3"
+
+
+def test_zero_expiry_is_not_upgraded_to_default() -> None:
+    url = _storage().presigned_download_url("audio/s.mp3", "s.mp3", expires_in=0)
+    assert _query(url)["X-Amz-Expires"] == ["0"]

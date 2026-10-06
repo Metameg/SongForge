@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DOWNLOAD_UNAVAILABLE,
   downloadEntries,
@@ -16,6 +16,7 @@ import {
 export default function DownloadButton({ history }: { history: DownloadHistory }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState(false);
+  const inFlight = useRef(false);
   const entries = downloadEntries(history);
 
   useEffect(() => {
@@ -25,12 +26,18 @@ export default function DownloadButton({ history }: { history: DownloadHistory }
   if (entries.length === 0) return null;
 
   const download = async (href: string) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setError(false);
-    if (await probeDownload(href)) {
-      setOpen(false);
-      window.location.href = href;
-    } else {
-      setError(true);
+    try {
+      if (await probeDownload(href)) {
+        setOpen(false);
+        window.location.href = href;
+      } else {
+        setError(true);
+      }
+    } finally {
+      inFlight.current = false;
     }
   };
 

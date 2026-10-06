@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import functools
 import json
+import re
+from urllib.parse import quote
 
 import boto3
 from botocore.client import Config
@@ -28,6 +30,23 @@ DEFAULT_AUDIO_CONTENT_TYPE = "audio/mpeg"
 def audio_key(song_id: str, ext: str = "mp3") -> str:
     """Canonical, immutable object key for a song's audio."""
     return f"audio/{song_id}.{ext}"
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r'["\\\x00-\x1f\x7f]')
+MAX_TITLE_CHARS = 150
+
+
+def download_filename(title: str, fallback: str) -> str:
+    """``<title>.mp3``: unsafe chars dropped, title bounded, ``fallback`` if nothing is left."""
+    cleaned = _UNSAFE_FILENAME_CHARS.sub("", title).strip()[:MAX_TITLE_CHARS].strip()
+    return f"{cleaned or fallback}.mp3"
+
+
+def content_disposition(filename: str) -> str:
+    """Attachment header with an ASCII ``filename=`` fallback and RFC 5987 ``filename*=``."""
+    safe = _UNSAFE_FILENAME_CHARS.sub("", filename)
+    ascii_name = safe.encode("ascii", "replace").decode("ascii").replace("?", "_")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(safe, safe='')}"
 
 
 class ObjectStorage:
@@ -166,9 +185,11 @@ class ObjectStorage:
             Params={
                 "Bucket": self.bucket,
                 "Key": key,
-                "ResponseContentDisposition": f'attachment; filename="{filename}"',
+                "ResponseContentDisposition": content_disposition(filename),
             },
-            ExpiresIn=expires_in or self._presigned_download_ttl,
+            ExpiresIn=(
+                expires_in if expires_in is not None else self._presigned_download_ttl
+            ),
         )
         return url
 
