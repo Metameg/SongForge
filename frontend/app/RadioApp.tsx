@@ -5,10 +5,12 @@ import { fetchQueue, makeLatestGuard, wireQueueRefetch, type QueueResponse } fro
 import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
+import { emptyHistory, reduceHistory } from "@/lib/download";
 import { INITIAL_PROGRESS, reduceProgress } from "@/lib/progress";
 import { INITIAL_FEED, reduceFeed } from "@/lib/radio";
 import type { NowPlayingState } from "@/lib/nowPlaying";
 import Composer from "./Composer";
+import DownloadButton from "./DownloadButton";
 import GenerationProgressView from "./GenerationProgress";
 import LiveIndicator from "./LiveIndicator";
 import Player from "./Player";
@@ -23,6 +25,7 @@ import RadioStage from "./RadioStage";
 export default function RadioApp() {
   const [feed, dispatch] = useReducer(reduceFeed, INITIAL_FEED);
   const [progress, dispatchProgress] = useReducer(reduceProgress, INITIAL_PROGRESS);
+  const [history, dispatchHistory] = useReducer(reduceHistory, emptyHistory);
   const [mySongIds, setMySongIds] = useState<Set<string>>(() => new Set());
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
 
@@ -103,6 +106,12 @@ export default function RadioApp() {
     },
     [refreshQuota],
   );
+  // Client-observed download history, derived from the feed (no second SSE listener).
+  const playingId = feed.state?.status === "playing" ? feed.state.song_id : null;
+  const playingTitle = feed.state?.status === "playing" ? feed.state.title : "";
+  useEffect(() => {
+    if (playingId) dispatchHistory({ song_id: playingId, title: playingTitle });
+  }, [playingId, playingTitle]);
   const isMine = feed.state?.status === "playing" && hasMySong(mySongIds, feed.state.song_id);
 
   const onRefetched = useCallback(
@@ -159,6 +168,7 @@ export default function RadioApp() {
               {feed.state.title}
             </p>
           )}
+          <DownloadButton history={history} />
           <QueueStatus queue={queue} />
           <Player nowPlaying={feed.state} onRefetched={onRefetched} />
         </section>
