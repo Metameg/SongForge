@@ -1,17 +1,19 @@
 /**
- * Download history + labels (issue #39): the client-observed size-2 history
- * (now-playing + just-played), the same-origin download href and the dropdown labels.
- * Pure logic, no DOM.
+ * Download history + labels (issue #39): the client-observed history window
+ * (now-playing + the previous 5 = 6 downloadable tracks), the same-origin download
+ * href and the dropdown labels. Pure logic, no DOM.
  */
 
 import { describe, expect, it, vi } from "vitest";
 import {
   DOWNLOAD_UNAVAILABLE,
+  HISTORY_LIMIT,
   downloadEntries,
   downloadHref,
   emptyHistory,
   justPlayedLabel,
   nowPlayingLabel,
+  olderLabel,
   probeDownload,
   reduceHistory,
 } from "./download";
@@ -19,37 +21,53 @@ import {
 const a = { song_id: "a", title: "Alpha" };
 const b = { song_id: "b", title: "Beta" };
 const c = { song_id: "c", title: "Gamma" };
+const d = { song_id: "d", title: "Delta" };
+const e = { song_id: "e", title: "Epsilon" };
+const f = { song_id: "f", title: "Zeta" };
+const g = { song_id: "g", title: "Eta" };
+
+describe("HISTORY_LIMIT", () => {
+  it("is now-playing + 5 prior", () => {
+    expect(HISTORY_LIMIT).toBe(6);
+  });
+});
 
 describe("reduceHistory", () => {
   it("starts empty", () => {
-    expect(emptyHistory).toEqual({ nowPlaying: null, justPlayed: null });
+    expect(emptyHistory).toEqual({ entries: [] });
   });
-  it("a fresh visitor has now-playing only, no just-played", () => {
-    expect(reduceHistory(emptyHistory, a)).toEqual({ nowPlaying: a, justPlayed: null });
+  it("a fresh visitor has now-playing only", () => {
+    expect(reduceHistory(emptyHistory, a)).toEqual({ entries: [a] });
   });
-  it("after one witnessed song change both entries are present", () => {
+  it("after one witnessed song change both entries are present, newest-first", () => {
     const s = reduceHistory(reduceHistory(emptyHistory, a), b);
-    expect(s).toEqual({ nowPlaying: b, justPlayed: a });
+    expect(s).toEqual({ entries: [b, a] });
   });
-  it("keeps only the last two songs", () => {
-    const s = [a, b, c].reduce(reduceHistory, emptyHistory);
-    expect(s).toEqual({ nowPlaying: c, justPlayed: b });
+  it("keeps the window newest-first up to the cap", () => {
+    const s = [a, b, c, d, e, f].reduce(reduceHistory, emptyHistory);
+    expect(s).toEqual({ entries: [f, e, d, c, b, a] });
   });
-  it("a repeated identical song_id does not shift a distinct track into just-played", () => {
+  it("never exceeds HISTORY_LIMIT, dropping the oldest", () => {
+    const s = [a, b, c, d, e, f, g].reduce(reduceHistory, emptyHistory);
+    expect(s.entries).toHaveLength(HISTORY_LIMIT);
+    expect(s).toEqual({ entries: [g, f, e, d, c, b] });
+    expect(s.entries.map((x) => x.song_id)).not.toContain("a");
+  });
+  it("a repeated identical song_id does not shift a distinct track", () => {
     const once = reduceHistory(emptyHistory, a);
-    expect(reduceHistory(once, a)).toEqual({ nowPlaying: a, justPlayed: null });
+    expect(reduceHistory(once, a)).toEqual({ entries: [a] });
     const twice = reduceHistory(once, b);
-    expect(reduceHistory(twice, b)).toEqual({ nowPlaying: b, justPlayed: a });
+    expect(reduceHistory(twice, b)).toEqual({ entries: [b, a] });
   });
   it("same song_id with a changed title updates the title in place without shifting", () => {
     const s = reduceHistory(reduceHistory(emptyHistory, { song_id: "a", title: "x" }), {
       song_id: "a",
       title: "y",
     });
-    expect(s).toEqual({ nowPlaying: { song_id: "a", title: "y" }, justPlayed: null });
+    expect(s).toEqual({ entries: [{ song_id: "a", title: "y" }] });
     const withPrev = reduceHistory(reduceHistory(emptyHistory, b), { song_id: "a", title: "x" });
     const renamed = reduceHistory(withPrev, { song_id: "a", title: "y" });
-    expect(renamed.justPlayed).toEqual(b);
+    expect(renamed.entries).toEqual([{ song_id: "a", title: "y" }, b]);
   });
 });
 
@@ -69,32 +87,31 @@ describe("labels", () => {
   it("builds the just-played label", () => {
     expect(justPlayedLabel("Alpha")).toBe("Just played — Alpha");
   });
+  it("builds the older label with the age", () => {
+    expect(olderLabel(2, "Alpha")).toBe("2 songs ago — Alpha");
+    expect(olderLabel(5, "Zeta")).toBe("5 songs ago — Zeta");
+  });
 });
 
 describe("reduceHistory edge cases", () => {
-  it("many distinct changes always keep newest now-playing and the prior as just-played", () => {
-    const d = { song_id: "d", title: "Delta" };
-    const s = [a, b, c, d].reduce(reduceHistory, emptyHistory);
-    expect(s).toEqual({ nowPlaying: d, justPlayed: c });
-  });
   it("consecutive identical song_id returns the same state object", () => {
     const s = reduceHistory(emptyHistory, a);
     expect(reduceHistory(s, { ...a })).toBe(s);
   });
   it("a returning older song replaces now-playing and demotes the current one", () => {
     const s = [a, b, a].reduce(reduceHistory, emptyHistory);
-    expect(s).toEqual({ nowPlaying: a, justPlayed: b });
+    expect(s).toEqual({ entries: [a, b, a] });
   });
   it("does not mutate the previous state", () => {
     const before = reduceHistory(emptyHistory, a);
-    const snapshot = { ...before };
+    const snapshot = { entries: [...before.entries] };
     reduceHistory(before, b);
     expect(before).toEqual(snapshot);
   });
   it("an empty song_id (idle/blank transition) is recorded without throwing", () => {
     const idle = { song_id: "", title: "" };
     const s = reduceHistory(reduceHistory(emptyHistory, a), idle);
-    expect(s).toEqual({ nowPlaying: idle, justPlayed: a });
+    expect(s).toEqual({ entries: [idle, a] });
   });
 });
 
@@ -107,15 +124,19 @@ describe("downloadEntries", () => {
       { key: "now", label: "Now playing — Alpha", href: "/download/a" },
     ]);
   });
-  it("has two entries after a change, now-playing first", () => {
-    const s = [a, b].reduce(reduceHistory, emptyHistory);
+  it("labels now-playing, just-played, then older tracks by age", () => {
+    const s = [a, b, c, d].reduce(reduceHistory, emptyHistory);
     expect(downloadEntries(s)).toEqual([
-      { key: "now", label: "Now playing — Beta", href: "/download/b" },
-      { key: "prev", label: "Just played — Alpha", href: "/download/a" },
+      { key: "now", label: "Now playing — Delta", href: "/download/d" },
+      { key: "prev", label: "Just played — Gamma", href: "/download/c" },
+      { key: "older-2", label: "2 songs ago — Beta", href: "/download/b" },
+      { key: "older-3", label: "3 songs ago — Alpha", href: "/download/a" },
     ]);
   });
-  it("never exceeds two entries", () => {
-    expect(downloadEntries([a, b, c].reduce(reduceHistory, emptyHistory))).toHaveLength(2);
+  it("never exceeds HISTORY_LIMIT entries with unique keys", () => {
+    const entries = downloadEntries([a, b, c, d, e, f, g].reduce(reduceHistory, emptyHistory));
+    expect(entries).toHaveLength(HISTORY_LIMIT);
+    expect(new Set(entries.map((x) => x.key)).size).toBe(HISTORY_LIMIT);
   });
 });
 
@@ -153,12 +174,12 @@ describe("probeDownload", () => {
     ).toBe(false);
   });
   it("treats a thrown network error as unavailable", async () => {
-    const f = vi.fn().mockRejectedValue(new TypeError("network")) as unknown as typeof fetch;
-    expect(await probeDownload("/download/a", f)).toBe(false);
+    const fn = vi.fn().mockRejectedValue(new TypeError("network")) as unknown as typeof fetch;
+    expect(await probeDownload("/download/a", fn)).toBe(false);
   });
   it("probes the href without following redirects", async () => {
-    const f = vi.fn().mockResolvedValue({ type: "opaqueredirect", ok: false });
-    await probeDownload("/download/a", f as unknown as typeof fetch);
-    expect(f).toHaveBeenCalledWith("/download/a", expect.objectContaining({ redirect: "manual" }));
+    const fn = vi.fn().mockResolvedValue({ type: "opaqueredirect", ok: false });
+    await probeDownload("/download/a", fn as unknown as typeof fetch);
+    expect(fn).toHaveBeenCalledWith("/download/a", expect.objectContaining({ redirect: "manual" }));
   });
 });

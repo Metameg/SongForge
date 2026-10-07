@@ -1,7 +1,11 @@
 /**
- * Download history + labels (issue #39): the client-observed size-2 history
- * (now-playing + just-played), the same-origin download href and the dropdown labels.
- * Pure logic apart from `probeDownload`, which only touches the injected fetch.
+ * Download history + labels (issue #39): the client-observed history window
+ * (now-playing + the previous few songs), the same-origin download href and the
+ * dropdown labels. The window is newest-first and capped at {@link HISTORY_LIMIT}
+ * (now-playing + 5 prior = 6 downloadable tracks). History accumulates as the
+ * listener witnesses the radio rotate — a fresh page load starts with now-playing
+ * only and fills up to the cap over time. Pure logic apart from `probeDownload`,
+ * which only touches the injected fetch.
  */
 
 export interface HistoryEntry {
@@ -9,24 +13,29 @@ export interface HistoryEntry {
   title: string;
 }
 export interface DownloadHistory {
-  nowPlaying: HistoryEntry | null;
-  justPlayed: HistoryEntry | null;
+  /** Witnessed songs, newest-first, capped at {@link HISTORY_LIMIT}. */
+  entries: HistoryEntry[];
 }
 
-export const emptyHistory: DownloadHistory = { nowPlaying: null, justPlayed: null };
+/** now-playing + the previous 5 = 6 downloadable tracks. */
+export const HISTORY_LIMIT = 6;
+
+export const emptyHistory: DownloadHistory = { entries: [] };
 
 export const DOWNLOAD_UNAVAILABLE = "Download unavailable";
 
 /**
  * Record a witnessed now-playing song. A repeat of the current song_id never shifts
- * history; it only refreshes the stored title if that changed.
+ * history; it only refreshes the stored title if that changed. A distinct song is
+ * prepended and the window is trimmed back to {@link HISTORY_LIMIT}.
  */
 export function reduceHistory(state: DownloadHistory, song: HistoryEntry): DownloadHistory {
-  if (state.nowPlaying?.song_id === song.song_id) {
-    if (state.nowPlaying.title === song.title) return state;
-    return { ...state, nowPlaying: song };
+  const [head, ...rest] = state.entries;
+  if (head?.song_id === song.song_id) {
+    if (head.title === song.title) return state;
+    return { entries: [song, ...rest] };
   }
-  return { nowPlaying: song, justPlayed: state.nowPlaying };
+  return { entries: [song, ...state.entries].slice(0, HISTORY_LIMIT) };
 }
 
 export function downloadHref(songId: string): string {
@@ -41,24 +50,29 @@ export function justPlayedLabel(title: string): string {
   return `Just played — ${title}`;
 }
 
+/** Label for an older track: `n` is how many songs ago it played (>= 2). */
+export function olderLabel(n: number, title: string): string {
+  return `${n} songs ago — ${title}`;
+}
+
 export interface DownloadEntry {
-  key: "now" | "prev";
+  key: string;
   label: string;
   href: string;
 }
 
-/** Dropdown entries: now-playing first, just-played only when present (at most 2). */
+/**
+ * Dropdown entries, newest-first: now-playing, then just-played, then any older
+ * tracks still inside the window ("N songs ago"). At most {@link HISTORY_LIMIT}.
+ */
 export function downloadEntries(history: DownloadHistory): DownloadEntry[] {
-  const out: DownloadEntry[] = [];
-  if (history.nowPlaying) {
-    const { song_id, title } = history.nowPlaying;
-    out.push({ key: "now", label: nowPlayingLabel(title), href: downloadHref(song_id) });
-  }
-  if (history.justPlayed) {
-    const { song_id, title } = history.justPlayed;
-    out.push({ key: "prev", label: justPlayedLabel(title), href: downloadHref(song_id) });
-  }
-  return out;
+  return history.entries.map((entry, i) => {
+    const { song_id, title } = entry;
+    const href = downloadHref(song_id);
+    if (i === 0) return { key: "now", label: nowPlayingLabel(title), href };
+    if (i === 1) return { key: "prev", label: justPlayedLabel(title), href };
+    return { key: `older-${i}`, label: olderLabel(i, title), href };
+  });
 }
 
 /**
