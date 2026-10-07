@@ -9,9 +9,9 @@ import {
 } from "@/lib/download";
 
 /**
- * Download dropdown (issue #39): at most two entries (now-playing, just-played). Logic
- * lives in `lib/download`. The probe + navigation is two cheap 302 requests; the probe
- * exists so a failure shows inline instead of navigating to an error page.
+ * Download dropdown (issue #39): up to HISTORY_LIMIT entries (now-playing + the previous
+ * few songs). Logic lives in `lib/download`. The probe + navigation is two cheap 302
+ * requests; the probe exists so a failure shows inline instead of navigating to an error page.
  */
 export default function DownloadButton({ history }: { history: DownloadHistory }) {
   const [open, setOpen] = useState(false);
