@@ -2,11 +2,11 @@
   "id": null,
   "uid": "songforge-capacity-thesis",
   "title": "SongForge Capacity Thesis",
-  "description": "Issue #18 AC4: the shape proof for PRD #6 / decision #8 -- sse_connected_listeners rises with the number of connected clients while radio_advances_total and datastore-op counters stay flat, because SSE fan-out is in-process off ONE Redis pub/sub subscription per app instance. Also charts write-path create-rate throughput (AC4b).",
+  "description": "Issue #18 AC4: the shape proof for PRD #6 / decision #8 -- sse_connected_listeners rises with the number of connected clients while radio_advances_total and datastore-op counters stay flat, because SSE fan-out is in-process off ONE Redis pub/sub subscription per app instance. Also charts write-path throughput (AC4b). MULTI-INSTANCE: Prometheus discovers every `web` replica via DNS, so per-PROCESS metrics (listeners, created, relayed) are sum()'d for the fleet total AND broken out per instance, while DB-DERIVED gauges (jobs_in_state) -- which every instance sets to the same global count -- use max() to avoid double-counting.",
   "tags": ["songforge", "capacity", "issue-18"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": {
     "from": "now-30m",
@@ -17,18 +17,23 @@
       "id": 1,
       "title": "Connected listeners + fan-out (both EXPECTED TO RISE)",
       "type": "timeseries",
-      "description": "songforge_sse_connected_listeners (the value loadtest/connection-ceiling.js drives up) and rate(songforge_radio_pointer_events_relayed_total[1m]). Both rise together during a ramp: the relay counter increments once per listener per push, so it IS the in-process fan-out work -- it belongs on the 'rises' side, not the flat side. The thesis is that these climb while the datastore panels below stay flat.",
+      "description": "songforge_sse_connected_listeners is a PER-PROCESS gauge, so the fleet total is sum() across instances (connection-ceiling.js drives this up); the per-instance series ({{instance}}) show how the load balancer spreads connections and where each instance hits its own ceiling. The relayed-events rate is the in-process fan-out work (once per listener per push), also summed across instances -- it belongs on the 'rises' side. The thesis is these climb while the datastore panels below stay flat.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "songforge_sse_connected_listeners",
-          "legendFormat": "connected listeners",
+          "expr": "sum(songforge_sse_connected_listeners)",
+          "legendFormat": "connected listeners (total, all instances)",
           "refId": "A"
         },
         {
-          "expr": "rate(songforge_radio_pointer_events_relayed_total[1m])",
-          "legendFormat": "pointer events relayed/s (in-process fan-out)",
+          "expr": "songforge_sse_connected_listeners",
+          "legendFormat": "per instance {{instance}}",
           "refId": "B"
+        },
+        {
+          "expr": "sum(rate(songforge_radio_pointer_events_relayed_total[1m]))",
+          "legendFormat": "pointer events relayed/s (in-process fan-out)",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
@@ -40,16 +45,16 @@
       "id": 2,
       "title": "Radio advance + pointer PUBLISH rate (expected FLAT)",
       "type": "timeseries",
-      "description": "rate(songforge_radio_advances_total[1m]) and rate(songforge_radio_pointer_events_published_total[1m]) -- the thesis's direct observable: these stay flat regardless of listener count, because only ONE leader drives the clock-triggered advance and publishes each pointer change ONCE to Redis. (The per-listener relay counter is deliberately NOT here -- it grows with listeners and lives on the 'rises' panel to the left.)",
+      "description": "sum(rate(songforge_radio_advances_total[1m])) and sum(rate(songforge_radio_pointer_events_published_total[1m])) -- the thesis's direct observable: these stay flat regardless of listener count, because only ONE leader drives the clock-triggered advance and publishes each pointer change ONCE to Redis. Summed across instances so the single leader's rate shows regardless of which replica currently holds the lease (non-leaders contribute 0). (The per-listener relay counter is deliberately NOT here -- it grows with listeners and lives on the 'rises' panel to the left.)",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
-          "expr": "rate(songforge_radio_advances_total[1m])",
+          "expr": "sum(rate(songforge_radio_advances_total[1m]))",
           "legendFormat": "radio advances/s",
           "refId": "A"
         },
         {
-          "expr": "rate(songforge_radio_pointer_events_published_total[1m])",
+          "expr": "sum(rate(songforge_radio_pointer_events_published_total[1m]))",
           "legendFormat": "pointer events published/s",
           "refId": "B"
         }
@@ -63,7 +68,7 @@
       "id": 3,
       "title": "Datastore-op rate (expected FLAT as listener count rises)",
       "type": "timeseries",
-      "description": "ACTUAL datastore operations from the exporters -- Postgres transactions (pg_stat_database_xact_commit + xact_rollback) and Redis commands (redis_commands_processed_total). These, not HTTP request volume, are the datastore-facing work that must NOT scale with sse_connected_listeners: a listener holds an in-process SSE connection and never issues a per-tick datastore read/write. (HTTP request rate would rise here just from new /events connections + /metrics scrapes, so it can't establish datastore-independence -- it lives on the Service RED dashboard instead.)",
+      "description": "ACTUAL datastore operations from the exporters -- Postgres transactions (pg_stat_database_xact_commit + xact_rollback) and Redis commands (redis_commands_processed_total). These, not HTTP request volume, are the datastore-facing work that must NOT scale with sse_connected_listeners: a listener holds an in-process SSE connection and never issues a per-tick datastore read/write. (HTTP request rate would rise here just from new /events connections + /metrics scrapes, so it can't establish datastore-independence -- it lives on the Service RED dashboard instead.) Scraped from the single exporter per datastore, so unaffected by web replica count.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
         {
@@ -84,25 +89,46 @@
     },
     {
       "id": 4,
-      "title": "Create-rate throughput (write path, AC4b)",
+      "title": "Write-path throughput + backlog (AC4b)",
       "type": "timeseries",
-      "description": "rate(songforge_jobs_created_total[1m]) vs rate(songforge_jobs_dispatched_total[1m]) -- driven by loadtest/create-rate.js against the simulator seam. The two tracking each other shows the write path sustaining the target create-rate without the queue unboundedly backing up.",
+      "description": "jobs_dispatched_total is incremented in the WORKER process, which runs no HTTP server and is NOT scraped by Prometheus -- so it is unobservable here and this panel does NOT use it. Instead: sum(rate(songforge_jobs_created_total[1m])) is the create rate (per-process web counter, summed across replicas), and the DB-derived songforge_jobs_in_state gauge (set by the web process from a live GROUP BY state, so max() across replicas = the one true global count) shows the pipeline draining. If the write path keeps pace, the QUEUED backlog stays flat/low and in-flight sits near the global generation cap; if dispatch falls behind (e.g. GLOBAL_GENERATION_CONCURRENCY too low), QUEUED climbs without bound -- the exact signal observed at cap=1 (backlog grew to thousands) vs cap=50 (backlog drained). Backlog/in-flight are counts on the right axis; create rate is req/s on the left.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [
         {
-          "expr": "rate(songforge_jobs_created_total[1m])",
-          "legendFormat": "jobs created/s",
+          "expr": "sum(rate(songforge_jobs_created_total[1m]))",
+          "legendFormat": "jobs created/s (left axis)",
           "refId": "A"
         },
         {
-          "expr": "rate(songforge_jobs_dispatched_total[1m])",
-          "legendFormat": "jobs dispatched/s",
+          "expr": "max(songforge_jobs_in_state{state=\"QUEUED\"})",
+          "legendFormat": "QUEUED backlog (jobs, right axis)",
           "refId": "B"
+        },
+        {
+          "expr": "max(songforge_jobs_in_state{state=\"WAITING_FOR_WEBHOOK\"})",
+          "legendFormat": "in-flight / generating (jobs, right axis)",
+          "refId": "C"
         }
       ],
       "fieldConfig": {
         "defaults": { "unit": "reqps" },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.axisLabel", "value": "jobs (backlog / in-flight)" }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "C" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
       }
     }
   ]

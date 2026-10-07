@@ -16,9 +16,26 @@ scrape_configs:
   # backend/src/songforge/metrics.py, including the jobs-by-state / semaphore-
   # utilization gauges refreshed at scrape time by
   # backend/src/songforge/metrics_pipeline.py.
+  #
+  # DNS A-record service discovery (NOT a single `web:8000` static target): the
+  # `web` service scales to N replicas, and Docker's embedded DNS returns ALL of
+  # their A records for the service name. A single static target resolves to just
+  # ONE replica per scrape (round-robined), so per-process gauges like
+  # `songforge_sse_connected_listeners` would report one instance's share rather
+  # than the fleet total -- the exact multi-instance undercount the capacity
+  # dashboard exists to avoid. dns_sd makes each replica its own target with a
+  # distinct `instance` label, so dashboards sum() per-process metrics for the
+  # true total while still being able to break out per instance. NOTE: the
+  # worker process (jobs/dispatch.py) runs no HTTP server and is intentionally
+  # NOT scraped here -- its counters (jobs_dispatched_total etc.) are invisible
+  # to Prometheus, so dashboards observe the pipeline via the DB-derived
+  # songforge_jobs_in_state gauge (set by the web process at scrape time).
   - job_name: songforge_web
-    static_configs:
-      - targets: ["web:8000"]
+    dns_sd_configs:
+      - names: ["web"]
+        type: A
+        port: 8000
+        refresh_interval: 10s
 
   # Postgres: jobs table row counts, connection/lock stats, etc.
   - job_name: postgres
