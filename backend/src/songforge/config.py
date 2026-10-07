@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     s3_region: str = "auto"
     # Public/CDN base URL audio is served from; falls back to the endpoint+bucket.
     s3_public_base_url: str | None = None
+    # Browser-reachable S3 API endpoint used ONLY to SIGN presigned download URLs
+    # (issue #39). In dev the client talks to the internal `s3_endpoint_url`
+    # (`minio:9000`) the browser can't resolve, so a presigned GET signed against it
+    # 302s to an unreachable host; set this to the host-mapped MinIO
+    # (`http://localhost:<MINIO_HOST_PORT>`, no bucket path -- path-style addressing adds
+    # it) so the signature covers the host the browser actually connects to. Left unset
+    # in prod, where `s3_endpoint_url` (the R2 S3 endpoint) is already browser-reachable.
+    s3_presign_endpoint_url: str | None = None
     # Grant anonymous read on the audio bucket at boot so browsers/CDN can stream it
     # (PRD: public bucket + CDN, spec #44/#48). Applied best-effort against MinIO's S3
     # API; on R2 public access is configured out-of-band, so a failure is non-fatal.

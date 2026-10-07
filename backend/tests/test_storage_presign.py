@@ -97,3 +97,44 @@ def test_download_filename_falls_back_when_title_empty() -> None:
 def test_zero_expiry_is_not_upgraded_to_default() -> None:
     url = _storage().presigned_download_url("audio/s.mp3", "s.mp3", expires_in=0)
     assert _query(url)["X-Amz-Expires"] == ["0"]
+
+
+def test_presign_signs_against_browser_reachable_endpoint_when_set() -> None:
+    """In dev the S3 client talks to the internal ``minio:9000`` host the browser can't
+    reach; a configured ``presign_endpoint_url`` signs the download URL against the
+    host-mapped MinIO (``localhost:59000``) instead, so the 302 target is reachable and
+    the SigV4 signature matches the host the browser actually connects to (issue #39)."""
+    storage = ObjectStorage(
+        endpoint_url="http://minio:9000",
+        access_key_id="test",
+        secret_access_key="test-secret",
+        bucket="songforge-audio",
+        region="auto",
+        presign_endpoint_url="http://localhost:59000",
+    )
+    url = storage.presigned_download_url("audio/song-1.mp3", "My Song.mp3")
+    parsed = urlparse(url)
+    assert parsed.netloc == "localhost:59000"
+    assert parsed.path.endswith("/songforge-audio/audio/song-1.mp3")
+    # The signature must cover that host, so the usual SigV4 params are still present.
+    assert "X-Amz-Signature" in _query(url)
+
+
+def test_presign_defaults_to_main_endpoint_when_unset() -> None:
+    """Prod R2's ``S3_ENDPOINT_URL`` is already browser-reachable, so with no override the
+    download URL is signed against the main endpoint (unchanged behavior)."""
+    url = _storage().presigned_download_url("audio/song-1.mp3", "My Song.mp3")
+    assert urlparse(url).netloc == "minio:9000"
+
+
+def test_from_settings_threads_presign_endpoint(monkeypatch) -> None:
+    from songforge.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("S3_PRESIGN_ENDPOINT_URL", "http://localhost:59000")
+    try:
+        storage = ObjectStorage.from_settings()
+    finally:
+        get_settings.cache_clear()
+    url = storage.presigned_download_url("audio/s.mp3", "s.mp3")
+    assert urlparse(url).netloc == "localhost:59000"

@@ -41,6 +41,13 @@ x-backend-env: &backend-env
   # Points at the same MINIO_HOST_PORT/S3_BUCKET the rest of the stack uses, so it stays
   # correct even when those are overridden (e.g. a second worktree on different ports).
   S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-http://localhost:${MINIO_HOST_PORT:-59000}/${S3_BUCKET:-songforge-audio}}
+  # Browser-reachable endpoint used ONLY to SIGN presigned download URLs (issue #39,
+  # GET /download). Unlike playback (a plain public URL), a presigned GET's SigV4
+  # signature covers the host, so it must be signed against the host the browser
+  # connects to -- not the internal S3_ENDPOINT_URL (minio:9000), which would 302 the
+  # browser to an unreachable host. Host-mapped MinIO, no bucket path (path-style adds
+  # it). Left unset in prod, where S3_ENDPOINT_URL (R2) is already browser-reachable.
+  S3_PRESIGN_ENDPOINT_URL: ${S3_PRESIGN_ENDPOINT_URL:-http://localhost:${MINIO_HOST_PORT:-59000}}
   STATIC_LIBRARY_DIR: /app/static-library
   MUSICGPT_BASE_URL: ${MUSICGPT_BASE_URL:-http://simulator:8080}
   MUSICGPT_API_KEY: ${MUSICGPT_API_KEY:-}

@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 import json
 import re
+from typing import Any
 from urllib.parse import quote
 
 import boto3
@@ -65,28 +66,44 @@ class ObjectStorage:
         connect_timeout: float = 10.0,
         read_timeout: float = 30.0,
         presigned_download_ttl: int = 300,
+        presign_endpoint_url: str | None = None,
     ) -> None:
         self.bucket = bucket
         self.endpoint_url = endpoint_url.rstrip("/")
         self._public_base_url = public_base_url.rstrip("/") if public_base_url else None
         self._public_read = public_read
         self._presigned_download_ttl = presigned_download_ttl
-        self._client = boto3.client(
-            "s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=access_key_id,
-            aws_secret_access_key=secret_access_key,
-            region_name=region,
-            # Path-style addressing works uniformly for MinIO and R2. Explicit socket
-            # timeouts (quality report MED finding, issue #13 review): without these,
-            # a hung MinIO/R2 connection blocks the calling thread indefinitely --
-            # config-driven so local/staging/prod can tune independently.
-            config=Config(
-                signature_version="s3v4",
-                s3={"addressing_style": "path"},
-                connect_timeout=connect_timeout,
-                read_timeout=read_timeout,
-            ),
+        # Path-style addressing works uniformly for MinIO and R2. Explicit socket
+        # timeouts (quality report MED finding, issue #13 review): without these,
+        # a hung MinIO/R2 connection blocks the calling thread indefinitely --
+        # config-driven so local/staging/prod can tune independently.
+        client_config = Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
+
+        def _make_client(endpoint: str) -> Any:
+            return boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                aws_access_key_id=access_key_id,
+                aws_secret_access_key=secret_access_key,
+                region_name=region,
+                config=client_config,
+            )
+
+        self._client = _make_client(endpoint_url)
+        # Presigned download URLs must be SIGNED against a browser-reachable host: the
+        # SigV4 signature covers the host, so it only validates when the browser connects
+        # to that same host (issue #39). In dev `endpoint_url` is the internal
+        # `minio:9000`; `presign_endpoint_url` points at the host-mapped MinIO instead.
+        # Unset (prod R2, already browser-reachable) → reuse the main client.
+        self._presign_client = (
+            _make_client(presign_endpoint_url)
+            if presign_endpoint_url and presign_endpoint_url != endpoint_url
+            else self._client
         )
 
     @classmethod
@@ -103,6 +120,7 @@ class ObjectStorage:
             connect_timeout=settings.s3_connect_timeout_seconds,
             read_timeout=settings.s3_read_timeout_seconds,
             presigned_download_ttl=settings.s3_presigned_download_ttl_seconds,
+            presign_endpoint_url=settings.s3_presign_endpoint_url,
         )
 
     def public_url(self, key: str) -> str:
@@ -179,8 +197,11 @@ class ObjectStorage:
     def presigned_download_url(
         self, key: str, filename: str, expires_in: int | None = None
     ) -> str:
-        """Short-TTL presigned GET URL forcing an attachment download (issue #39)."""
-        url: str = self._client.generate_presigned_url(
+        """Short-TTL presigned GET URL forcing an attachment download (issue #39).
+
+        Signed with ``self._presign_client`` so the URL targets a browser-reachable host
+        (see ``presign_endpoint_url`` in ``__init__``)."""
+        url: str = self._presign_client.generate_presigned_url(
             "get_object",
             Params={
                 "Bucket": self.bucket,
