@@ -46,6 +46,28 @@ http_request_duration_seconds = Histogram(
     registry=REGISTRY,
 )
 
+# Connection-saturation view (issue #18 follow-up): requests currently being handled.
+# Incremented on entry, decremented on completion by MetricsMiddleware. Under load this
+# climbs far above the app's DB connection-pool capacity -- the gap between this and
+# songforge_db_pool_connections{state="capacity"} is the pile of requests BLOCKED
+# waiting for a pooled DB connection (i.e. the app's own pool is the wall).
+http_requests_in_flight = Gauge(
+    "songforge_http_requests_in_flight",
+    "HTTP requests currently in flight in this web process (in minus out).",
+    registry=REGISTRY,
+)
+
+# The create-path ceiling, counted explicitly: a request that could not get a
+# connection from the app's SQLAlchemy pool within the pool timeout raises
+# sqlalchemy.exc.TimeoutError, which the framework turns into a 500. Before this metric
+# those 500s were invisible (MetricsMiddleware only recorded AFTER a successful
+# call_next, so a raised request was never counted -- only the load balancer saw it).
+db_pool_acquire_timeouts_total = Counter(
+    "songforge_db_pool_acquire_timeouts_total",
+    "Requests that failed to acquire an app DB-pool connection within the pool timeout.",
+    registry=REGISTRY,
+)
+
 radio_advances_total = Counter(
     "songforge_radio_advances_total",
     "Radio song advances applied by the coordinator (successful version-CAS only).",

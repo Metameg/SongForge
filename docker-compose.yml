@@ -115,6 +115,11 @@ services:
       # scopes exact pool sizing as out-of-scope for this slice).
       MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-200}
       DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
+      # Grant the app user read-only access to PgBouncer's own stats console
+      # (SHOW STATS / SHOW POOLS) so `pgbouncer_exporter` (monitoring profile) can
+      # scrape pool utilization. Least privilege: stats_users can read counters, not
+      # run admin ops. edoburu maps this env to pgbouncer.ini's `stats_users`.
+      STATS_USERS: ${POSTGRES_USER:-songforge}
     depends_on:
       postgres:
         condition: service_healthy
@@ -423,6 +428,23 @@ services:
       - "9121"
     depends_on:
       redis:
+        condition: service_healthy
+
+  pgbouncer_exporter:
+    image: prometheuscommunity/pgbouncer-exporter:v0.9.0
+    profiles: ["monitoring"]
+    # Reads PgBouncer's stats console (SHOW STATS/POOLS/LISTS) as the app user, which
+    # `pgbouncer.STATS_USERS` above authorizes. Exposes the MIDDLE layer of the
+    # connection-saturation view: server connections in use (of DEFAULT_POOL_SIZE) and
+    # clients waiting in PgBouncer's own queue.
+    command:
+      - "--pgBouncer.connectionString=postgres://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@pgbouncer:6432/pgbouncer?sslmode=disable"
+    # No host port published -- same reasoning as the other exporters (unauthenticated,
+    # internal-network-only). Prometheus reaches it at pgbouncer_exporter:9127.
+    expose:
+      - "9127"
+    depends_on:
+      pgbouncer:
         condition: service_healthy
 
 volumes:

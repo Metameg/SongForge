@@ -1,0 +1,86 @@
+{
+  "id": null,
+  "uid": "songforge-connection-saturation",
+  "title": "SongForge Connection Saturation",
+  "description": "Issue #18 follow-up: where the create path runs out of connections, layer by layer. Reading it: under a create-rate ramp you should see the APP's own pool (1) pin at its limit, a big pile of requests waiting on it (2), and creates start failing (3) -- WHILE PgBouncer (4) and the database (5,6) still have headroom. That combination means the app's own connection pool is the wall, not PgBouncer and not the database. Per-process app metrics are sum()'d across web replicas; the DB-derived gauges are already global.",
+  "tags": ["songforge", "capacity", "connections", "issue-18"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "1. App's own DB connections — in use vs limit",
+      "type": "timeseries",
+      "description": "songforge_db_pool_connections: the app keeps a small, fixed set of connections to talk to the database (through PgBouncer). 'in use' meeting 'limit' means the app's own pool is FULL -- the first wall. Summed across web replicas (each process has its own pool).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "sum(songforge_db_pool_connections{state=\"in_use\"})", "legendFormat": "in use", "refId": "A" },
+        { "expr": "sum(songforge_db_pool_connections{state=\"capacity\"})", "legendFormat": "limit (capacity)", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "2. Requests piling up waiting on the app pool",
+      "type": "timeseries",
+      "description": "songforge_http_requests_in_flight (requests currently being handled, summed across replicas) vs the app pool limit. The GAP between the two lines is the pile of requests blocked waiting for a free app connection -- your 'N requests in queue'. When in-flight shoots up while the limit line stays flat, the pool is blocking the app.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum(songforge_http_requests_in_flight)", "legendFormat": "requests in flight", "refId": "A" },
+        { "expr": "sum(songforge_db_pool_connections{state=\"capacity\"})", "legendFormat": "app pool limit", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "title": "3. Failed creates per second (pool timeouts & 5xx)",
+      "type": "timeseries",
+      "description": "rate(songforge_db_pool_acquire_timeouts_total) = requests that gave up waiting for an app connection (the ceiling, surfacing as HTTP 500s), and rate(songforge_http_requests_total{status=~\"5..\"}) = all server errors. When these rise, the app pool is actively dropping work.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "sum(rate(songforge_db_pool_acquire_timeouts_total[1m]))", "legendFormat": "pool-timeout failures/s", "refId": "A" },
+        { "expr": "sum(rate(songforge_http_requests_total{status=~\"5..\"}[1m]))", "legendFormat": "all 5xx/s", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "4. PgBouncer — DB conversations busy & clients waiting",
+      "type": "timeseries",
+      "description": "The middle layer. server active = live conversations with the database (of DEFAULT_POOL_SIZE = 20); client waiting = requests queued inside PgBouncer. NOTE: because the app only ever opens ~30 connections to PgBouncer, its waiting line stays SMALL even when the app itself is overwhelmed -- the big backlog lives in panel 2, not here. (Metric names from prometheuscommunity/pgbouncer-exporter; if empty, confirm the exporter's exposed names.)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "sum(pgbouncer_pools_server_active_connections)", "legendFormat": "server conns active (of 20)", "refId": "A" },
+        { "expr": "sum(pgbouncer_pools_client_waiting_connections)", "legendFormat": "clients waiting in pgbouncer", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "title": "5. Database — connections in use vs max (100)",
+      "type": "timeseries",
+      "description": "sum(pg_stat_database_numbackends{datname=\"songforge\"}) vs pg_settings_max_connections. PgBouncer fans everything down to ~20 here, so this should sit FAR below the 100 ceiling -- proving the database itself was never the bottleneck.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "sum(pg_stat_database_numbackends{datname=\"songforge\"})", "legendFormat": "DB connections in use", "refId": "A" },
+        { "expr": "pg_settings_max_connections", "legendFormat": "DB max connections", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "title": "6. Database work rate (transactions/sec) — should stay normal",
+      "type": "timeseries",
+      "description": "rate(pg_stat_database_xact_commit) and rate(pg_stat_database_xact_rollback) for the songforge DB. If these sit at a healthy, steady level while requests are failing upstream, the database is keeping up fine -- the problem is the pool in front of it, not the database's own throughput.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "sum(rate(pg_stat_database_xact_commit{datname=\"songforge\"}[1m]))", "legendFormat": "commits/s (work completed)", "refId": "A" },
+        { "expr": "sum(rate(pg_stat_database_xact_rollback{datname=\"songforge\"}[1m]))", "legendFormat": "rollbacks/s (read-only / empty)", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    }
+  ]
+}

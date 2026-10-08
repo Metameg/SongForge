@@ -46,3 +46,10 @@ scrape_configs:
   - job_name: redis
     static_configs:
       - targets: ["redis_exporter:9121"]
+
+  # PgBouncer: server-connection pool utilization (active of DEFAULT_POOL_SIZE) and
+  # clients waiting in its queue -- the MIDDLE layer between the app's own connection
+  # pool and Postgres, for the connection-saturation dashboard.
+  - job_name: pgbouncer
+    static_configs:
+      - targets: ["pgbouncer_exporter:9127"]

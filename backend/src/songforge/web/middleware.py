@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 
+import sqlalchemy.exc
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -79,9 +80,37 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         start = time.perf_counter()
-        response = await call_next(request)
-        elapsed = time.perf_counter() - start
+        # In-flight is incremented here and decremented in `finally` so it tracks
+        # requests currently being handled, INCLUDING ones blocked waiting for a DB
+        # connection and ones that end in an exception.
+        metrics.http_requests_in_flight.inc()
+        try:
+            response = await call_next(request)
+        except sqlalchemy.exc.TimeoutError:
+            # The app's DB connection pool had no free connection within the pool
+            # timeout -- the create-path ceiling. Count it explicitly, record the 500
+            # (the framework turns this into a 500), then re-raise so the normal error
+            # response is still produced.
+            metrics.db_pool_acquire_timeouts_total.inc()
+            self._observe(request, start, 500)
+            raise
+        except Exception:
+            # Any other unhandled error still surfaces as a 500 to the client; without
+            # this it would never be counted/logged here (only the load balancer sees
+            # it) -- which is exactly why the pool-timeout 500s were previously invisible.
+            self._observe(request, start, 500)
+            raise
+        else:
+            self._observe(request, start, response.status_code)
+            return response
+        finally:
+            metrics.http_requests_in_flight.dec()
 
+    def _observe(self, request: Request, start: float, status: int) -> None:
+        """Record duration + a status-labelled request count, and emit the structured
+        access line. Called for both successful responses and raised requests (status
+        500) so no outcome is uncounted."""
+        elapsed = time.perf_counter() - start
         route = request.scope.get("route")
         path = getattr(route, "path", request.url.path)
         method = request.method
@@ -90,7 +119,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             elapsed
         )
         metrics.http_requests_total.labels(
-            method=method, path=path, status=str(response.status_code)
+            method=method, path=path, status=str(status)
         ).inc()
 
         # One structured JSON access line per request, carrying the correlation ID
@@ -100,7 +129,6 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             "http_request",
             method=method,
             path=path,
-            status=response.status_code,
+            status=status,
             duration_ms=round(elapsed * 1000, 2),
         )
-        return response

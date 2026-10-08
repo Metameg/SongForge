@@ -65,6 +65,38 @@ generation_slots_capacity = Gauge(
 )
 
 
+db_pool_connections = Gauge(
+    "songforge_db_pool_connections",
+    "App-side SQLAlchemy DB connection pool, point-in-time (issue #18 follow-up): "
+    "scope 'in_use' = connections currently checked out, 'capacity' = pool_size + "
+    "max_overflow (the hard ceiling). Per web PROCESS -- sum() across replicas for the "
+    "fleet total. When 'in_use' pins at 'capacity' while songforge_http_requests_in_"
+    "flight sits far higher, the app's own pool is the bottleneck blocking requests.",
+    labelnames=("state",),
+    registry=REGISTRY,
+)
+
+
+def refresh_db_pool_gauge() -> None:
+    """Set ``songforge_db_pool_connections`` from the web engine's live pool counters.
+
+    Synchronous on purpose: SQLAlchemy's pool exposes plain (non-async) ``checkedout``/
+    ``size`` counters even on an ``AsyncEngine`` (via its ``sync_engine``). Skips cleanly
+    for a pool that exposes no sizing (e.g. ``NullPool``), so it never raises on a
+    non-pooled engine.
+    """
+    from songforge.db import get_engine
+
+    pool = get_engine().sync_engine.pool
+    checkedout = getattr(pool, "checkedout", None)
+    size = getattr(pool, "size", None)
+    if checkedout is None or size is None:
+        return  # NullPool / non-sizing pool: nothing meaningful to report
+    capacity = size() + getattr(pool, "_max_overflow", 0)
+    db_pool_connections.labels(state="in_use").set(checkedout())
+    db_pool_connections.labels(state="capacity").set(capacity)
+
+
 async def refresh_job_state_gauges(session: AsyncSession) -> None:
     """Set ``songforge_jobs_in_state`` from a fresh ``GROUP BY state`` count.
 
@@ -126,5 +158,10 @@ async def render_latest_with_pipeline_gauges(
         await refresh_semaphore_gauges(redis, settings)
     except Exception:
         log.exception("metrics_pipeline_semaphore_refresh_failed")
+
+    try:
+        refresh_db_pool_gauge()
+    except Exception:
+        log.exception("metrics_pipeline_db_pool_refresh_failed")
 
     return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
