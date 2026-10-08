@@ -68,6 +68,16 @@ db_pool_acquire_timeouts_total = Counter(
     registry=REGISTRY,
 )
 
+# The NEXT wall once the app pool is widened: Postgres itself refusing a new backend
+# (SQLSTATE 53300, 'too many clients already'), surfaced by PgBouncer when it tries to
+# open more server connections than Postgres's max_connections allows. Counted
+# separately from pool timeouts so the dashboard shows WHICH layer is the bottleneck.
+db_connection_rejected_total = Counter(
+    "songforge_db_connection_rejected_total",
+    "Requests that failed because Postgres rejected a new connection (too many clients).",
+    registry=REGISTRY,
+)
+
 radio_advances_total = Counter(
     "songforge_radio_advances_total",
     "Radio song advances applied by the coordinator (successful version-CAS only).",

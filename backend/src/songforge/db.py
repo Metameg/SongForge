@@ -38,7 +38,15 @@ def get_engine() -> AsyncEngine:
     # backend session between queries, so a statement prepared against one backend can
     # silently break on the next. Single-node/dev/tests (no pooler) keep the cache on
     # (today's construction, unchanged) since disabling it there is a needless perf hit.
-    kwargs: dict[str, Any] = {"pool_pre_ping": True, "future": True}
+    kwargs: dict[str, Any] = {
+        "pool_pre_ping": True,
+        "future": True,
+        # Pool sizing is configurable (DB_POOL_SIZE / DB_MAX_OVERFLOW) so a load test can
+        # push the connection bottleneck downstream to PgBouncer/Postgres; defaults match
+        # SQLAlchemy's own, so dev/single-node behavior is unchanged.
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+    }
     if settings.db_pgbouncer_transaction_mode:
         kwargs["connect_args"] = {"statement_cache_size": 0}
     return create_async_engine(settings.database_url, **kwargs)

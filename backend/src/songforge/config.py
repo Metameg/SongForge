@@ -74,6 +74,18 @@ class Settings(BaseSettings):
     # collide with an unrelated statement) on the next. Default `False` keeps today's
     # behavior (no PgBouncer in front, cache stays on) for dev/tests/single-node.
     db_pgbouncer_transaction_mode: bool = False
+    # Web engine (`db.get_engine()`) SQLAlchemy connection-pool sizing. Defaults match
+    # SQLAlchemy's own (pool_size 5 + max_overflow 10 = 15 connections per web PROCESS)
+    # -- safe for dev/single-node. Raise via env (DB_POOL_SIZE / DB_MAX_OVERFLOW) under a
+    # load test to move the bottleneck downstream (PgBouncer, then Postgres). Surfaced on
+    # the connection-saturation dashboard as songforge_db_pool_connections.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    # When the DB layer is saturated (app pool timed out, or Postgres rejected a new
+    # connection with "too many clients"), the web tier returns 503 Service Unavailable
+    # with this many seconds in the Retry-After header instead of a bare 500 -- a signal
+    # the client can actually act on (back off and retry) rather than "the server broke".
+    overload_retry_after_seconds: int = 5
 
     # ── Object storage (S3 API: MinIO locally, Cloudflare R2 in prod) ───────
     s3_endpoint_url: str

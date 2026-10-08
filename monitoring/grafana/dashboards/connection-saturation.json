@@ -36,13 +36,14 @@
     },
     {
       "id": 3,
-      "title": "3. Failed creates per second (pool timeouts & 5xx)",
+      "title": "3. Failed creates per second (pool timeouts, DB rejections & 5xx/503)",
       "type": "timeseries",
-      "description": "rate(songforge_db_pool_acquire_timeouts_total) = requests that gave up waiting for an app connection (the ceiling, surfacing as HTTP 500s), and rate(songforge_http_requests_total{status=~\"5..\"}) = all server errors. When these rise, the app pool is actively dropping work.",
+      "description": "Which layer is dropping work. pool-timeout = requests that gave up waiting for an APP connection; DB-rejection = Postgres refused a new backend ('too many clients', SQLSTATE 53300) -- the next wall once the app pool is widened; all 5xx/503 = every failed request (overload now returns a graceful 503 Service Unavailable with Retry-After, which this still counts). Compare the two specific lines to see whether the app pool or the database is the bottleneck.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
-        { "expr": "sum(rate(songforge_db_pool_acquire_timeouts_total[1m]))", "legendFormat": "pool-timeout failures/s", "refId": "A" },
-        { "expr": "sum(rate(songforge_http_requests_total{status=~\"5..\"}[1m]))", "legendFormat": "all 5xx/s", "refId": "B" }
+        { "expr": "sum(rate(songforge_db_pool_acquire_timeouts_total[1m]))", "legendFormat": "pool-timeout failures/s (app layer)", "refId": "A" },
+        { "expr": "sum(rate(songforge_db_connection_rejected_total[1m]))", "legendFormat": "DB-rejection failures/s (postgres layer)", "refId": "C" },
+        { "expr": "sum(rate(songforge_http_requests_total{status=~\"5..\"}[1m]))", "legendFormat": "all 5xx/503/s", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
     },
