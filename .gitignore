@@ -21,3 +21,6 @@ dump.rdb
 
 # Throwaway signed test identities for load testing (regenerate via mint-cookies.py)
 loadtest/cookies.json
+
+# uv-generated lockfile from local test tooling (project uses pip/venv, not uv)
+backend/uv.lock
