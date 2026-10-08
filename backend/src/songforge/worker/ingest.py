@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from songforge.config import Settings
 from songforge.db import get_sessionmaker, worker_asyncpg_dsn
+from songforge.jobs.dispatch import NotifyReleaseFn
 from songforge.jobs.generation_client import GenerationClient, HttpGenerationClient
 from songforge.jobs.ingest import (
     DEFAULT_SONG_TITLE,
@@ -90,6 +91,20 @@ async def _safe_release_semaphore(semaphore: Semaphore, user_id: str) -> None:
         log.exception("semaphore_release_failed", site="ingest", user_id=user_id)
 
 
+async def _safe_notify_release(notify_release: NotifyReleaseFn, job_id: str) -> None:
+    """Best-effort NOTIFY on the dispatch loop's `semaphore_release_channel` (issue #18
+    follow-up): wakes the dispatcher the instant this ingest frees a generation slot, so
+    the next queued job dispatches immediately instead of waiting for dispatch's poll
+    backstop (or an incidental new-job NOTIFY). Fired AFTER `_safe_release_semaphore` so
+    the slot is actually free when the woken dispatcher tries to acquire it; best-effort
+    like `_safe_notify_ready` -- a dropped NOTIFY only costs the dispatcher one backstop
+    tick (the pre-fix behavior), never correctness."""
+    try:
+        await notify_release(job_id)
+    except Exception:
+        log.exception("semaphore_release_notify_failed", site="ingest", job_id=job_id)
+
+
 async def _drain_ingest_pending(
     sessionmaker: async_sessionmaker[AsyncSession],
     storage: ObjectStorage,
@@ -98,6 +113,7 @@ async def _drain_ingest_pending(
     settings: Settings,
     notify_ready: NotifyReadyFn | None = None,
     semaphore: Semaphore | None = None,
+    notify_release: NotifyReleaseFn | None = None,
     publish_user_event: PublishUserEventFn | None = None,
 ) -> None:
     """Ingest every currently-claimable job, one at a time, until none remain. Each
@@ -152,6 +168,13 @@ async def _drain_ingest_pending(
                 if semaphore is not None and job.state in (JOB_STATE_READY, JOB_STATE_FAILED)
                 else None
             )
+            # The same release condition carries the job id for the dispatch-wake NOTIFY
+            # below (the release channel's payload is the job id, per worker/dispatch.py).
+            release_job_id = (
+                job.job_id
+                if semaphore is not None and job.state in (JOB_STATE_READY, JOB_STATE_FAILED)
+                else None
+            )
             ready_event: tuple[str, str] | None = None
             if (
                 publish_user_event is not None
@@ -171,6 +194,10 @@ async def _drain_ingest_pending(
             )
         if semaphore is not None and release_user_id is not None:
             await _safe_release_semaphore(semaphore, release_user_id)
+            # Slot is now free -> wake the dispatcher so the next queued job dispatches
+            # immediately rather than on dispatch's 5s poll backstop (issue #18 follow-up).
+            if notify_release is not None and release_job_id is not None:
+                await _safe_notify_release(notify_release, release_job_id)
 
 
 async def _wait_any(stop: asyncio.Event, wake: asyncio.Event) -> None:
@@ -229,6 +256,13 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
                             song_id,
                         )
 
+                    async def _notify_release(job_id: str) -> None:
+                        await notify_conn.execute(
+                            "SELECT pg_notify($1, $2)",
+                            settings.semaphore_release_channel,
+                            job_id,
+                        )
+
                     async with httpx.AsyncClient(
                         timeout=settings.ingest_download_timeout_seconds
                     ) as http_client:
@@ -247,6 +281,7 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
                                 settings,
                                 _notify_ready,
                                 semaphore,
+                                notify_release=_notify_release,
                                 publish_user_event=publish_user_event,
                             )
                             wake.clear()

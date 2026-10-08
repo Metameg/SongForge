@@ -316,6 +316,132 @@ async def test_drain_does_not_release_semaphore_when_the_job_is_requeued(
     assert semaphore.released_with == []
 
 
+# ── Semaphore-release NOTIFY wakes the dispatch loop (issue #18 follow-up) ──────────
+#
+# Releasing the slot (above) is necessary but not sufficient: the dispatch loop LISTENs
+# on `semaphore_release_channel` so a freed slot dispatches the next queued job
+# immediately. Before this fix, ingest freed the slot SILENTLY, so the dispatcher only
+# noticed on an incidental new-job NOTIFY or its 5s poll backstop -- capping generation
+# throughput at ~1/backstop instead of ~1/generation-time. So: whenever the slot is
+# released, the release channel must be NOTIFYed with the job id, AFTER the release
+# (so the slot is actually free when the woken dispatcher tries to acquire it).
+
+
+async def test_drain_notifies_release_channel_after_releasing_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = "song-xyz"
+        job.user_id = "user-1"  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    events: list[str] = []
+    semaphore = _RecordingSemaphore(events)
+    notified: list[str] = []
+
+    async def _notify_release(job_id: str) -> None:
+        events.append(f"notify_release:{job_id}")
+        notified.append(job_id)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        semaphore=semaphore,  # type: ignore[arg-type]
+        notify_release=_notify_release,
+    )
+
+    assert notified == ["job-1"]
+    # Release MUST precede the wake, so the slot is free when the dispatcher reacts.
+    assert events == ["semaphore.release:user-1", "notify_release:job-1"]
+
+
+async def test_drain_does_not_notify_release_when_job_is_requeued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A requeue back to INGEST_PENDING keeps the slot held -- no release, so no wake."""
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "INGEST_PENDING"  # requeued, still active
+        job.user_id = "user-3"  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    semaphore = _RecordingSemaphore()
+    notified: list[str] = []
+
+    async def _notify_release(job_id: str) -> None:
+        notified.append(job_id)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        semaphore=semaphore,  # type: ignore[arg-type]
+        notify_release=_notify_release,
+    )
+
+    assert notified == []
+
+
+async def test_release_notify_failure_is_swallowed_and_slot_still_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The release wake is best-effort (mirrors `notify_ready`): a raising
+    `notify_release` (e.g. a dropped NOTIFY connection) must be swallowed, never
+    propagate out of the drain, and never undo the slot release itself."""
+    remaining = iter(["job-1", "job-2", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = f"song-for-{job.job_id}"
+        job.user_id = job.job_id  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+
+    semaphore = _RecordingSemaphore()
+
+    async def _boom(job_id: str) -> None:
+        raise RuntimeError("notify connection dropped")
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        semaphore=semaphore,  # type: ignore[arg-type]
+        notify_release=_boom,
+    )
+
+    # Both jobs still released despite every notify raising, and the loop drained on.
+    assert semaphore.released_with == ["job-1", "job-2"]
+
+
 async def test_drain_never_releases_when_no_semaphore_is_supplied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -451,6 +577,7 @@ async def test_run_ingest_poll_backstop_redrains_when_no_notify_ever_arrives(
         sessionmaker: object, storage: object, generation_client: object,
         downloader: object, settings: Settings, notify_ready: object = None,
         semaphore: object = None,
+        notify_release: object = None,
         publish_user_event: object = None,
     ) -> None:
         nonlocal drain_calls
