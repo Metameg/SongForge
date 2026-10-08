@@ -53,3 +53,9 @@ scrape_configs:
   - job_name: pgbouncer
     static_configs:
       - targets: ["pgbouncer_exporter:9127"]
+
+  # cAdvisor: per-container CPU/memory for every container, so the compute panels can
+  # show which component is the bottleneck (e.g. the web event loops pinned at one core).
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]

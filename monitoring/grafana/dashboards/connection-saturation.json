@@ -2,7 +2,7 @@
   "id": null,
   "uid": "songforge-connection-saturation",
   "title": "SongForge Connection Saturation",
-  "description": "Issue #18 follow-up: where the create path runs out of connections, layer by layer. Reading it: under a create-rate ramp you should see the APP's own pool (1) pin at its limit, a big pile of requests waiting on it (2), and creates start failing (3) -- WHILE PgBouncer (4) and the database (5,6) still have headroom. That combination means the app's own connection pool is the wall, not PgBouncer and not the database. Per-process app metrics are sum()'d across web replicas; the DB-derived gauges are already global.",
+  "description": "Issue #18 follow-up: where the create path runs out of connections, layer by layer. Reading it: under a create-rate ramp you should see the APP's own pool (1) pin at its limit, a big pile of requests waiting on it (2), and creates start failing (3) -- WHILE PgBouncer (4) and the database (5,6) still have headroom. That combination means the app's own connection pool is the wall, not PgBouncer and not the database. Per-process app metrics are sum()'d across web replicas; the DB-derived gauges are already global. Panels 7-9 add the COMPUTE view (web event-loop CPU, and per-container CPU/memory via cAdvisor) -- because the wall is sometimes CPU, not connections, and the pool panels can't show that.",
   "tags": ["songforge", "capacity", "connections", "issue-18"],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -82,6 +82,39 @@
         { "expr": "sum(rate(pg_stat_database_xact_rollback{datname=\"songforge\"}[1m]))", "legendFormat": "rollbacks/s (read-only / empty)", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "title": "7. Web event-loop CPU per instance (~1.0 = ONE core MAXED = the wall)",
+      "type": "timeseries",
+      "description": "rate(process_cpu_seconds_total{job=\"songforge_web\"}) per web process. Each web container runs ONE uvicorn async event loop = effectively one CPU core, so a line at ~1.0 means that instance is compute-bound and cannot process faster -- the limit the connection/pool panels can't show. If these pin at ~1.0 while the pool (panel 1) and DB (panel 5) sit idle, the bottleneck is CPU, and the fix is more web instances (scale out), not bigger pools.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        { "expr": "rate(process_cpu_seconds_total{job=\"songforge_web\"}[1m])", "legendFormat": "{{instance}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "title": "8. CPU by container (cAdvisor) — who is compute-bound?",
+      "type": "timeseries",
+      "description": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"songforge-.*\"})) -- CPU cores used by EVERY container (web, workers, postgres, pgbouncer, simulator, redis, ...). Answers 'what is actually pegged?' at a glance. Requires the cadvisor service (monitoring profile).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "targets": [
+        { "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"songforge-.*\"}[1m]))", "legendFormat": "{{name}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "title": "9. Memory by container (cAdvisor)",
+      "type": "timeseries",
+      "description": "container_memory_usage_bytes{name=~\"songforge-.*\"} -- resident memory per container, to catch a component approaching an OOM. Requires the cadvisor service (monitoring profile).",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "targets": [
+        { "expr": "container_memory_usage_bytes{name=~\"songforge-.*\"}", "legendFormat": "{{name}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     }
   ]
 }

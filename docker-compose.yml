@@ -452,6 +452,27 @@ services:
       pgbouncer:
         condition: service_healthy
 
+  # Per-container CPU/memory for EVERY container (cAdvisor), so a load test can show
+  # which component is compute-bound -- e.g. the web event loops pinning one core each,
+  # which the connection/pool panels can't reveal. Dev-only (monitoring profile):
+  # privileged + host mounts are needed to read cgroup/container stats; a prod setup
+  # would use the platform's own container metrics instead. Prometheus scrapes
+  # cadvisor:8080 over the compose network.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: ["monitoring"]
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    expose:
+      - "8080"
+
 volumes:
   pgdata:
   redisdata:
