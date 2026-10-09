@@ -81,6 +81,17 @@ x-backend-build: &backend-build
 services:
   postgres:
     image: postgres:16-alpine
+    # Hard cap on total backends (Postgres uses one process per connection, so this is
+    # kept modest and a pooler fans many clients into few backends). The connection
+    # BUDGET that must fit under it:
+    #   pgbouncer DEFAULT_POOL_SIZE                         (web tier, via pgbouncer)
+    #   + Σ workers of (~10 fixed LISTEN/NOTIFY/lock conns + DB_POOL_SIZE session pool)  (DIRECT)
+    #   + exporters (~2)  + superuser_reserved (3)
+    #   <=  max_connections
+    # The WEB app pool does NOT count here (it hits pgbouncer, which is bounded by
+    # DEFAULT_POOL_SIZE). Raise POSTGRES_MAX_CONNECTIONS only when you want more real
+    # write throughput -- not to paper over an oversized pool.
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-100}"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-songforge}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-songforge}
@@ -206,6 +217,13 @@ services:
       # unspoofable. Set only here (not the shared x-backend-env default, which stays
       # blank for `worker`/`migrate`/`simulator`, none of which resolve a client IP).
       CLIENT_IP_HEADER: "X-Forwarded-For"
+      # Web pool sizing, INDEPENDENT from the worker (overrides the x-backend-env default).
+      # The web tier serves many concurrent independent requests and sits BEHIND pgbouncer,
+      # so a large pool is safe: pgbouncer fans these into its own bounded server pool, so
+      # they never reach Postgres 1:1. Raise WEB_DB_POOL_SIZE under a load test to push
+      # more concurrent transactions at pgbouncer.
+      DB_POOL_SIZE: ${WEB_DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${WEB_DB_MAX_OVERFLOW:-10}
     command: ["songforge-web"]
     # No host port published here (issue #19, AC#1): traffic is meant to reach `web`
     # ONLY through the `lb` service below, which is also what makes `--scale web=N`
@@ -261,6 +279,15 @@ services:
       # never be handed off mid-lifetime by a transaction pooler. See the rationale
       # on the `x-backend-env` anchor's `DATABASE_URL` above.
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+      # Worker pool sizing, INDEPENDENT from web and DELIBERATELY SMALL (overrides the
+      # x-backend-env default). The worker runs a FIXED set of loops (dispatch / ingest /
+      # radio / watchdog), each using at most one session at a time, and connects DIRECTLY
+      # to Postgres (no pgbouncer to fan it in). A big pool here is a footgun: every
+      # connection it opens hits Postgres 1:1 and QueuePool keeps up to pool_size open
+      # indefinitely. ~5 covers the loops with headroom; the ~10 fixed LISTEN/NOTIFY/lock
+      # connections are separate and NOT governed by this. See the max_connections budget.
+      DB_POOL_SIZE: ${WORKER_DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${WORKER_DB_MAX_OVERFLOW:-2}
     command: ["songforge-worker"]
     depends_on:
       migrate:
