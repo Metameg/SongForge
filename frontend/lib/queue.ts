@@ -55,10 +55,16 @@ export function myPosition(q: QueueResponse): number | null {
 
 /**
  * Human-facing label for the viewer's own queue position. Position 1 gets a celebratory
- * "next up" message; later positions get a plain in-line label.
+ * "next up" message; later positions get a plain in-line label. When ``total`` (the queue
+ * depth) is supplied, later positions are shown OUT OF the total (e.g. "You're #42 of 2000
+ * in line"); omitting it preserves the plain "#42 in line" form.
  */
-export function positionLabel(position: number): string {
-  return position === 1 ? "Your song is next up!" : `You're #${position} in line`;
+export function positionLabel(position: number, total?: number): string {
+  if (position === 1) return "Your song is next up!";
+  if (total !== undefined && total >= position) {
+    return `You're #${position} of ${total} in line`;
+  }
+  return `You're #${position} in line`;
 }
 
 /** Fetch via the same-origin proxy. */

@@ -82,6 +82,12 @@ describe("positionLabel", () => {
     expect(positionLabel(2)).toBe("You're #2 in line");
     expect(positionLabel(7)).toBe("You're #7 in line");
   });
+
+  it("shows the position OUT OF the total when a depth is supplied", () => {
+    expect(positionLabel(42, 2000)).toBe("You're #42 of 2000 in line");
+    // Position 1 stays celebratory even with a total.
+    expect(positionLabel(1, 2000)).toBe("Your song is next up!");
+  });
 });
 
 describe("myPosition", () => {

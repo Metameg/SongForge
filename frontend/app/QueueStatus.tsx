@@ -42,7 +42,7 @@ export default function QueueStatus({ queue }: { queue: QueueResponse | null }) 
               />
             </svg>
           )}
-          {positionLabel(mine)}
+          {positionLabel(mine, queue.depth)}
         </span>
       )}
     </div>
