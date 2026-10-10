@@ -1,0 +1,568 @@
+{
+  "id": null,
+  "uid": "songforge-overview",
+  "title": "SongForge — Overview",
+  "description": "Single-page operational triage for SongForge. Read top-to-bottom: is it slow or failing? how many users and what is pegged? which resource is the wall? is generation draining? Portable to Grafana Cloud via the Data source variable.",
+  "tags": ["songforge", "overview", "staging"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Traffic & Latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 1,
+      "title": "Request rate by route",
+      "type": "timeseries",
+      "description": "Per-route requests/sec (health + metrics scrapes excluded). The /create line is the create request rate.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum by (path) (rate(songforge_http_requests_total{path!~\"/metrics|/health|/health/.*\"}[1m]))",
+          "legendFormat": "{{path}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "axisLabel": "req/s" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Request latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "description": "Overall latency percentiles. Reference lines mark the SLOs: p95 = 0.5s, p99 = 1s.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(songforge_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(songforge_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(songforge_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "axisLabel": "latency", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 0.5 },
+            { "color": "red", "value": 1.0 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 3,
+      "title": "p99 latency by route",
+      "type": "timeseries",
+      "description": "p99 per route, so one slow endpoint (e.g. /create) does not hide behind the aggregate.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, path) (rate(songforge_http_request_duration_seconds_bucket{path!~\"/metrics|/health|/health/.*\"}[5m])))",
+          "legendFormat": "{{path}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "axisLabel": "p99 latency", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1.0 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Errors",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+    },
+    {
+      "id": 4,
+      "title": "5xx error rate",
+      "type": "timeseries",
+      "description": "Server-error ratio (reads a flat 0% when clean). Reference line at the 1% SLO.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(songforge_http_requests_total{status=~\"5..\"}[5m])) or vector(0)) / clamp_min(sum(rate(songforge_http_requests_total[5m])), 1)",
+          "legendFormat": "5xx %",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": { "axisLabel": "error %", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Failures by layer",
+      "type": "timeseries",
+      "description": "Where work is dropped: app pool-acquire timeouts, Postgres connection rejections, and all 5xx/503 responses.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "targets": [
+        {
+          "expr": "sum(rate(songforge_db_pool_acquire_timeouts_total[1m]))",
+          "legendFormat": "app pool timeout",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(songforge_db_connection_rejected_total[1m]))",
+          "legendFormat": "postgres rejected",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(songforge_http_requests_total{status=~\"5..\"}[1m]))",
+          "legendFormat": "5xx / 503",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "axisLabel": "failures/s" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Users & Compute",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }
+    },
+    {
+      "id": 6,
+      "title": "Active users (SSE listeners)",
+      "type": "timeseries",
+      "description": "Concurrent SSE connections = active users. Total and per web instance. Reference line at the ~7,000 nginx connection ceiling.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "expr": "sum(songforge_sse_connected_listeners)",
+          "legendFormat": "total",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "songforge_sse_connected_listeners",
+          "legendFormat": "{{instance}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "axisLabel": "users", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 7000 }
+          ] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "A" },
+            "properties": [ { "id": "custom.lineWidth", "value": 3 } ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Web CPU per instance",
+      "type": "timeseries",
+      "description": "Each web container is one uvicorn event loop ≈ one core. A line at 1.0 means that instance is compute-bound — the wall. Reference line at 1 core.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"songforge-web-.+\"}[1m]))",
+          "legendFormat": "{{name}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "axisLabel": "cores", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1.0 }
+          ] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 8,
+      "title": "CPU by container",
+      "type": "timeseries",
+      "description": "CPU cores per container (cAdvisor) — what is actually pegged across web, workers, postgres, pgbouncer, redis, lb.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        {
+          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"songforge-.+\"}[1m]))",
+          "legendFormat": "{{name}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "axisLabel": "cores" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Memory by container",
+      "type": "timeseries",
+      "description": "Resident memory per container (cAdvisor) — catch a component approaching OOM.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        {
+          "expr": "container_memory_usage_bytes{name=~\"songforge-.+\"}",
+          "legendFormat": "{{name}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "axisLabel": "memory" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "Connections & Datastores",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 43 }
+    },
+    {
+      "id": 10,
+      "title": "App DB pool & PgBouncer queue",
+      "type": "timeseries",
+      "description": "App's own DB pool in-use vs its limit (the first connection wall), plus clients waiting inside PgBouncer (should stay ~0).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "expr": "sum(songforge_db_pool_connections{state=\"in_use\"})",
+          "legendFormat": "pool in use",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(songforge_db_pool_connections{state=\"capacity\"})",
+          "legendFormat": "pool limit",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        },
+        {
+          "expr": "sum(pgbouncer_pools_client_waiting_connections)",
+          "legendFormat": "pgbouncer waiting",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "axisLabel": "connections" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Postgres connections vs max",
+      "type": "timeseries",
+      "description": "Total Postgres backends against max_connections. PgBouncer fans everything down, so this sits far below the ceiling.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 44 },
+      "targets": [
+        {
+          "expr": "sum(pg_stat_database_numbackends)",
+          "legendFormat": "backends in use",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "pg_settings_max_connections",
+          "legendFormat": "max_connections",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "axisLabel": "connections" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Postgres transactions/s",
+      "type": "timeseries",
+      "description": "Commit vs rollback rate. A climbing rollback line signals contention or failing transactions.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "targets": [
+        {
+          "expr": "sum(rate(pg_stat_database_xact_commit[1m]))",
+          "legendFormat": "commits/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(pg_stat_database_xact_rollback[1m]))",
+          "legendFormat": "rollbacks/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "axisLabel": "txn/s" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Redis ops/s & clients",
+      "type": "timeseries",
+      "description": "Redis command rate (left) and connected clients (right). Should stay bounded — one pub/sub subscription per web instance, not per listener.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
+      "targets": [
+        {
+          "expr": "sum(rate(redis_commands_processed_total[1m]))",
+          "legendFormat": "commands/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(redis_connected_clients)",
+          "legendFormat": "connected clients",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "axisLabel": "commands/s" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.axisLabel", "value": "clients" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "Generation Pipeline",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 }
+    },
+    {
+      "id": 14,
+      "title": "Jobs by state",
+      "type": "timeseries",
+      "description": "Point-in-time job counts per state. A climbing QUEUED band means dispatch is falling behind generation capacity.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+      "targets": [
+        {
+          "expr": "max by (state) (songforge_jobs_in_state)",
+          "legendFormat": "{{state}}",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "axisLabel": "jobs", "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Generation slots (semaphore)",
+      "type": "timeseries",
+      "description": "Global generation semaphore: slots in use vs capacity. At capacity continuously = generation is the throughput limit.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+      "targets": [
+        {
+          "expr": "max(songforge_generation_slots_in_use{scope=\"global\"})",
+          "legendFormat": "in use",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "max(songforge_generation_slots_capacity{scope=\"global\"})",
+          "legendFormat": "capacity",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "axisLabel": "slots" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Pipeline failures/s",
+      "type": "timeseries",
+      "description": "Terminal job failures, audio-ingest failures, and quota refunds per second — a non-zero line here means generated work is being lost.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 69 },
+      "targets": [
+        {
+          "expr": "sum(rate(songforge_jobs_failed_total[5m]))",
+          "legendFormat": "job failed/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(songforge_ingest_failed_total[5m]))",
+          "legendFormat": "ingest failed/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(songforge_quota_refunded_total[5m]))",
+          "legendFormat": "quota refunded/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "axisLabel": "events/s" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ]
+}
