@@ -76,7 +76,13 @@ EXPECTED_BODY_KEYS = {
 }
 
 
-def _record(*, song_id: str = "song-1", version: int = 1, playback_id: str = "pb-1") -> PointerRecord:
+def _record(
+    *,
+    song_id: str = "song-1",
+    version: int = 1,
+    playback_id: str = "pb-1",
+    queue_depth: int | None = None,
+) -> PointerRecord:
     now = datetime.now(timezone.utc)
     return PointerRecord(
         song_id=song_id,
@@ -89,6 +95,7 @@ def _record(*, song_id: str = "song-1", version: int = 1, playback_id: str = "pb
         duration_seconds=180,
         playback_id=playback_id,
         version=version,
+        queue_depth=queue_depth,
     )
 
 
@@ -751,3 +758,20 @@ async def test_events_job_ready_never_reaches_a_different_identity() -> None:
     await _assert_other_identity_never_receives(
         '{"event": "job-ready", "job_id": "only-a", "song_id": "song-a", "title": "Mine"}'
     )
+
+
+async def test_song_change_frame_carries_queue_depth_for_the_push() -> None:
+    """depth-in-SSE: the `song-change` frame includes `queue_depth` alongside the
+    now-playing body, so a listener learns the waiting-queue depth from the push (and
+    from the connect-time frame, served from the cached pointer) without hitting
+    `/queue` -> Postgres on every advance. Depth lives on the SSE frame, NOT in the pure
+    `/now-playing` body."""
+    redis = _FakeRedis()
+    async with _running_app(redis) as (app, client):
+        app.state.pointer_cache.set(_record(song_id="song-1", version=1, queue_depth=4))
+        async with client.stream("GET", "/events") as resp:
+            name, payload = await asyncio.wait_for(
+                _sse_events(resp).__anext__(), timeout=2.0
+            )
+            assert name == "song-change"
+            assert payload["queue_depth"] == 4

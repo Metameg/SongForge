@@ -1,7 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { fetchQueue, makeLatestGuard, wireQueueRefetch, type QueueResponse } from "@/lib/queue";
+import {
+  fetchQueue,
+  makeLatestGuard,
+  myPosition,
+  wireQueueRefetch,
+  type QueueResponse,
+} from "@/lib/queue";
 import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
@@ -30,6 +36,12 @@ export default function RadioApp() {
   const [quota, setQuota] = useState<QuotaResponse | null>(null);
 
   const [queue, setQueue] = useState<QueueResponse | null>(null);
+  // Mirror of `queue` for the SSE handlers: the `song-change` gate reads the LATEST
+  // queue (do I currently hold a position?) without re-wiring the stream each render.
+  const queueRef = useRef<QueueResponse | null>(null);
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
 
   const refreshQuota = useCallback(async () => {
     try {
@@ -67,10 +79,23 @@ export default function RadioApp() {
       await refreshQuota();
       if (cancelled) return;
       source = new EventSource("/events");
-      // Queue is read once now (cookie established above), then refetched reactively on
-      // song-change / the viewer's own job-progress / job-ready -- no timer polling.
-      unwireQueue = wireQueueRefetch(source, () => void refreshQueue());
-      void refreshQueue();
+      // depth-in-SSE: the waiting-queue depth rides every `song-change` frame (and the
+      // connect-time frame), so a plain listener gets "N waiting" from the push with NO
+      // `/queue` -> Postgres read. `/queue` is refetched for the viewer's own POSITION
+      // only when it can have changed for them: on their own job-progress/job-ready, and
+      // on song-change ONLY while they currently hold a position. No initial blanket
+      // fetch -- the first song-change frame on connect seeds the depth.
+      unwireQueue = wireQueueRefetch(source, {
+        onDepth: (depth) => {
+          if (depth === null) return;
+          setQueue((prev) => (prev === null ? { depth, positions: [] } : { ...prev, depth }));
+        },
+        refetchPositions: () => void refreshQueue(),
+        hasPosition: () => {
+          const cur = queueRef.current;
+          return cur !== null && myPosition(cur) !== null;
+        },
+      });
       source.onopen = () => dispatch({ type: "open" });
       source.onerror = () => dispatch({ type: "error" }); // browser auto-reconnects; state kept
       source.addEventListener("song-change", (e) =>

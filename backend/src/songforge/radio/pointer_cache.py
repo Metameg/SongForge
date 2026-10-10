@@ -68,6 +68,16 @@ class PointerRecord:
     # Last + defaulted: a pointer cached in Redis before issue #36 lacks this key and
     # must still deserialize (as None).
     album_cover_path: str | None = None
+    # depth-in-SSE: the waiting-queue depth (count of unplayed `playback_queue` rows) AS
+    # OF this pointer's publish, stamped by the coordinator (`radio/coordinator.py`) so a
+    # `song-change` SSE frame -- and the connect-time frame served from the cached pointer
+    # -- can report it with ZERO Postgres reads, sparing every listener a `/queue` count
+    # query on each advance. Deliberately NOT surfaced by `to_response` (which must stay
+    # byte-identical to `NowPlayingView.to_response`, the pure `/now-playing` body); the
+    # SSE route adds it alongside that body itself. Defaulted + last so a pre-depth
+    # pointer (or the PG-fallback read path, which has no depth) deserializes as None,
+    # same cross-version tolerance as `album_cover_path`.
+    queue_depth: int | None = None
 
     def to_response(self, *, server_time: datetime) -> dict[str, Any]:
         """Shape this record into the `/now-playing` JSON body.
@@ -110,9 +120,17 @@ class PointerRecord:
         return cls(**{k: v for k, v in data.items() if k in known})
 
     @classmethod
-    def from_view(cls, view: NowPlayingView) -> PointerRecord:
+    def from_view(
+        cls, view: NowPlayingView, *, queue_depth: int | None = None
+    ) -> PointerRecord:
         """Build a record from the Postgres read model, formatting timestamps with the
-        same tz-aware UTC ISO rule as the HTTP wire contract (`_isoformat_utc`)."""
+        same tz-aware UTC ISO rule as the HTTP wire contract (`_isoformat_utc`).
+
+        `queue_depth` is optional: the coordinator passes the freshly-counted waiting
+        depth when publishing a pointer (depth-in-SSE), while the read-path fallback
+        (`get_now_playing_cached`) omits it -- a read must never trigger a depth count,
+        so a pointer resolved from Postgres carries no depth until the coordinator's next
+        publish stamps one in."""
         return cls(
             song_id=view.song_id,
             title=view.title,
@@ -125,6 +143,7 @@ class PointerRecord:
             playback_id=view.playback_id,
             version=view.version,
             album_cover_path=view.album_cover_path,
+            queue_depth=queue_depth,
         )
 
 

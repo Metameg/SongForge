@@ -10,6 +10,7 @@ import {
   formatQueueLine,
   makeLatestGuard,
   myPosition,
+  parseDepthFromSongChange,
   parseQueue,
   positionLabel,
   wireQueueRefetch,
@@ -127,46 +128,97 @@ describe("fetchQueue", () => {
   });
 });
 
-describe("wireQueueRefetch", () => {
+describe("parseDepthFromSongChange", () => {
+  it("extracts a non-negative integer queue_depth from the frame data", () => {
+    expect(parseDepthFromSongChange(JSON.stringify({ queue_depth: 42 }))).toBe(42);
+    expect(parseDepthFromSongChange(JSON.stringify({ queue_depth: 0 }))).toBe(0);
+    expect(parseDepthFromSongChange(JSON.stringify({ queue_depth: 7.9 }))).toBe(7);
+  });
+  it("is null when queue_depth is absent, null, negative, NaN or not a number", () => {
+    expect(parseDepthFromSongChange(JSON.stringify({ song_id: "x" }))).toBeNull();
+    expect(parseDepthFromSongChange(JSON.stringify({ queue_depth: null }))).toBeNull();
+    expect(parseDepthFromSongChange(JSON.stringify({ queue_depth: -1 }))).toBeNull();
+    expect(parseDepthFromSongChange(JSON.stringify({ queue_depth: "9" }))).toBeNull();
+  });
+  it("is null for undefined or unparseable data rather than throwing", () => {
+    expect(parseDepthFromSongChange(undefined)).toBeNull();
+    expect(parseDepthFromSongChange("not json")).toBeNull();
+  });
+});
+
+describe("wireQueueRefetch (depth-in-SSE)", () => {
   function fakeSource() {
     return { addEventListener: vi.fn(), removeEventListener: vi.fn() };
   }
+  type Ev = { data?: string };
   const listenerFor = (spy: ReturnType<typeof vi.fn>, name: string) =>
-    spy.mock.calls.find((c) => c[0] === name)?.[1] as (() => void) | undefined;
+    spy.mock.calls.find((c) => c[0] === name)?.[1] as ((e: Ev) => void) | undefined;
+  const handlers = (over: Partial<Parameters<typeof wireQueueRefetch>[1]> = {}) => ({
+    onDepth: vi.fn(),
+    refetchPositions: vi.fn(),
+    hasPosition: () => false,
+    ...over,
+  });
 
   it("registers song-change, job-progress and job-ready listeners", () => {
     const source = fakeSource();
-    wireQueueRefetch(source, vi.fn());
+    wireQueueRefetch(source, handlers());
     const names = source.addEventListener.mock.calls.map((c) => c[0]).sort();
     expect(names).toEqual(["job-progress", "job-ready", "song-change"]);
   });
-  it("each registered listener calls refetch", () => {
+  it("does not listen for job-failed or idle", () => {
     const source = fakeSource();
-    const refetch = vi.fn();
-    wireQueueRefetch(source, refetch);
-    for (const name of ["song-change", "job-progress", "job-ready"]) {
-      listenerFor(source.addEventListener, name)?.();
-    }
-    expect(refetch).toHaveBeenCalledTimes(3);
-  });
-  it("does not listen for job-failed or idle (no refetch on those)", () => {
-    const source = fakeSource();
-    wireQueueRefetch(source, vi.fn());
+    wireQueueRefetch(source, handlers());
     const names = source.addEventListener.mock.calls.map((c) => c[0]);
-    expect(names.length).toBeGreaterThan(0);
     expect(names).not.toContain("job-failed");
     expect(names).not.toContain("idle");
   });
-  it("does not refetch on its own at wire time (initial load is the caller's job)", () => {
+  it("reports the waiting-queue depth from each song-change frame", () => {
     const source = fakeSource();
-    const refetch = vi.fn();
-    wireQueueRefetch(source, refetch);
+    const h = handlers();
+    wireQueueRefetch(source, h);
+    listenerFor(source.addEventListener, "song-change")?.({
+      data: JSON.stringify({ queue_depth: 5 }),
+    });
+    expect(h.onDepth).toHaveBeenCalledWith(5);
+  });
+  it("does NOT refetch /queue on song-change for a pure listener (no position)", () => {
+    const source = fakeSource();
+    const h = handlers({ hasPosition: () => false });
+    wireQueueRefetch(source, h);
+    listenerFor(source.addEventListener, "song-change")?.({
+      data: JSON.stringify({ queue_depth: 5 }),
+    });
+    expect(h.refetchPositions).not.toHaveBeenCalled();
+  });
+  it("DOES refetch /queue on song-change when the viewer holds a position", () => {
+    const source = fakeSource();
+    const h = handlers({ hasPosition: () => true });
+    wireQueueRefetch(source, h);
+    listenerFor(source.addEventListener, "song-change")?.({
+      data: JSON.stringify({ queue_depth: 5 }),
+    });
+    expect(h.refetchPositions).toHaveBeenCalledTimes(1);
+  });
+  it("always refetches /queue on the viewer's own job-progress and job-ready", () => {
+    const source = fakeSource();
+    const h = handlers({ hasPosition: () => false });
+    wireQueueRefetch(source, h);
+    listenerFor(source.addEventListener, "job-progress")?.({});
+    listenerFor(source.addEventListener, "job-ready")?.({});
+    expect(h.refetchPositions).toHaveBeenCalledTimes(2);
+  });
+  it("does not act on its own at wire time (initial load is the caller's job)", () => {
+    const source = fakeSource();
+    const h = handlers();
+    wireQueueRefetch(source, h);
     expect(source.addEventListener).toHaveBeenCalled();
-    expect(refetch).not.toHaveBeenCalled();
+    expect(h.onDepth).not.toHaveBeenCalled();
+    expect(h.refetchPositions).not.toHaveBeenCalled();
   });
   it("cleanup removes exactly the listeners it added", () => {
     const source = fakeSource();
-    const cleanup = wireQueueRefetch(source, vi.fn());
+    const cleanup = wireQueueRefetch(source, handlers());
     expect(source.removeEventListener).not.toHaveBeenCalled();
     cleanup();
     expect(source.addEventListener).toHaveBeenCalledTimes(3);
@@ -177,23 +229,11 @@ describe("wireQueueRefetch", () => {
   });
   it("calling cleanup twice does not throw", () => {
     const source = fakeSource();
-    const cleanup = wireQueueRefetch(source, vi.fn());
+    const cleanup = wireQueueRefetch(source, handlers());
     expect(() => {
       cleanup();
       cleanup();
     }).not.toThrow();
-  });
-  it("two wirings use independent handlers", () => {
-    const source = fakeSource();
-    const r1 = vi.fn();
-    const r2 = vi.fn();
-    wireQueueRefetch(source, r1);
-    wireQueueRefetch(source, r2);
-    const handlers = source.addEventListener.mock.calls.map((c) => c[1] as () => void);
-    expect(new Set(handlers).size).toBe(2);
-    handlers[0]();
-    expect(r1).toHaveBeenCalledTimes(1);
-    expect(r2).not.toHaveBeenCalled();
   });
 });
 

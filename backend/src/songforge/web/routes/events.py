@@ -92,6 +92,16 @@ def _format_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
+def _song_change_payload(record: PointerRecord, *, server_time: datetime) -> dict[str, Any]:
+    """The `song-change` SSE frame body: the pure `/now-playing` view PLUS `queue_depth`
+    (depth-in-SSE). Depth is stamped onto the pointer by the coordinator and travels for
+    free on the cached pointer, so a listener reads the waiting-queue depth from this
+    push (and from the connect-time frame) without a `/queue` -> Postgres count on every
+    advance. It is added HERE, not in `PointerRecord.to_response`, so that body stays
+    byte-identical to the `/now-playing` contract."""
+    return {**record.to_response(server_time=server_time), "queue_depth": record.queue_depth}
+
+
 @router.get("/events")
 async def events(
     request: Request,
@@ -129,7 +139,7 @@ async def events(
                 yield _format_event("idle", {"status": "idle"})
             else:
                 yield _format_event(
-                    "song-change", current.to_response(server_time=datetime.now(timezone.utc))
+                    "song-change", _song_change_payload(current, server_time=datetime.now(timezone.utc))
                 )
 
             while True:
@@ -154,7 +164,7 @@ async def events(
                     if current is not None:
                         yield _format_event(
                             "song-change",
-                            current.to_response(server_time=datetime.now(timezone.utc)),
+                            _song_change_payload(current, server_time=datetime.now(timezone.utc)),
                         )
                     continue
 
@@ -163,7 +173,7 @@ async def events(
                     pointer_task = None
                     yield _format_event(
                         "song-change",
-                        current.to_response(server_time=datetime.now(timezone.utc)),
+                        _song_change_payload(current, server_time=datetime.now(timezone.utc)),
                     )
                 if user_task in done:
                     message = user_task.result()

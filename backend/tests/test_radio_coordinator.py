@@ -646,3 +646,56 @@ async def test_pointer_write_leaves_album_cover_path_null_when_song_has_none(
 
     cached = PointerRecord.from_json(redis._store[RADIO_POINTER_REDIS_KEY])
     assert cached.album_cover_path is None
+
+
+# ── depth-in-SSE: the published pointer carries the waiting-queue depth ──────────────
+
+
+async def test_initialize_publishes_the_waiting_queue_depth(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A genuine publish carries `queue_depth` (count of unplayed `playback_queue`
+    rows) so `/events` can fan it out and listeners need not hit `/queue` -> Postgres on
+    each advance. Initialize picks a static filler and does NOT consume queue rows, so
+    both staged user songs still count."""
+    from songforge.models import PlaybackQueue
+
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    # Stage two waiting rows with explicit ids (sqlite does not auto-fill the BigInteger
+    # PK; a real Postgres would) -- initialize picks a static filler and consumes no
+    # queue row, so both still count toward depth.
+    async with sessionmaker() as session:
+        session.add(PlaybackQueue(id=1, song_id="song-1", job_id=None))
+        session.add(PlaybackQueue(id=2, song_id="song-2", job_id=None))
+        await session.commit()
+
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        assert await initialize_if_absent(session, _StubHistory(), redis=redis) is True
+
+    assert len(redis.publish_calls) == 1
+    payload = json.loads(redis.publish_calls[0][1])
+    assert payload["queue_depth"] == 2
+    assert json.loads(redis._store[RADIO_POINTER_REDIS_KEY])["queue_depth"] == 2
+
+
+async def test_publish_survives_a_depth_count_error(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The depth count is strictly best-effort: if it raises, the pointer publish must
+    still happen (with `queue_depth` null), never be swallowed along with the count."""
+    import songforge.radio.coordinator as coord
+
+    async def _boom(_session: object) -> int:
+        raise RuntimeError("count failed")
+
+    monkeypatch.setattr(coord, "count_waiting_depth", _boom)
+    await _add_songs(sessionmaker, "song-1", "song-2")
+
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        assert await initialize_if_absent(session, _StubHistory(), redis=redis) is True
+
+    assert len(redis.publish_calls) == 1
+    assert json.loads(redis.publish_calls[0][1])["queue_depth"] is None

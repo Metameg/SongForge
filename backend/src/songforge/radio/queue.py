@@ -79,6 +79,26 @@ async def get_queue_status(session: AsyncSession, user_id: str) -> QueueStatus:
     )
 
 
+async def count_waiting_depth(session: AsyncSession) -> int:
+    """The waiting FIFO depth: count of ``playback_queue`` rows with ``played_at IS
+    NULL`` -- the same set `get_queue_status` counts for its ``depth``, but WITHOUT the
+    per-user ranking window.
+
+    Cheap enough (a single indexed count, no window function, no join) to run on every
+    pointer publish so the coordinator can stamp it onto the pointer (depth-in-SSE): the
+    depth then rides the `song-change` SSE frame and the connect-time frame, so a plain
+    listener never has to hit `/queue` -> Postgres just to render "N waiting". Only a
+    user who actually holds a queue POSITION still reads `/queue` (for their rank)."""
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(PlaybackQueue)
+            .where(PlaybackQueue.played_at.is_(None))
+        )
+        or 0
+    )
+
+
 async def enqueue_song(
     session: AsyncSession, song_id: str, job_id: str | None
 ) -> PlaybackQueue:

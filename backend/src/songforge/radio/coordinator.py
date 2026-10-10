@@ -55,7 +55,7 @@ from songforge.models import (
     SOURCE_STATIC,
 )
 from songforge.radio.pointer_cache import PointerRecord
-from songforge.radio.queue import pop_next_user_song
+from songforge.radio.queue import count_waiting_depth, pop_next_user_song
 from songforge.radio.selection import pick_static
 from songforge.radio.state import NowPlayingView
 from songforge.storage import get_storage
@@ -66,6 +66,7 @@ log = get_logger(__name__)
 async def _write_pointer_best_effort(
     redis: Redis,
     *,
+    session: AsyncSession,
     song: Song,
     playback_id: str,
     started_at: datetime,
@@ -84,6 +85,16 @@ async def _write_pointer_best_effort(
     the view can never turn a committed advance into a failed one.
     """
     settings = get_settings()
+    # depth-in-SSE: stamp the waiting-queue depth onto the pointer so `/events` can fan
+    # it out and listeners skip the `/queue` -> Postgres count on every advance. STRICTLY
+    # best-effort, and in its OWN try: a depth-count failure must degrade to "no depth on
+    # this frame" (clients keep their last depth), never swallow the pointer publish
+    # below along with it.
+    try:
+        depth: int | None = await count_waiting_depth(session)
+    except Exception:
+        log.warning("radio_pointer_depth_count_failed", song_id=song.id, exc_info=True)
+        depth = None
     try:
         record = PointerRecord.from_view(
             NowPlayingView(
@@ -98,7 +109,8 @@ async def _write_pointer_best_effort(
                 playback_id=playback_id,
                 version=version,
                 album_cover_path=song.album_cover_path,
-            )
+            ),
+            queue_depth=depth,
         )
         payload = record.to_json()
         await redis.set(settings.radio_pointer_redis_key, payload)
@@ -183,6 +195,7 @@ async def initialize_if_absent(
     if redis is not None:
         await _write_pointer_best_effort(
             redis,
+            session=session,
             song=song_by_id[song_id],
             playback_id=playback_id,
             started_at=now,
@@ -283,6 +296,7 @@ async def advance(
     if redis is not None:
         await _write_pointer_best_effort(
             redis,
+            session=session,
             song=song_by_id[next_song_id],
             playback_id=new_playback_id,
             started_at=now,
@@ -380,6 +394,7 @@ async def _advance_to_user_song(
     if redis is not None:
         await _write_pointer_best_effort(
             redis,
+            session=session,
             song=song,
             playback_id=new_playback_id,
             started_at=now,

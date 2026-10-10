@@ -506,3 +506,38 @@ async def test_idle_result_is_not_cached_or_written_back_to_redis() -> None:
     assert cache.get() is None
     assert redis.set_calls == 0
     assert redis._store == {}
+
+
+# ── queue_depth: depth-in-SSE rides the pointer (not the /now-playing body) ──────────
+
+
+def test_pointer_record_carries_queue_depth_through_json() -> None:
+    """depth-in-SSE: the published/stored pointer carries the global FIFO depth so a
+    `song-change` SSE frame (and the connect-time frame served from the cached pointer)
+    can report it with zero Postgres reads. It must survive the Redis JSON round-trip."""
+    record = PointerRecord.from_view(_make_view(), queue_depth=7)
+    assert record.queue_depth == 7
+    restored = PointerRecord.from_json(record.to_json())
+    assert restored.queue_depth == 7
+
+
+def test_pointer_record_from_json_tolerates_missing_queue_depth() -> None:
+    """A pointer written by a pre-depth-in-SSE coordinator (or the PG-fallback read
+    path, which carries no depth) lacks the key -> it must deserialize as None, never
+    raise, exactly like `album_cover_path`'s cross-version tolerance."""
+    import json
+
+    data = json.loads(PointerRecord.from_view(_make_view()).to_json())
+    data.pop("queue_depth", None)
+    restored = PointerRecord.from_json(json.dumps(data))
+    assert restored.queue_depth is None
+
+
+def test_queue_depth_is_not_in_the_now_playing_response_body() -> None:
+    """Depth is an SSE-only concern: it must NOT leak into `to_response`, which is the
+    `/now-playing` wire body and is asserted byte-identical to
+    `NowPlayingView.to_response` (see the parity test). The SSE layer adds `queue_depth`
+    alongside this body itself, keeping `/now-playing` pure."""
+    record = PointerRecord.from_view(_make_view(), queue_depth=5)
+    body = record.to_response(server_time=datetime.now(timezone.utc))
+    assert "queue_depth" not in body

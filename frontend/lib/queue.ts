@@ -10,10 +10,15 @@ export interface QueueResponse {
   positions: QueuePosition[];
 }
 
+/** A single SSE frame as seen by a listener (only the JSON `data` line matters here). */
+export interface QueueSseEvent {
+  data?: string;
+}
+
 /** Minimal EventSource surface `wireQueueRefetch` needs (testable without a DOM). */
 export interface QueueEventSource {
-  addEventListener(name: string, listener: () => void): void;
-  removeEventListener(name: string, listener: () => void): void;
+  addEventListener(name: string, listener: (event: QueueSseEvent) => void): void;
+  removeEventListener(name: string, listener: (event: QueueSseEvent) => void): void;
 }
 
 /** Tolerant parse: anything malformed degrades to empty/zero rather than throwing. */
@@ -94,17 +99,57 @@ export function makeLatestGuard(): {
   };
 }
 
-/** Events after which the queue may have changed (advance, or the viewer's own job moved). */
-const REFETCH_EVENTS = ["song-change", "job-progress", "job-ready"] as const;
+/**
+ * The waiting-queue depth carried on a `song-change` SSE frame (depth-in-SSE). The
+ * coordinator stamps `queue_depth` onto the pointer so listeners learn the depth from
+ * the push -- and from the connect-time frame -- without a `/queue` -> Postgres count on
+ * every advance. Returns null (never throws) when the frame carries no usable depth
+ * (absent, null, negative, non-numeric, or unparseable), so the caller keeps its last.
+ */
+export function parseDepthFromSongChange(data: string | undefined): number | null {
+  if (typeof data !== "string") return null;
+  try {
+    const o = JSON.parse(data) as Record<string, unknown>;
+    const d = o.queue_depth;
+    return typeof d === "number" && Number.isFinite(d) && d >= 0 ? Math.floor(d) : null;
+  } catch {
+    return null;
+  }
+}
 
-/** Refetch on queue-relevant SSE events (no polling). Returns a cleanup that detaches. */
+/** Handlers for the reactive queue wiring (depth-in-SSE). */
+export interface QueueRefetchHandlers {
+  /** Apply the waiting-queue depth from a `song-change` frame (null = keep last). */
+  onDepth: (depth: number | null) => void;
+  /** Refetch `/queue` for the viewer's OWN position(s). */
+  refetchPositions: () => void;
+  /** Whether the viewer currently holds a queue position -- gates the song-change refetch. */
+  hasPosition: () => boolean;
+}
+
+/**
+ * Wire the queue up to SSE (no polling). Depth rides every `song-change` frame, so a
+ * plain listener reads "N waiting" from the push and NEVER hits `/queue` -> Postgres.
+ * `/queue` is refetched for the viewer's own POSITION only when it can actually have
+ * changed for them: on their own `job-progress`/`job-ready`, and on `song-change` ONLY
+ * while they currently hold a position (the line advanced past/toward them). Returns a
+ * cleanup that detaches every listener it added.
+ */
 export function wireQueueRefetch(
   source: QueueEventSource,
-  refetch: () => void,
+  handlers: QueueRefetchHandlers,
 ): () => void {
-  const handler = () => refetch();
-  for (const name of REFETCH_EVENTS) source.addEventListener(name, handler);
+  const onSongChange = (event: QueueSseEvent) => {
+    handlers.onDepth(parseDepthFromSongChange(event.data));
+    if (handlers.hasPosition()) handlers.refetchPositions();
+  };
+  const onOwnJob = () => handlers.refetchPositions();
+  source.addEventListener("song-change", onSongChange);
+  source.addEventListener("job-progress", onOwnJob);
+  source.addEventListener("job-ready", onOwnJob);
   return () => {
-    for (const name of REFETCH_EVENTS) source.removeEventListener(name, handler);
+    source.removeEventListener("song-change", onSongChange);
+    source.removeEventListener("job-progress", onOwnJob);
+    source.removeEventListener("job-ready", onOwnJob);
   };
 }

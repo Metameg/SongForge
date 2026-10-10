@@ -200,3 +200,56 @@ async def test_pop_next_user_song_does_not_mark_the_row_played(
         row = await session.get(PlaybackQueue, 1)
         assert row is not None
         assert row.played_at is None
+
+
+# ── count_waiting_depth (depth-in-SSE: global FIFO depth, no per-user window) ────────
+
+
+async def test_count_waiting_depth_is_zero_on_empty_queue(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from songforge.radio.queue import count_waiting_depth
+
+    async with sessionmaker() as session:
+        assert await count_waiting_depth(session) == 0
+
+
+async def test_count_waiting_depth_counts_only_unplayed_rows(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Depth = rows with ``played_at IS NULL`` -- a popped (played) row must not count,
+    exactly like `get_queue_status`'s own depth but without the per-user window. This is
+    what rides the `song-change` SSE frame so listeners need not hit `/queue`."""
+    from songforge.radio.queue import count_waiting_depth, enqueue_song
+
+    async with sessionmaker() as session:
+        for sid in ("song-1", "song-2", "song-3"):
+            await _add_song(session, sid)
+        await enqueue_song(session, "song-1", None)
+        await enqueue_song(session, "song-2", None)
+        played = await enqueue_song(session, "song-3", None)
+        played.played_at = datetime.now(timezone.utc)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        assert await count_waiting_depth(session) == 2
+
+
+async def test_count_waiting_depth_matches_get_queue_status_depth(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The lean counter and the full status read must agree on depth -- they are two
+    views of the same ``played_at IS NULL`` set."""
+    from songforge.radio.queue import count_waiting_depth, enqueue_song, get_queue_status
+
+    async with sessionmaker() as session:
+        for sid in ("song-1", "song-2"):
+            await _add_song(session, sid)
+        await enqueue_song(session, "song-1", None)
+        await enqueue_song(session, "song-2", None)
+        await session.commit()
+
+    async with sessionmaker() as session:
+        depth = await count_waiting_depth(session)
+        status = await get_queue_status(session, "nobody")
+        assert depth == status.depth == 2
