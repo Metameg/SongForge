@@ -219,6 +219,35 @@ async def test_coalescing_drops_the_middle_update_and_delivers_latest() -> None:
         await b.stop()
 
 
+async def test_last_known_depth_is_none_until_the_first_message() -> None:
+    redis = _FakeRedis()
+    b = _make(redis)
+    assert b.last_known_depth() is None
+    await b.start()
+    try:
+        assert b.last_known_depth() is None  # started, but nothing received yet
+    finally:
+        await b.stop()
+
+
+async def test_last_known_depth_updates_immediately_even_mid_coalesce_window() -> None:
+    """The freshest-known value must be visible to a NEW connection the instant a
+    message is received, independent of the coalescer's OUTBOUND emit schedule --
+    otherwise a connect landing inside a pending coalesce window would see a stale
+    value even though the broadcaster already knows better."""
+    redis = _FakeRedis()
+    b = _make(redis, coalesce_seconds=5.0)  # long window: emit would otherwise lag
+    await b.start()
+    try:
+        redis.pubsub_obj.feed(depth_message(11))
+        assert await _wait_until(lambda: b.last_known_depth() == 11)
+
+        redis.pubsub_obj.feed(depth_message(12))  # within the window -> emit is delayed
+        assert await _wait_until(lambda: b.last_known_depth() == 12)  # but THIS updates now
+    finally:
+        await b.stop()
+
+
 async def test_register_unregister_tracks_queue_set() -> None:
     redis = _FakeRedis()
     b = _make(redis)

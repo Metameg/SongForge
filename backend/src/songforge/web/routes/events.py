@@ -100,20 +100,38 @@ def _format_event(event: str, payload: dict[str, Any]) -> str:
 
 
 def _song_change_payload(
-    record: PointerRecord, *, server_time: datetime, include_queue_depth: bool = True
+    record: PointerRecord,
+    *,
+    server_time: datetime,
+    include_queue_depth: bool = True,
+    freshest_depth: int | None = None,
 ) -> dict[str, Any]:
     """The `song-change` SSE frame body: the pure `/now-playing` view PLUS `queue_depth`
     (depth-in-SSE). Depth is stamped onto the pointer by the coordinator at the LAST
     advance, so it travels for free on a genuine connect/push -- but it goes stale
     between advances as the `queue-depth` broadcaster (worker-side enqueues) keeps
-    pushing fresher values. `include_queue_depth=False` (the heartbeat re-emit's only
-    caller) sends `null` instead of that stale number: the frontend's
-    `parseDepthFromSongChange`/`onDepth` already treat a null/absent depth as "keep the
-    last value," so a null here simply stops the heartbeat from clobbering a fresher
-    broadcast depth with the pointer's old one -- it never resets the displayed count.
+    pushing fresher values. Two ways this is handled:
+
+    - `include_queue_depth=False` (the heartbeat re-emit's only caller) sends `null`
+      instead of the pointer's stale number.
+    - `freshest_depth` (the CONNECT frame's only caller, via
+      `QueueDepthBroadcaster.last_known_depth()`) overrides `record.queue_depth` with
+      whatever this app instance has seen most recently on the depth channel, when
+      available -- a brand-new connection (or a page refresh) would otherwise always
+      start from the last-advance snapshot, which can be visibly behind reality if the
+      radio hasn't advanced in a while even though songs kept getting enqueued.
+
+    Either way, the frontend's `parseDepthFromSongChange`/`onDepth` already treat a
+    null/absent depth as "keep the last value," so `include_queue_depth=False` never
+    resets the displayed count -- it just stops a stale re-send from clobbering it.
     Added HERE, not in `PointerRecord.to_response`, so that body stays byte-identical to
     the `/now-playing` contract."""
-    depth = record.queue_depth if include_queue_depth else None
+    if not include_queue_depth:
+        depth = None
+    elif freshest_depth is not None:
+        depth = freshest_depth
+    else:
+        depth = record.queue_depth
     return {**record.to_response(server_time=server_time), "queue_depth": depth}
 
 
@@ -156,8 +174,17 @@ async def events(
             if current is None:
                 yield _format_event("idle", {"status": "idle"})
             else:
+                # Prefer the freshest depth this instance has seen on the depth
+                # channel over the pointer's last-advance snapshot -- fixes the
+                # connect/refresh dip where a new connection would otherwise always
+                # start from a stale number until the next advance or broadcast.
                 yield _format_event(
-                    "song-change", _song_change_payload(current, server_time=datetime.now(timezone.utc))
+                    "song-change",
+                    _song_change_payload(
+                        current,
+                        server_time=datetime.now(timezone.utc),
+                        freshest_depth=depth_broadcaster.last_known_depth(),
+                    ),
                 )
 
             while True:

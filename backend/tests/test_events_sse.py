@@ -339,6 +339,51 @@ async def test_events_relays_a_published_queue_depth_as_a_queue_depth_frame() ->
             assert payload2 == {"queue_depth": 42}
 
 
+async def test_connect_frame_prefers_the_freshest_broadcast_depth_over_a_stale_pointer() -> (
+    None
+):
+    """Regression (the "refresh dips to a stale number" bug): the pointer's
+    queue_depth is only stamped at the last ADVANCE, so a brand-new connection (e.g. a
+    page refresh) must not always restart from that stale snapshot when a fresher depth
+    has been broadcast on the queue-depth channel since. The CONNECT frame should prefer
+    whatever this instance has seen most recently there."""
+    redis = _FakeRedis()
+    async with _running_app(redis) as (app, client):
+        # Pointer says depth=2 (stamped at the last advance)...
+        app.state.pointer_cache.set(_record(song_id="song-1", version=1, queue_depth=2))
+        # ...but a fresher depth (5) was broadcast on the depth channel since then --
+        # e.g. two songs were enqueued after that advance, with no new advance yet.
+        await redis.publish("radio:queue:depth", json.dumps({"queue_depth": 5}))
+        broadcaster = app.state.queue_depth_broadcaster
+        deadline = asyncio.get_event_loop().time() + 2.0
+        while (
+            broadcaster.last_known_depth() != 5
+            and asyncio.get_event_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.005)
+        assert broadcaster.last_known_depth() == 5  # the broadcast landed
+
+        async with client.stream("GET", "/events") as resp:
+            name, payload = await asyncio.wait_for(_sse_events(resp).__anext__(), timeout=2.0)
+            assert name == "song-change"
+            assert payload["queue_depth"] == 5  # fresher broadcast wins, not the stale 2
+
+
+async def test_connect_frame_falls_back_to_the_pointer_when_no_broadcast_seen_yet() -> None:
+    """No `queue-depth` message has arrived on this instance yet (e.g. right after a
+    restart, before any enqueue) -- the connect frame must fall back to the pointer's
+    own queue_depth rather than sending null or crashing."""
+    redis = _FakeRedis()
+    async with _running_app(redis) as (app, client):
+        app.state.pointer_cache.set(_record(song_id="song-1", version=1, queue_depth=3))
+        assert app.state.queue_depth_broadcaster.last_known_depth() is None
+
+        async with client.stream("GET", "/events") as resp:
+            name, payload = await asyncio.wait_for(_sse_events(resp).__anext__(), timeout=2.0)
+            assert name == "song-change"
+            assert payload["queue_depth"] == 3
+
+
 async def test_events_fans_out_one_subscription_to_multiple_clients_without_extra_redis_reads() -> (
     None
 ):

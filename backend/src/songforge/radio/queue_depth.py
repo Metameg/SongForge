@@ -160,6 +160,18 @@ class QueueDepthBroadcaster:
         self._queues: set[asyncio.Queue[int]] = set()
         self._coalescer = _Coalescer(window=coalesce_seconds)
         self._flush_handle: asyncio.TimerHandle | None = None
+        # The freshest depth this instance has seen on the subscription, kept
+        # independent of the coalescer's OUTBOUND emit schedule -- a new connection's
+        # connect-time frame (events.py) prefers this over the pointer's queue_depth,
+        # which is only stamped at the last ADVANCE and goes stale between advances as
+        # enqueues keep pushing fresher values here. `None` until the first message
+        # (e.g. right after a restart, before any enqueue has published yet).
+        self._last_known_depth: int | None = None
+
+    def last_known_depth(self) -> int | None:
+        """The freshest depth received on the subscription, or `None` if this instance
+        hasn't seen one yet (fall back to the pointer's own `queue_depth` then)."""
+        return self._last_known_depth
 
     def register(self) -> asyncio.Queue[int]:
         """Register a new SSE client, returning its bounded depth queue. Does NOT touch
@@ -214,7 +226,12 @@ class QueueDepthBroadcaster:
             self._emit(depth)
 
     def _accept(self, depth: int) -> None:
-        """Run `depth` through the coalescer and emit now or schedule a flush."""
+        """Record `depth` as the freshest known value, then run it through the
+        coalescer to emit now or schedule a flush. The freshest-known bookkeeping is
+        unconditional -- a NEW connection arriving mid-coalesce-window must still see
+        this value immediately, even though the already-connected clients' own push
+        is delayed until the flush."""
+        self._last_known_depth = depth
         emit_now, schedule_after = self._coalescer.offer(depth)
         if emit_now is not None:
             self._emit(emit_now)
