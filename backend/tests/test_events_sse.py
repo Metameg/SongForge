@@ -318,6 +318,27 @@ async def test_events_relays_a_published_pointer_to_a_connected_client() -> None
             assert payload2["version"] == 2
 
 
+async def test_events_relays_a_published_queue_depth_as_a_queue_depth_frame() -> None:
+    """depth-in-SSE follow-up: a depth published to the queue-depth channel AFTER connect
+    is relayed to the connected client as a `queue-depth` frame carrying the new waiting-
+    queue depth -- so a listener's "N waiting" updates between advances with no `/queue`
+    -> Postgres read. (The first depth after connect emits immediately; the <=1/sec
+    coalesce only collapses a subsequent burst.)"""
+    redis = _FakeRedis()
+    async with _running_app(redis) as (app, client):
+        app.state.pointer_cache.set(_record(song_id="song-1", version=1, playback_id="pb-1"))
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            name, _payload = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name == "song-change"  # the connect frame arrives first
+
+            await redis.publish("radio:queue:depth", json.dumps({"queue_depth": 42}))
+
+            name2, payload2 = await asyncio.wait_for(events_iter.__anext__(), timeout=2.0)
+            assert name2 == "queue-depth"
+            assert payload2 == {"queue_depth": 42}
+
+
 async def test_events_fans_out_one_subscription_to_multiple_clients_without_extra_redis_reads() -> (
     None
 ):
@@ -347,10 +368,13 @@ async def test_events_fans_out_one_subscription_to_multiple_clients_without_extr
             assert all(name == "song-change" for name, _ in relayed)
             assert all(payload["song_id"] == "song-2" for _, payload in relayed)
 
-        # Exactly ONE `pubsub().subscribe()` call for the app's whole lifetime,
-        # regardless of 3 connected clients -- proves the fan-out is in-process, not
-        # one Redis subscription (or read) per client.
-        assert redis.subscribe_calls == 1
+        # TWO `pubsub().subscribe()` calls for the app's whole lifetime -- the pointer
+        # channel AND the global queue-depth channel (depth-in-SSE follow-up) -- and
+        # crucially NOT one per client: 3 connected clients still produce the same 2
+        # per-INSTANCE subscriptions, proving the fan-out is in-process, not one Redis
+        # subscription (or read) per client. (The per-user `psubscribe` is separate and
+        # not counted here.)
+        assert redis.subscribe_calls == 2
 
 
 async def test_events_heartbeat_reemits_current_pointer_periodically() -> None:

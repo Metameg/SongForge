@@ -37,6 +37,7 @@ from songforge.logging_setup import configure_logging, get_logger
 from songforge.metrics_pipeline import render_latest_with_pipeline_gauges
 from songforge.radio.pointer_broadcaster import PointerBroadcaster
 from songforge.radio.pointer_cache import PointerCache
+from songforge.radio.queue_depth import QueueDepthBroadcaster
 from songforge.radio.user_events import UserEventBroadcaster
 from songforge.redis_client import get_redis
 from songforge.web.middleware import CorrelationIdMiddleware, MetricsMiddleware
@@ -55,9 +56,11 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await app.state.pointer_broadcaster.start()
         await app.state.user_event_broadcaster.start()
+        await app.state.queue_depth_broadcaster.start()
         try:
             yield
         finally:
+            await app.state.queue_depth_broadcaster.stop()
             await app.state.user_event_broadcaster.stop()
             await app.state.pointer_broadcaster.stop()
 
@@ -98,6 +101,17 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     app.state.user_event_broadcaster = UserEventBroadcaster(
         redis=effective_redis,
         channel_prefix=settings.user_events_channel_prefix,
+    )
+
+    # depth-in-SSE follow-up: the GLOBAL mirror of `pointer_broadcaster` -- ONE
+    # subscription per app instance, fanning the worker's post-commit waiting-queue
+    # depth out to every `/events` client as a `queue-depth` frame, coalesced to
+    # <=1/sec so a plain listener's "N waiting" updates between advances without a
+    # `/queue` -> Postgres count.
+    app.state.queue_depth_broadcaster = QueueDepthBroadcaster(
+        redis=effective_redis,
+        channel=settings.radio_queue_depth_channel,
+        coalesce_seconds=settings.queue_depth_coalesce_seconds,
     )
 
     async def metrics_route() -> Response:

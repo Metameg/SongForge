@@ -47,6 +47,12 @@ from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Sema
 from songforge.logging_setup import get_logger
 from songforge.metrics import semaphore_released_total
 from songforge.models import JOB_STATE_FAILED, JOB_STATE_READY
+from songforge.radio.queue import count_waiting_depth
+from songforge.radio.queue_depth import (
+    PublishQueueDepthFn,
+    redis_queue_depth_publisher,
+    safe_publish_queue_depth,
+)
 from songforge.radio.user_events import (
     PublishUserEventFn,
     ready_message,
@@ -115,6 +121,7 @@ async def _drain_ingest_pending(
     semaphore: Semaphore | None = None,
     notify_release: NotifyReleaseFn | None = None,
     publish_user_event: PublishUserEventFn | None = None,
+    publish_queue_depth: PublishQueueDepthFn | None = None,
 ) -> None:
     """Ingest every currently-claimable job, one at a time, until none remain. Each
     claim + ingest + commit happens in its own session so the row lock (and the
@@ -185,12 +192,26 @@ async def _drain_ingest_pending(
                     job.user_id,
                     ready_message(job.job_id, job.song_id, job.title or DEFAULT_SONG_TITLE),
                 )
+            # depth-in-SSE follow-up: a READY job was just enqueued onto `playback_queue`
+            # in the commit above, so the global waiting-queue depth changed. Read the
+            # authoritative post-commit count HERE (session still open, partial-index
+            # COUNT) and broadcast it below so every listener's "N waiting" updates
+            # between advances. Best-effort + coalesced on the fan-out side.
+            ready_depth = (
+                await count_waiting_depth(session)
+                if publish_queue_depth is not None and job.state == JOB_STATE_READY
+                else None
+            )
 
         if notify_ready is not None and ready_song_id is not None:
             await _safe_notify_ready(notify_ready, ready_song_id)
         if publish_user_event is not None and ready_event is not None:
             await safe_publish_user_event(
                 publish_user_event, *ready_event, log_event="job_ready_publish_failed"
+            )
+        if publish_queue_depth is not None and ready_depth is not None:
+            await safe_publish_queue_depth(
+                publish_queue_depth, ready_depth, log_event="queue_depth_publish_failed"
             )
         if semaphore is not None and release_user_id is not None:
             await _safe_release_semaphore(semaphore, release_user_id)
@@ -226,6 +247,9 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
     semaphore = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
     publish_user_event = redis_user_event_publisher(
         redis, settings.user_events_channel_prefix
+    )
+    publish_queue_depth = redis_queue_depth_publisher(
+        redis, settings.radio_queue_depth_channel
     )
     # Issue #19: the worker's direct/unpooled URL (bypassing PgBouncer), with the
     # `+asyncpg` SQLAlchemy driver tag stripped -- asyncpg.connect() wants a plain
@@ -283,6 +307,7 @@ async def run_ingest(settings: Settings, stop: asyncio.Event) -> None:
                                 semaphore,
                                 notify_release=_notify_release,
                                 publish_user_event=publish_user_event,
+                                publish_queue_depth=publish_queue_depth,
                             )
                             wake.clear()
                             try:

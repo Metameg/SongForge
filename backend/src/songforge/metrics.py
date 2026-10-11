@@ -236,6 +236,14 @@ user_notifications_relayed_total = Counter(
     registry=REGISTRY,
 )
 
+queue_depth_events_relayed_total = Counter(
+    "songforge_queue_depth_events_relayed_total",
+    "Waiting-queue depth updates relayed from the pub/sub subscription to a connected "
+    "SSE client as a `queue-depth` frame (post-coalesce; mirrors "
+    "radio_pointer_events_relayed_total for QueueDepthBroadcaster).",
+    registry=REGISTRY,
+)
+
 # ── Generation semaphore slot-leak fix (issue #16 follow-up) ─────────────────────
 #
 # `jobs.dispatch.dispatch_claimed_job` already releases on its own FAILED/429/

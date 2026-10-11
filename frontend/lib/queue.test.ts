@@ -160,11 +160,11 @@ describe("wireQueueRefetch (depth-in-SSE)", () => {
     ...over,
   });
 
-  it("registers song-change, job-progress and job-ready listeners", () => {
+  it("registers song-change, queue-depth, job-progress and job-ready listeners", () => {
     const source = fakeSource();
     wireQueueRefetch(source, handlers());
     const names = source.addEventListener.mock.calls.map((c) => c[0]).sort();
-    expect(names).toEqual(["job-progress", "job-ready", "song-change"]);
+    expect(names).toEqual(["job-progress", "job-ready", "queue-depth", "song-change"]);
   });
   it("does not listen for job-failed or idle", () => {
     const source = fakeSource();
@@ -200,6 +200,24 @@ describe("wireQueueRefetch (depth-in-SSE)", () => {
     });
     expect(h.refetchPositions).toHaveBeenCalledTimes(1);
   });
+  it("reports the waiting-queue depth from a queue-depth frame", () => {
+    const source = fakeSource();
+    const h = handlers();
+    wireQueueRefetch(source, h);
+    listenerFor(source.addEventListener, "queue-depth")?.({
+      data: JSON.stringify({ queue_depth: 8 }),
+    });
+    expect(h.onDepth).toHaveBeenCalledWith(8);
+  });
+  it("does NOT refetch /queue on queue-depth, even when the viewer holds a position", () => {
+    const source = fakeSource();
+    const h = handlers({ hasPosition: () => true });
+    wireQueueRefetch(source, h);
+    listenerFor(source.addEventListener, "queue-depth")?.({
+      data: JSON.stringify({ queue_depth: 8 }),
+    });
+    expect(h.refetchPositions).not.toHaveBeenCalled();
+  });
   it("always refetches /queue on the viewer's own job-progress and job-ready", () => {
     const source = fakeSource();
     const h = handlers({ hasPosition: () => false });
@@ -221,8 +239,8 @@ describe("wireQueueRefetch (depth-in-SSE)", () => {
     const cleanup = wireQueueRefetch(source, handlers());
     expect(source.removeEventListener).not.toHaveBeenCalled();
     cleanup();
-    expect(source.addEventListener).toHaveBeenCalledTimes(3);
-    expect(source.removeEventListener).toHaveBeenCalledTimes(3);
+    expect(source.addEventListener).toHaveBeenCalledTimes(4);
+    expect(source.removeEventListener).toHaveBeenCalledTimes(4);
     for (const [name, fn] of source.addEventListener.mock.calls) {
       expect(source.removeEventListener).toHaveBeenCalledWith(name, fn);
     }

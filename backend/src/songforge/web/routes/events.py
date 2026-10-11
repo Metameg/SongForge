@@ -39,6 +39,7 @@ from songforge.radio.pointer_cache import (
     PointerRecord,
     get_now_playing_cached,
 )
+from songforge.radio.queue_depth import QueueDepthBroadcaster
 from songforge.radio.user_events import UserEventBroadcaster
 from songforge.web.identity import resolve_identity
 from songforge.web.routes.now_playing import (
@@ -66,6 +67,12 @@ def get_user_event_broadcaster(request: Request) -> UserEventBroadcaster:
     """This app instance's `UserEventBroadcaster` (issue #16, criterion A4): the
     per-user mirror of `get_pointer_broadcaster`, set once per `create_app()` call."""
     return cast(UserEventBroadcaster, request.app.state.user_event_broadcaster)
+
+
+def get_queue_depth_broadcaster(request: Request) -> QueueDepthBroadcaster:
+    """This app instance's `QueueDepthBroadcaster` (depth-in-SSE follow-up): the GLOBAL
+    mirror of `get_pointer_broadcaster`, set once per `create_app()` call."""
+    return cast(QueueDepthBroadcaster, request.app.state.queue_depth_broadcaster)
 
 
 _USER_EVENT_FIELDS: dict[str, tuple[str, ...]] = {
@@ -111,6 +118,7 @@ async def events(
     cache: PointerCache = Depends(get_pointer_cache),
     broadcaster: PointerBroadcaster = Depends(get_pointer_broadcaster),
     user_broadcaster: UserEventBroadcaster = Depends(get_user_event_broadcaster),
+    depth_broadcaster: QueueDepthBroadcaster = Depends(get_queue_depth_broadcaster),
     heartbeat_seconds: float = Depends(get_heartbeat_seconds),
 ) -> StreamingResponse:
     """Stream `song-change` events (the current pointer on connect, then every push)
@@ -129,11 +137,13 @@ async def events(
     queue = broadcaster.register()
     identity = resolve_identity(request, settings)
     user_queue = user_broadcaster.register(identity.user_id)
+    depth_queue = depth_broadcaster.register()
 
     async def stream() -> AsyncIterator[str]:
         nonlocal current
         pointer_task: asyncio.Task[PointerRecord] | None = None
         user_task: asyncio.Task[dict[str, Any]] | None = None
+        depth_task: asyncio.Task[int] | None = None
         try:
             if current is None:
                 yield _format_event("idle", {"status": "idle"})
@@ -149,9 +159,11 @@ async def events(
                     pointer_task = asyncio.ensure_future(queue.get())
                 if user_task is None:
                     user_task = asyncio.ensure_future(user_queue.get())
+                if depth_task is None:
+                    depth_task = asyncio.ensure_future(depth_queue.get())
 
                 done, _pending = await asyncio.wait(
-                    {pointer_task, user_task},
+                    {pointer_task, user_task, depth_task},
                     timeout=heartbeat_seconds,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
@@ -181,12 +193,17 @@ async def events(
                     frame = _format_user_event(message)
                     if frame is not None:
                         yield frame
+                if depth_task in done:
+                    depth = depth_task.result()
+                    depth_task = None
+                    yield _format_event("queue-depth", {"queue_depth": depth})
         finally:
-            for task in (pointer_task, user_task):
+            for task in (pointer_task, user_task, depth_task):
                 if task is not None and not task.done():
                     task.cancel()
             broadcaster.unregister(queue)
             user_broadcaster.unregister(identity.user_id, user_queue)
+            depth_broadcaster.unregister(depth_queue)
 
     return StreamingResponse(
         stream(),

@@ -263,6 +263,14 @@ class Settings(BaseSettings):
     # no new pub/sub message — covers a dropped pub/sub message where nobody
     # disconnected, and gives a reconnecting client a bound on staleness (criterion #4).
     sse_heartbeat_seconds: float = 30.0
+    # Redis pub/sub channel the worker publishes the waiting-queue depth to on every
+    # post-commit enqueue, and that each app instance's `QueueDepthBroadcaster`
+    # subscribes to for its `queue-depth` SSE fan-out (depth-in-SSE follow-up). Lets a
+    # listener's "N waiting" update between advances without a `/queue` -> Postgres count.
+    radio_queue_depth_channel: str = "radio:queue:depth"
+    # Coalesce window for the `queue-depth` fan-out: at most one push per this many
+    # seconds per app instance, so a burst of enqueues collapses to one latest-wins push.
+    queue_depth_coalesce_seconds: float = 1.0
 
     # ── Watchdog: leaderless recovery sweep (issue #16) ──────────────────────
     # Backstop poll interval between sweeps (A1: a single periodic watchdog owns all

@@ -128,12 +128,15 @@ export interface QueueRefetchHandlers {
 }
 
 /**
- * Wire the queue up to SSE (no polling). Depth rides every `song-change` frame, so a
- * plain listener reads "N waiting" from the push and NEVER hits `/queue` -> Postgres.
- * `/queue` is refetched for the viewer's own POSITION only when it can actually have
- * changed for them: on their own `job-progress`/`job-ready`, and on `song-change` ONLY
- * while they currently hold a position (the line advanced past/toward them). Returns a
- * cleanup that detaches every listener it added.
+ * Wire the queue up to SSE (no polling). Depth rides every `song-change` frame AND every
+ * `queue-depth` frame (the latter pushed as songs are enqueued between advances, so a
+ * plain listener's "N waiting" stays live), so a plain listener NEVER hits `/queue` ->
+ * Postgres. `/queue` is refetched for the viewer's own POSITION only when it can actually
+ * have changed for them: on their own `job-progress`/`job-ready`, and on `song-change`
+ * ONLY while they currently hold a position (the line advanced past/toward them). A
+ * `queue-depth` frame is a global-count update only -- a new song enqueued at the tail
+ * doesn't move the viewer's own position -- so it updates depth WITHOUT a refetch.
+ * Returns a cleanup that detaches every listener it added.
  */
 export function wireQueueRefetch(
   source: QueueEventSource,
@@ -143,12 +146,19 @@ export function wireQueueRefetch(
     handlers.onDepth(parseDepthFromSongChange(event.data));
     if (handlers.hasPosition()) handlers.refetchPositions();
   };
+  // `queue-depth` carries the same `{queue_depth}` shape as `song-change`, so the same
+  // parser applies; depth-only, so it never refetches positions.
+  const onQueueDepth = (event: QueueSseEvent) => {
+    handlers.onDepth(parseDepthFromSongChange(event.data));
+  };
   const onOwnJob = () => handlers.refetchPositions();
   source.addEventListener("song-change", onSongChange);
+  source.addEventListener("queue-depth", onQueueDepth);
   source.addEventListener("job-progress", onOwnJob);
   source.addEventListener("job-ready", onOwnJob);
   return () => {
     source.removeEventListener("song-change", onSongChange);
+    source.removeEventListener("queue-depth", onQueueDepth);
     source.removeEventListener("job-progress", onOwnJob);
     source.removeEventListener("job-ready", onOwnJob);
   };

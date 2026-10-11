@@ -579,6 +579,7 @@ async def test_run_ingest_poll_backstop_redrains_when_no_notify_ever_arrives(
         semaphore: object = None,
         notify_release: object = None,
         publish_user_event: object = None,
+        publish_queue_depth: object = None,
     ) -> None:
         nonlocal drain_calls
         drain_calls += 1
@@ -740,3 +741,119 @@ async def test_drain_swallows_a_raising_ready_publisher_and_drains_the_next_job(
     )
 
     assert ingested == ["job-1", "job-2"]
+
+
+# ── `publish_queue_depth` (depth-in-SSE follow-up: broadcast the waiting-queue depth
+# whenever a READY enqueue changes it) ──────────────────────────────────────────────
+#
+# `count_waiting_depth` is exercised against a real DB in `test_radio_queue.py`; here it
+# is monkeypatched to a known value so these tests pin the WIRING -- compute post-commit
+# on READY, publish best-effort -- without a live database.
+
+
+async def test_drain_publishes_queue_depth_after_commit_when_a_job_reaches_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = "song-xyz"
+
+    async def _fake_count(session: object) -> int:
+        return 17
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+    monkeypatch.setattr(worker_ingest_module, "count_waiting_depth", _fake_count)
+
+    published: list[int] = []
+
+    async def _publish_depth(depth: int) -> None:
+        published.append(depth)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        publish_queue_depth=_publish_depth,
+    )
+
+    assert published == [17]  # the post-commit depth was broadcast exactly once
+
+
+async def test_drain_does_not_publish_queue_depth_when_the_job_is_requeued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "INGEST_PENDING"  # retry: NOT ready, depth unchanged
+
+    async def _fake_count(session: object) -> int:
+        raise AssertionError("count_waiting_depth must not run for a non-READY job")
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+    monkeypatch.setattr(worker_ingest_module, "count_waiting_depth", _fake_count)
+
+    published: list[int] = []
+
+    async def _publish_depth(depth: int) -> None:
+        published.append(depth)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        publish_queue_depth=_publish_depth,
+    )
+
+    assert published == []
+
+
+async def test_drain_queue_depth_publish_failure_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort: a raising depth publisher must be swallowed, never propagate out of
+    the drain loop (the READY commit already happened)."""
+    remaining = iter(["job-1", None])
+
+    async def _fake_claim(session: object) -> _FakeReadyJob | None:
+        job_id = next(remaining)
+        return None if job_id is None else _FakeReadyJob(job_id)
+
+    async def _fake_ingest(job: _FakeReadyJob, **kwargs: object) -> None:
+        job.state = "READY"
+        job.song_id = "song-xyz"
+
+    async def _fake_count(session: object) -> int:
+        return 3
+
+    async def _boom(depth: int) -> None:
+        raise ConnectionError("redis down")
+
+    monkeypatch.setattr(worker_ingest_module, "claim_next_ingest_job", _fake_claim)
+    monkeypatch.setattr(worker_ingest_module, "ingest_claimed_job", _fake_ingest)
+    monkeypatch.setattr(worker_ingest_module, "count_waiting_depth", _fake_count)
+
+    await _drain_ingest_pending(
+        _sessionmaker,
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        _settings(),
+        publish_queue_depth=_boom,
+    )  # must not raise
