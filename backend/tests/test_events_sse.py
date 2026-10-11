@@ -400,6 +400,36 @@ async def test_events_heartbeat_reemits_current_pointer_periodically() -> None:
             assert second_payload["song_id"] == "song-1"
 
 
+async def test_heartbeat_omits_queue_depth_so_it_never_clobbers_a_fresher_broadcast() -> (
+    None
+):
+    """Regression: the heartbeat re-emits the PURELY LOCAL last-known pointer, whose
+    queue_depth is stamped at the last advance -- so without this, a periodic heartbeat
+    would overwrite a fresher depth the queue-depth broadcaster pushed in between
+    advances with that stale number, making the UI's "N waiting" visibly flicker
+    backward. The heartbeat frame must send `queue_depth: null` (the frontend's
+    onDepth/parseDepthFromSongChange treat null as "keep the last value"), while the
+    connect-time frame still carries the real depth."""
+    redis = _FakeRedis()
+    async with _running_app(redis, heartbeat_seconds=0.05) as (app, client):
+        app.state.pointer_cache.set(
+            _record(song_id="song-1", version=1, playback_id="pb-1", queue_depth=7)
+        )
+        async with client.stream("GET", "/events") as resp:
+            events_iter = _sse_events(resp)
+            first_name, first_payload = await asyncio.wait_for(
+                events_iter.__anext__(), timeout=2.0
+            )
+            assert first_name == "song-change"
+            assert first_payload["queue_depth"] == 7  # connect-time: real depth
+
+            second_name, second_payload = await asyncio.wait_for(
+                events_iter.__anext__(), timeout=2.0
+            )
+            assert second_name == "song-change"
+            assert second_payload["queue_depth"] is None  # heartbeat: never stale
+
+
 async def test_pubsub_relay_updates_pointer_cache_so_now_playing_reflects_it_immediately() -> (
     None
 ):

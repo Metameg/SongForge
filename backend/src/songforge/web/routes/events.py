@@ -99,14 +99,22 @@ def _format_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
-def _song_change_payload(record: PointerRecord, *, server_time: datetime) -> dict[str, Any]:
+def _song_change_payload(
+    record: PointerRecord, *, server_time: datetime, include_queue_depth: bool = True
+) -> dict[str, Any]:
     """The `song-change` SSE frame body: the pure `/now-playing` view PLUS `queue_depth`
-    (depth-in-SSE). Depth is stamped onto the pointer by the coordinator and travels for
-    free on the cached pointer, so a listener reads the waiting-queue depth from this
-    push (and from the connect-time frame) without a `/queue` -> Postgres count on every
-    advance. It is added HERE, not in `PointerRecord.to_response`, so that body stays
-    byte-identical to the `/now-playing` contract."""
-    return {**record.to_response(server_time=server_time), "queue_depth": record.queue_depth}
+    (depth-in-SSE). Depth is stamped onto the pointer by the coordinator at the LAST
+    advance, so it travels for free on a genuine connect/push -- but it goes stale
+    between advances as the `queue-depth` broadcaster (worker-side enqueues) keeps
+    pushing fresher values. `include_queue_depth=False` (the heartbeat re-emit's only
+    caller) sends `null` instead of that stale number: the frontend's
+    `parseDepthFromSongChange`/`onDepth` already treat a null/absent depth as "keep the
+    last value," so a null here simply stops the heartbeat from clobbering a fresher
+    broadcast depth with the pointer's old one -- it never resets the displayed count.
+    Added HERE, not in `PointerRecord.to_response`, so that body stays byte-identical to
+    the `/now-playing` contract."""
+    depth = record.queue_depth if include_queue_depth else None
+    return {**record.to_response(server_time=server_time), "queue_depth": depth}
 
 
 @router.get("/events")
@@ -173,10 +181,18 @@ async def events(
                     # is the one place a naive implementation would silently
                     # reintroduce per-listener datastore load on every heartbeat.
                     # Never re-sends a job-failed frame (one-shot, no replay).
+                    # queue_depth is omitted (null): it would otherwise be the STALE
+                    # depth from the last advance, clobbering whatever fresher value
+                    # the queue-depth broadcaster has pushed since (see
+                    # _song_change_payload).
                     if current is not None:
                         yield _format_event(
                             "song-change",
-                            _song_change_payload(current, server_time=datetime.now(timezone.utc)),
+                            _song_change_payload(
+                                current,
+                                server_time=datetime.now(timezone.utc),
+                                include_queue_depth=False,
+                            ),
                         )
                     continue
 
