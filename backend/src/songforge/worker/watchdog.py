@@ -134,22 +134,28 @@ async def _safe_release_semaphore(semaphore: Semaphore, user_id: str) -> None:
 async def _safe_reconcile_semaphore(
     sessionmaker: async_sessionmaker[AsyncSession], semaphore: Semaphore
 ) -> None:
-    """Reconcile backstop (Part B, issue #16): once per tick, snap the global counter
-    and every per-user counter Redis currently holds a key for back to a fresh
+    """Reconcile backstop (Part B, issue #16): once per tick, correct the global
+    counter and every per-user counter Redis currently holds a key for toward a fresh
     Postgres count of `ACTIVE_JOB_STATES` rows -- Postgres is the source of truth, and
     this recovers any slot a release site above never got to fire for (e.g. the
     process was killed between a sweep's commit and its post-commit release).
 
-    Race note: this is read-count-then-set, so a slot acquired between the count and
-    the `set_value` is momentarily invisible to this snap. Safe (not a double-spend):
-    the generation API's own 429 backstop (PRD #18) is the AUTHORITATIVE cap over the
-    best-effort Redis semaphore -- a drifted/reconciled counter can only bounce a few
-    extra requests as 429s, never let the true in-flight count exceed the real cap.
+    Race note: this is read-count-then-correct, so a slot acquired between the count
+    and the correction is momentarily invisible to this tick -- harmless, since
+    `Semaphore.reconcile_from_active_count`/`reconcile_user_from_active_count` are
+    DECREASE-ONLY (`SemaphoreBackend.decrease_to`). That matters here specifically
+    because `jobs/dispatch.py` commits a job's `SUBMITTING` row to Postgres BEFORE that
+    job's own `acquire()` runs, so a tick landing in that window sees Postgres
+    momentarily AHEAD of Redis; a blind set would credit that job's slot before its
+    own acquire does, which then wrongly DENIES the real acquire and leaves a phantom
+    count nobody releases -- freezing dispatch until a later tick happens to see the
+    counter drop back to truth. Decrease-only forecloses that entirely: this tick can
+    only ever un-leak a slot (the genuine crash-recovery case), never credit one early.
 
     Wrapped as a whole in log+swallow: a Redis outage during reconcile (the global
-    set, the per-user SCAN, or any one per-user set) must never crash the tick --
-    partial progress from an already-applied set is left as-is rather than rolled
-    back, exactly like a partial drain would be.
+    correction, the per-user SCAN, or any one per-user correction) must never crash the
+    tick -- partial progress already applied is left as-is rather than rolled back,
+    exactly like a partial drain would be.
     """
     try:
         async with sessionmaker() as session:

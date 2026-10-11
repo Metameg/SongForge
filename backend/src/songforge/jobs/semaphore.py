@@ -18,8 +18,22 @@ vs ``worker/radio_coordinator.py``). ``tests/test_semaphore.py`` exercises
 the real Lua scripts are exercised only where a live Redis is available.
 
 Redis is derived/ephemeral (see ``redis_client.py``): ``reconcile_from_active_count``
-resets the global counter from Postgres truth (the source of record) on the 429 path,
-so a lost/stale slot never permanently shrinks capacity.
+corrects the global counter toward Postgres truth (the source of record) on the 429
+path and from the watchdog's periodic backstop, so a lost/stale slot never permanently
+shrinks capacity.
+
+Reconcile is DECREASE-ONLY (``SemaphoreBackend.decrease_to``), never a blind set. A
+fresh Postgres active-row count can momentarily read LOWER than the real in-flight
+count — ``jobs/dispatch.py``'s own claim step commits a job's ``SUBMITTING`` row to
+Postgres *before* that same job's ``acquire()`` runs, so there is a real window where
+Postgres already shows the job active while Redis has not yet recorded its slot; a
+reconcile landing in that window would otherwise raise the Redis counter to credit a
+slot the job's own upcoming ``acquire()`` hasn't taken yet — which then DENIES that
+real acquire (``current >= cap``) and leaves a phantom count nobody will ever release,
+freezing dispatch until the next reconcile tick happens to see 0 active jobs again.
+Restricting reconcile to only ever LOWER the counter keeps its one legitimate purpose
+(un-leaking a slot whose release never fired, e.g. a crashed worker) while removing the
+only direction that can ever push the counter above a job that hasn't acquired yet.
 """
 
 from __future__ import annotations
@@ -57,6 +71,21 @@ end
 return 1
 """
 
+# KEYS[1] = the counter key. ARGV[1] = the candidate value (a fresh Postgres active-row
+# count). Writes only when that would be a DECREASE (candidate < current, treating a
+# missing key as 0) -- see the module docstring for why reconcile must never raise this
+# counter. Returns 1 if written, 0 if left unchanged. EVAL-based for the same
+# check-then-write atomicity reason as `_TRY_INCREMENT_LUA`.
+_DECREASE_TO_LUA = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local candidate = tonumber(ARGV[1])
+if candidate < current then
+  redis.call('SET', KEYS[1], candidate)
+  return 1
+end
+return 0
+"""
+
 
 def global_key(settings: Settings) -> str:
     """Redis key holding the global in-flight generation counter."""
@@ -90,8 +119,12 @@ class SemaphoreBackend(Protocol):
         negative, e.g. on a double-release or a release with no matching acquire)."""
         ...
 
-    async def set_value(self, key: str, value: int) -> None:
-        """Atomically set ``key`` to ``value`` (used by ``reconcile_from_active_count``)."""
+    async def decrease_to(self, key: str, candidate: int) -> bool:
+        """Atomically set ``key`` to ``candidate`` IFF that would be a decrease
+        (``candidate`` < the current value, treating a missing key as 0) -- used by
+        ``reconcile_from_active_count``/``reconcile_user_from_active_count``. Never
+        raises the counter (see the module docstring for why). Returns whether the
+        write happened."""
         ...
 
     async def scan_keys(self, match: str) -> list[str]:
@@ -121,8 +154,9 @@ class RedisSemaphoreBackend:
     async def decrement(self, key: str) -> None:
         await self._redis.eval(_DECREMENT_LUA, 1, key)
 
-    async def set_value(self, key: str, value: int) -> None:
-        await self._redis.set(key, value)
+    async def decrease_to(self, key: str, candidate: int) -> bool:
+        result = await self._redis.eval(_DECREASE_TO_LUA, 1, key, candidate)
+        return bool(result)
 
     async def scan_keys(self, match: str) -> list[str]:
         # `SCAN`-based (via `scan_iter`), not `KEYS` -- `KEYS` blocks the single
@@ -145,8 +179,11 @@ class Semaphore(Protocol):
         ...
 
     async def reconcile_from_active_count(self, count: int) -> None:
-        """Reset the global counter to ``count`` (a fresh count of active-state job
-        rows) — the 429 path's way of correcting semaphore drift from Postgres truth."""
+        """Correct the global counter toward ``count`` (a fresh count of active-state
+        job rows) — the 429 path's and the watchdog's way of un-leaking a slot whose
+        release never fired. DECREASE-ONLY: never raises the counter above its current
+        value (see the module docstring for why a momentarily-higher Postgres count
+        must not be blindly trusted upward)."""
         ...
 
     async def scan_user_ids(self) -> list[str]:
@@ -157,9 +194,10 @@ class Semaphore(Protocol):
         ...
 
     async def reconcile_user_from_active_count(self, user_id: str, count: int) -> None:
-        """Reset ``user_id``'s per-user counter to ``count`` (a fresh count of that
-        user's active-state job rows) -- the per-user counterpart to
-        ``reconcile_from_active_count``, called once per id ``scan_user_ids`` finds."""
+        """Correct ``user_id``'s per-user counter toward ``count`` (a fresh count of
+        that user's active-state job rows) -- the per-user, DECREASE-ONLY counterpart
+        to ``reconcile_from_active_count``, called once per id ``scan_user_ids``
+        finds."""
         ...
 
 
@@ -201,8 +239,8 @@ class RedisSemaphore:
         log.info("semaphore_released", user_id=user_id)
 
     async def reconcile_from_active_count(self, count: int) -> None:
-        await self._backend.set_value(global_key(self._settings), count)
-        log.info("semaphore_reconciled", active_count=count)
+        changed = await self._backend.decrease_to(global_key(self._settings), count)
+        log.info("semaphore_reconciled", active_count=count, changed=changed)
 
     async def scan_user_ids(self) -> list[str]:
         prefix = self._settings.semaphore_user_key_prefix
@@ -210,5 +248,7 @@ class RedisSemaphore:
         return [key[len(prefix) :] for key in keys]
 
     async def reconcile_user_from_active_count(self, user_id: str, count: int) -> None:
-        await self._backend.set_value(user_key(self._settings, user_id), count)
-        log.info("semaphore_user_reconciled", user_id=user_id, active_count=count)
+        changed = await self._backend.decrease_to(user_key(self._settings, user_id), count)
+        log.info(
+            "semaphore_user_reconciled", user_id=user_id, active_count=count, changed=changed
+        )

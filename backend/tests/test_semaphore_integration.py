@@ -144,7 +144,13 @@ async def test_double_release_floors_at_zero_against_real_redis(redis) -> None: 
     assert await redis.get(user_key(settings, "user-a")) == "0"
 
 
-async def test_reconcile_corrects_upward_and_downward_against_real_redis(redis) -> None:  # type: ignore[no-untyped-def]
+async def test_reconcile_is_decrease_only_against_real_redis(redis) -> None:  # type: ignore[no-untyped-def]
+    """Proves the real Lua `_DECREASE_TO_LUA` script itself refuses to raise the
+    counter -- not just the pure decision logic (`tests/test_semaphore.py`'s
+    in-memory-fake counterpart). A blind `SET` would happily jump the counter up to
+    whatever Postgres momentarily reports, which is exactly the race that can credit a
+    job's slot before its own `acquire()` runs and freeze dispatch (see
+    `jobs/semaphore.py`'s module docstring)."""
     from songforge.config import Settings
     from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, global_key
 
@@ -163,11 +169,11 @@ async def test_reconcile_corrects_upward_and_downward_against_real_redis(redis) 
     sem = RedisSemaphore(RedisSemaphoreBackend(redis), settings)
     await sem.acquire("user-a")  # counter now 1
 
-    await sem.reconcile_from_active_count(7)
-    assert await redis.get(global_key(settings)) == "7"
+    await sem.reconcile_from_active_count(7)  # Postgres momentarily reports MORE active
+    assert await redis.get(global_key(settings)) == "1"  # unchanged -- never raised
 
-    await sem.reconcile_from_active_count(3)
-    assert await redis.get(global_key(settings)) == "3"
+    await sem.reconcile_from_active_count(0)  # the genuine leak-recovery direction
+    assert await redis.get(global_key(settings)) == "0"
 
 
 async def test_failed_per_user_acquire_does_not_leak_a_global_slot_against_real_redis(

@@ -36,8 +36,12 @@ class _InMemorySemaphoreBackend:
     async def decrement(self, key: str) -> None:
         self._counts[key] = max(self._counts.get(key, 0) - 1, 0)
 
-    async def set_value(self, key: str, value: int) -> None:
-        self._counts[key] = value
+    async def decrease_to(self, key: str, candidate: int) -> bool:
+        current = self._counts.get(key, 0)
+        if candidate < current:
+            self._counts[key] = candidate
+            return True
+        return False
 
     async def scan_keys(self, match: str) -> list[str]:
         # `match` is always a `<prefix>*` glob in this codebase (see
@@ -133,32 +137,41 @@ async def test_double_release_after_a_single_acquire_floors_at_zero_not_negative
     assert backend.get(user_key(settings, "user-a")) == 0
 
 
-async def test_reconcile_sets_the_global_counter_from_postgres_truth() -> None:
+async def test_reconcile_corrects_the_global_counter_downward_from_postgres_truth() -> (
+    None
+):
+    """The genuine leak-recovery case: a crashed dispatcher acquired slots that never
+    got released, so Postgres's active-row count (now lower, since those jobs are no
+    longer active) must be able to snap the drifted-too-high Redis counter down."""
     settings = _settings(global_generation_concurrency=5, per_user_concurrent_jobs=5)
     backend = _InMemorySemaphoreBackend()
     sem = RedisSemaphore(backend, settings)
-    await sem.acquire("user-a")  # global counter now 1, out of sync with "truth"
+    await sem.acquire("user-a")
+    await sem.acquire("user-b")  # global counter now 2, leaked slots never released
 
-    await sem.reconcile_from_active_count(3)
+    await sem.reconcile_from_active_count(0)  # Postgres: neither job is active anymore
 
-    assert backend.get(global_key(settings)) == 3
+    assert backend.get(global_key(settings)) == 0
 
 
-async def test_reconcile_corrects_the_counter_both_upward_and_downward() -> None:
-    """The 429 path's reconcile must be able to correct drift in either direction --
-    Postgres truth (a fresh active-row count) might be higher OR lower than the Redis
-    counter, depending on what drifted (e.g. a crashed dispatcher that never released,
-    vs. a released slot that never got reflected)."""
+async def test_reconcile_never_raises_the_global_counter_above_its_current_value() -> (
+    None
+):
+    """Regression: reconcile must be decrease-only. `jobs/dispatch.py` commits a job's
+    SUBMITTING row to Postgres BEFORE that job's own `acquire()` runs, so a reconcile
+    landing in that window sees Postgres momentarily AHEAD of Redis for a job that
+    hasn't acquired yet. Raising the counter there would credit that slot early,
+    wrongly denying the job's own real acquire and freezing dispatch until a later
+    tick happens to see the counter drop back down -- the generation-pipeline-freeze
+    bug this decrease-only contract closes."""
     settings = _settings(global_generation_concurrency=10, per_user_concurrent_jobs=10)
     backend = _InMemorySemaphoreBackend()
     sem = RedisSemaphore(backend, settings)
     await sem.acquire("user-a")  # global counter now 1
 
-    await sem.reconcile_from_active_count(6)  # correct upward
-    assert backend.get(global_key(settings)) == 6
+    await sem.reconcile_from_active_count(6)  # Postgres momentarily reports MORE active
 
-    await sem.reconcile_from_active_count(2)  # correct downward
-    assert backend.get(global_key(settings)) == 2
+    assert backend.get(global_key(settings)) == 1  # unchanged -- never raised
 
 
 async def test_per_user_acquire_never_lets_total_in_flight_exceed_the_global_cap_across_users() -> (
@@ -269,3 +282,17 @@ async def test_reconcile_user_from_active_count_can_snap_a_leaked_key_down_to_ze
     await sem.reconcile_user_from_active_count("user-a", 0)
 
     assert backend.get(user_key(settings, "user-a")) == 0
+
+
+async def test_reconcile_user_from_active_count_never_raises_the_counter() -> None:
+    """Per-user counterpart to the global decrease-only regression test -- same
+    SUBMITTING-commits-before-acquire race applies per-user, so this leg must never
+    raise the counter either."""
+    settings = _settings(per_user_concurrent_jobs=10)
+    backend = _InMemorySemaphoreBackend()
+    sem = RedisSemaphore(backend, settings)
+    await sem.acquire("user-a")  # per-user counter now 1
+
+    await sem.reconcile_user_from_active_count("user-a", 4)
+
+    assert backend.get(user_key(settings, "user-a")) == 1  # unchanged -- never raised
