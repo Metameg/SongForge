@@ -1,4 +1,6 @@
-// THROWAWAY: realistic SongForge "user" load, modeled to match the video's method.
+// THROWAWAY: VIRAL / thundering-herd stress -- a flash crowd slamming the app with
+// NEW connections as fast as k6 can open them. This is the STRESS extreme, not
+// ordinary traffic; for a steady-state realistic run use `realistic-session.js`.
 //
 // A real listener is TWO concurrent load sources a single k6 VU can't do at once
 // (an SSE GET blocks the VU for its whole hold), so we run two lockstep-ramped
@@ -9,7 +11,14 @@
 //                 per-user cost is a held socket, not a request).
 //   actions    -- ramping-arrival-rate at users * ACTIONS_PER_USER req/s: the
 //                 mixed thing connected users DO -- create / quota / queue, using
-//                 the bounded sf_uid cookie pool. His 0.1 req/s/user model.
+//                 the bounded sf_uid cookie pool. The 0.1 req/s/user model.
+//
+// The ramp adds ~1000 users every 45s == ~22 NEW connections/sec -- a viral spike
+// (~79k new listeners/hour), which is what manufactures the connect-storm stalls
+// (webhook/queue-fill freezes) and drives listeners into the nginx connection cap.
+// That is the POINT of this script: find what a flash crowd does. It shows the app
+// sheds excess at the edge and recovers -- it does not crash -- rather than modeling
+// a normal day.
 //
 // Pass/fail = the video's three rules, applied to ACTION requests:
 //   p95 < 500ms, p99 < 1000ms, error rate < 1%.
