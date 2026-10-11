@@ -532,9 +532,9 @@
       "id": 16,
       "title": "Pipeline failures/s",
       "type": "timeseries",
-      "description": "Terminal job failures, audio-ingest failures, and quota refunds per second — a non-zero line here means generated work is being lost.",
+      "description": "Terminal job failures, audio-ingest failures, and quota refunds per second — a non-zero line here means generated work is being lost. (Worker-side counters; real data requires the songforge_worker scrape job.)",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 69 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 69 },
       "targets": [
         {
           "expr": "sum(rate(songforge_jobs_failed_total[5m]))",
@@ -557,6 +557,42 @@
       ],
       "fieldConfig": {
         "defaults": { "unit": "reqps", "custom": { "axisLabel": "events/s" } },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["lastNotNull", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 17,
+      "title": "Worker throughput (dispatch & ingest)",
+      "type": "timeseries",
+      "description": "Worker-side generation stages, scraped from the songforge_worker job. Dispatch claims a QUEUED job and calls the generator; ingest downloads + uploads the finished audio and lands it READY. If dispatched/s outruns ingest-completed/s, the stall is in ingest; if both sag together, it is upstream (dispatch/semaphore). These were invisible before the worker exposed /metrics.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 69 },
+      "targets": [
+        {
+          "expr": "sum(rate(songforge_jobs_dispatched_total[1m]))",
+          "legendFormat": "dispatched/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(songforge_ingest_completed_total[1m]))",
+          "legendFormat": "ingest completed/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(songforge_ingest_requeued_total[1m]))",
+          "legendFormat": "ingest requeued/s",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "axisLabel": "jobs/s" } },
         "overrides": []
       },
       "options": {

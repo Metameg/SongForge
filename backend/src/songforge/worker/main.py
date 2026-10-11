@@ -16,6 +16,7 @@ from songforge.logging_setup import configure_logging, get_logger
 from songforge.worker.dispatch import run_dispatch
 from songforge.worker.health import touch_heartbeat
 from songforge.worker.ingest import run_ingest
+from songforge.worker.metrics_server import start_worker_metrics_server
 from songforge.worker.radio_coordinator import run_radio_coordinator
 from songforge.worker.watchdog import run_watchdog
 
@@ -69,6 +70,12 @@ def main() -> None:
     settings = get_settings()
     configure_logging(level=settings.log_level)
 
+    # Expose the worker's Prometheus REGISTRY before the loops start, so Prometheus
+    # can scrape dispatch/ingest/watchdog counters + process CPU/memory (the worker
+    # runs no FastAPI /metrics). The daemon thread dies with the process; shut it down
+    # explicitly on clean exit anyway.
+    metrics_server = start_worker_metrics_server(settings)
+
     async def _amain() -> None:
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -76,7 +83,11 @@ def main() -> None:
             loop.add_signal_handler(sig, stop.set)
         await run(settings, stop=stop)
 
-    asyncio.run(_amain())
+    try:
+        asyncio.run(_amain())
+    finally:
+        if metrics_server is not None:
+            metrics_server.shutdown()
 
 
 if __name__ == "__main__":

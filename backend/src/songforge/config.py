@@ -163,6 +163,11 @@ class Settings(BaseSettings):
     # ── Worker ──────────────────────────────────────────────────────────────
     worker_heartbeat_path: str = "/tmp/songforge-worker.heartbeat"  # noqa: S108
     worker_loop_interval_seconds: float = 5.0
+    # Port the worker exposes its Prometheus `/metrics` on (gated by `metrics_enabled`).
+    # The worker runs no FastAPI app, so without this its counters/histograms + process
+    # CPU/memory are invisible to Prometheus; a `songforge_worker` dns_sd scrape job
+    # (monitoring/prometheus/prometheus.yml) discovers every replica on this port.
+    worker_metrics_port: int = 9100
     # PRD #74 + issue #17: the radio leader's advisory-lock connection sets Postgres's
     # `tcp_user_timeout` GUC to this many seconds via asyncpg `server_settings`, so a
     # dead leader's session (and therefore its advisory lock) is detected and released

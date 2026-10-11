@@ -25,16 +25,29 @@ scrape_configs:
   # than the fleet total -- the exact multi-instance undercount the capacity
   # dashboard exists to avoid. dns_sd makes each replica its own target with a
   # distinct `instance` label, so dashboards sum() per-process metrics for the
-  # true total while still being able to break out per instance. NOTE: the
-  # worker process (jobs/dispatch.py) runs no HTTP server and is intentionally
-  # NOT scraped here -- its counters (jobs_dispatched_total etc.) are invisible
-  # to Prometheus, so dashboards observe the pipeline via the DB-derived
-  # songforge_jobs_in_state gauge (set by the web process at scrape time).
+  # true total while still being able to break out per instance.
   - job_name: songforge_web
     dns_sd_configs:
       - names: ["web"]
         type: A
         port: 8000
+        refresh_interval: 10s
+
+  # The SongForge WORKER process's /metrics. The worker runs no FastAPI app, so it
+  # exposes the shared REGISTRY via a small threaded HTTP server
+  # (backend/src/songforge/worker/metrics_server.py) on worker_metrics_port. This makes
+  # the previously-invisible worker counters scrapable -- jobs_dispatched_total,
+  # ingest_completed/requeued/failed_total, semaphore_released_total,
+  # watchdog_recovered_total, quota_refunded_total -- plus the worker's own process_*
+  # CPU/memory. Same dns_sd rationale as `web` (`--scale worker=N` -> N A records, each
+  # its own target/instance, summed across the fleet). The DB-derived
+  # songforge_jobs_in_state gauge stays the web job's (set at scrape time), so the two
+  # jobs never double-count it.
+  - job_name: songforge_worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
         refresh_interval: 10s
 
   # Postgres: jobs table row counts, connection/lock stats, etc.
