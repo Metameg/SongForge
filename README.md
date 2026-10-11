@@ -7,15 +7,16 @@ plays on the air.
 ## Architecture
 Backend is FastAPI + Postgres + Redis + MinIO (S3-compatible audio
 storage) behind nginx; the frontend is Next.js.
-<img width="4788" height="3024" alt="image" src="https://github.com/user-attachments/assets/ba583d9a-b5c3-4589-bdd5-ec2b9aece142" />
+<img width="1176" height="736" alt="SongForge Architecture drawio" src="https://github.com/user-attachments/assets/26657efa-ea42-47aa-a98c-650869095004" />
 
 
 ## Web-instance count vs p99 latency
 
 `realistic-session.js` load test, varying only the number of `web` replicas, run
-until combined p99 latency (`/create` + `/events`) first crossed 1 second:
+until combined p99 latency (`/create`) first crossed 1 second:
 
 | Metric | 3 web instances | 8 web instances |
+
 |---|---|---|
 | Connected listeners | ~4.05k | ~5.58k |
 | Combined request rate | ~336 req/s | ~500 req/s |
@@ -25,7 +26,7 @@ until combined p99 latency (`/create` + `/events`) first crossed 1 second:
 
 More web replicas raise the p99-bounded ceiling; Postgres stays far under its
 14-core budget in both runs, confirming web-tier CPU as the bottleneck, not the
-database. Full methodology and caveats: [`docs/depth-in-sse.md`](docs/depth-in-sse.md).
+database.
 
 ## Run locally
 
