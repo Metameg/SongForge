@@ -132,6 +132,14 @@ deprecated. [Railway configuration reference](https://docs.railway.com/config-as
 
 ## 4. Add PostgreSQL and Redis
 
+**Use Railway's `Database` add-path for both, NOT `Docker Image`.** Typing `postgres`
+or `redis` into the Docker Image field will actually pull and deploy — they're real
+official Docker Hub images — but you'll get a plain unmanaged container, not Railway's
+managed database plugin. That plugin is what generates the `PGUSER`/`PGPASSWORD`/
+`PGDATABASE`/`RAILWAY_PRIVATE_DOMAIN` variables every `${{Postgres.*}}`/`${{Redis.*}}`
+reference in this guide depends on; a Docker-Image-sourced container exposes none of
+those, and every step below would break.
+
 1. Choose **New → Database → PostgreSQL**. Name the service exactly `Postgres`.
 2. Choose **New → Database → Redis**. Name the service exactly `Redis`.
 3. Wait until both deploy successfully. Check their attached persistent storage.
@@ -160,11 +168,20 @@ Boarding feature flag and is not guaranteed available on every account.) The por
 approach — and prod's actual setup, per `docs/deploy.md`'s topology — is PgBouncer as its
 own Railway service, which is what this step does.
 
+Unlike Postgres/Redis above, this one genuinely is a Docker Image service — but the
+field needs a full `namespace/name:tag` reference, never a bare word: there is no
+official `docker.io/library/pgbouncer`, so typing just `pgbouncer` fails to pull.
+
 Choose **New → Docker Image** and enter:
 
 ```text
 edoburu/pgbouncer:v1.25.2-p0
 ```
+
+Verify this tag still resolves at [hub.docker.com/r/edoburu/pgbouncer/tags](https://hub.docker.com/r/edoburu/pgbouncer/tags)
+before using it — image tags get superseded. If it's gone, substitute
+`edoburu/pgbouncer:latest` (fine for a one-off staging session; pin an exact tag again
+for anything longer-lived).
 
 Name it `pgbouncer`. Leave its start command at the image default. Paste into Variables:
 
