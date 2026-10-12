@@ -46,9 +46,10 @@ async def by_id(
         success=True,
         conversion=ByIdConversion(
             task_id=record.task_id,
-            conversion_id=record.conversion_id_1,
+            conversion_id_1=record.conversion_id_1,
             status=record.status,
-            audio_url=audio_url,
-            title=record.title if completed else None,
+            conversion_path_1=audio_url,
+            conversion_duration_1=record.duration if completed else None,
+            title_1=record.title if completed else None,
         ),
     )

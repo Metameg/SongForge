@@ -243,10 +243,10 @@ async def test_get_audio_url_by_id_returns_fresh_url_on_200() -> None:
                 "success": True,
                 "conversion": {
                     "task_id": "t1",
-                    "conversion_id": "c1",
+                    "conversion_id_1": "c1",
                     "status": "COMPLETED",
-                    "audio_url": "http://musicgpt.test/audio/fresh-token",
-                    "title": "A Song",
+                    "conversion_path_1": "http://musicgpt.test/audio/fresh-token",
+                    "title_1": "A Song",
                 },
             },
         )
@@ -369,7 +369,7 @@ async def test_get_audio_url_by_id_against_real_sim_rejects_unknown_task() -> No
 # (issue #16 phase 3) -- see that method's docstring in `jobs/generation_client.py`.
 
 
-async def test_get_status_by_id_returns_completed_with_audio_url_and_title() -> None:
+async def test_get_status_by_id_returns_completed_with_audio_url_duration_and_title() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/public/v1/byId"
         assert request.url.params["task_id"] == "t1"
@@ -380,10 +380,11 @@ async def test_get_status_by_id_returns_completed_with_audio_url_and_title() -> 
                 "success": True,
                 "conversion": {
                     "task_id": "t1",
-                    "conversion_id": "c1",
+                    "conversion_id_1": "c1",
                     "status": "COMPLETED",
-                    "audio_url": "http://musicgpt.test/audio/fresh-token",
-                    "title": "A Song",
+                    "conversion_path_1": "http://musicgpt.test/audio/fresh-token",
+                    "conversion_duration_1": 123.4,
+                    "title_1": "A Song",
                 },
             },
         )
@@ -394,8 +395,7 @@ async def test_get_status_by_id_returns_completed_with_audio_url_and_title() -> 
 
     assert status.status == GENERATION_STATUS_COMPLETED
     assert status.audio_url == "http://musicgpt.test/audio/fresh-token"
-    # Real `/byId` carries no duration field -> None (the webhook is the duration source).
-    assert status.duration is None
+    assert status.duration == 123.4
     assert status.title == "A Song"
 
 

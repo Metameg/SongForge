@@ -243,12 +243,14 @@ class HttpGenerationClient:
                 "by-id lookup returned a malformed 200 body: no conversion object"
             )
 
+        # Real MusicGPT returns the two generated variants with `_1`/`_2` suffixes and
+        # has NO `audio_url` field (verified against the live API, 2026-10-11): the
+        # standard mp3 URL is `conversion_path_1`, duration `conversion_duration_1`,
+        # title `title_1`. We use the `_1` variant throughout (canonical conversion =
+        # `conversion_id_1`, which `jobs.ingest` derives the object key from).
         return GenerationStatus(
             status=str(conversion.get("status") or ""),
-            audio_url=conversion.get("audio_url"),
-            # Real `/byId` carries no duration (it reports `conversion_cost` instead);
-            # the authoritative duration rides the completion webhook. `None` here is
-            # expected and harmless -- the refresh path only needs `audio_url`.
-            duration=conversion.get("conversion_duration"),
-            title=conversion.get("title"),
+            audio_url=conversion.get("conversion_path_1"),
+            duration=conversion.get("conversion_duration_1"),
+            title=conversion.get("title_1"),
         )

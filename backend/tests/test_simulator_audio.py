@@ -62,7 +62,7 @@ async def test_url_expires_before_ingest_serves_expired_until_byid_refresh(
 
     refreshed = await rig.client.get(BYID_PATH, params=byid_params(task_id))
     assert refreshed.status_code == 200
-    fresh_url = refreshed.json()["conversion"]["audio_url"]
+    fresh_url = refreshed.json()["conversion"]["conversion_path_1"]
     assert fresh_url and fresh_url != stale_payload["conversion_path"]
 
     fresh_resp = await rig.client.get(fresh_url)

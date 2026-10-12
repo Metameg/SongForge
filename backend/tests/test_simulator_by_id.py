@@ -65,10 +65,8 @@ async def test_by_id_reports_completed_with_fresh_audio_url_after_delivery(
     assert status_resp.status_code == 200
     conversion = status_resp.json()["conversion"]
     assert conversion["status"] == "COMPLETED"
-    assert conversion["audio_url"]
-    # Real `/byId` carries a single `conversion_id` (the canonical conversion), not the
-    # `_1`/`_2` pair the create response returns.
-    assert conversion["conversion_id"] == body["conversion_id_1"]
+    assert conversion["conversion_path_1"]  # real byId's audio field (not `audio_url`)
+    assert conversion["conversion_id_1"] == body["conversion_id_1"]
 
 
 async def test_by_id_withholds_audio_url_and_title_until_completed() -> None:
@@ -81,16 +79,16 @@ async def test_by_id_withholds_audio_url_and_title_until_completed() -> None:
 
         before = (await client.get(BYID_PATH, params=byid_params(task_id))).json()
         assert before["conversion"]["status"] == "IN_QUEUE"
-        assert before["conversion"]["audio_url"] is None
-        assert before["conversion"]["title"] is None
+        assert before["conversion"]["conversion_path_1"] is None
+        assert before["conversion"]["title_1"] is None
 
         gate.set()
         await wait_for_pending_webhooks(app)
 
         after = (await client.get(BYID_PATH, params=byid_params(task_id))).json()
         assert after["conversion"]["status"] == "COMPLETED"
-        assert after["conversion"]["audio_url"]
-        assert after["conversion"]["title"]
+        assert after["conversion"]["conversion_path_1"]
+        assert after["conversion"]["title_1"]
 
 
 async def test_by_id_unknown_task_id_is_404(rig: SimulatorRig) -> None:

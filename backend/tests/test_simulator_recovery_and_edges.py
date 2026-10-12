@@ -94,9 +94,9 @@ async def test_webhook_never_arrives_is_still_recoverable_via_byid(
     assert status_resp.status_code == 200
     conversion = status_resp.json()["conversion"]
     assert conversion["status"] == "COMPLETED"
-    assert conversion["audio_url"]
+    assert conversion["conversion_path_1"]
 
-    audio_resp = await rig.client.get(conversion["audio_url"])
+    audio_resp = await rig.client.get(conversion["conversion_path_1"])
     assert audio_resp.status_code == 200
     assert audio_resp.content
 

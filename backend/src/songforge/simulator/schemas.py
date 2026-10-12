@@ -73,17 +73,19 @@ class ByIdStatus(str, enum.Enum):
 
 class ByIdConversion(BaseModel):
     """The task record nested under ``ByIdResponse.conversion`` -- the real MusicGPT
-    ``/byId`` shape. Only the fields the client reads (``status``/``audio_url``/
-    ``title``) plus the task/conversion handles are modelled; the real response also
-    carries ``status_msg``/``conversion_cost``/``lyrics``/``music_style``/timestamps,
-    which this service ignores. Note the single ``conversion_id`` (not ``_1``/``_2``)
-    and the absence of a duration field here -- duration rides the webhook."""
+    ``/byId`` shape (field names verified against the live API, 2026-10-11). Only the
+    fields the client reads are modelled; the real response also carries
+    ``conversion_path_2``/``conversion_path_wav_1``/``lyrics_1``/``album_cover_path``/
+    timestamps, which this service ignores. There is NO ``audio_url`` field: the
+    standard mp3 URL is ``conversion_path_1``, duration ``conversion_duration_1``,
+    title ``title_1`` (the ``_1``/``_2`` pair = the two generated variants)."""
 
     task_id: str
-    conversion_id: str
+    conversion_id_1: str
     status: ByIdStatus
-    audio_url: str | None = None
-    title: str | None = None
+    conversion_path_1: str | None = None
+    conversion_duration_1: float | None = None
+    title_1: str | None = None
 
 
 class ByIdResponse(BaseModel):
