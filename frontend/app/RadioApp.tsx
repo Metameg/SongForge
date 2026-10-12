@@ -12,7 +12,7 @@ import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
 import { emptyHistory, reduceHistory } from "@/lib/download";
-import { INITIAL_PROGRESS, progressTimeoutMs, reduceProgress } from "@/lib/progress";
+import { INITIAL_PROGRESS, PROGRESS_TIMEOUT_MS, reduceProgress } from "@/lib/progress";
 import { INITIAL_FEED, reduceFeed } from "@/lib/radio";
 import type { NowPlayingState } from "@/lib/nowPlaying";
 import Composer from "./Composer";
@@ -124,20 +124,22 @@ export default function RadioApp() {
   useEffect(() => {
     if (progress.status === "failed") void refreshQuota(); // credit was refunded
   }, [progress.status, refreshQuota]);
-  // Safety net so the bar never hangs on "Generating" forever if the terminal
-  // job-ready/job-failed SSE frame is dropped (bounded, no-replay per-user channel)
-  // or missed during a brief reconnect. Armed on entering `generating`, re-armed on
-  // each eta update (an observed job-progress), cleared on any terminal transition.
-  // No polling -- see `lib/progress.ts::progressTimeoutMs`.
+  // Backstop so the bar never hangs on "Generating" forever if the terminal
+  // job-ready/job-failed SSE frame is dropped (bounded, no-replay per-user channel) or
+  // missed during a brief reconnect. An ABSOLUTE deadline armed once per job on
+  // entering `generating` (deps are status + jobId only -- deliberately NOT eta, so a
+  // job-progress can't push the deadline out; it mirrors the backend's created_at-based
+  // hard deadline). Cleared on any terminal transition. No polling -- see
+  // `lib/progress.ts::PROGRESS_TIMEOUT_MS`.
   useEffect(() => {
     if (progress.status !== "generating" || progress.jobId === null) return;
     const jobId = progress.jobId;
     const timer = setTimeout(
       () => dispatchProgress({ type: "timeout", jobId }),
-      progressTimeoutMs(progress.eta),
+      PROGRESS_TIMEOUT_MS,
     );
     return () => clearTimeout(timer);
-  }, [progress.status, progress.jobId, progress.eta]);
+  }, [progress.status, progress.jobId]);
   const handleCreated = useCallback(
     (jobId: string) => {
       dispatchProgress({ type: "started", jobId });

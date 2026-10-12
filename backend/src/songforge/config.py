@@ -281,6 +281,16 @@ class Settings(BaseSettings):
     # Backstop poll interval between sweeps (A1: a single periodic watchdog owns all
     # recovery). Not latency-critical -- recovery, not the happy path.
     watchdog_poll_interval_seconds: float = 30.0
+    # Absolute hard deadline (A6): a job still non-terminal (QUEUED / SUBMITTING /
+    # WAITING_FOR_WEBHOOK / INGEST_PENDING) this many seconds after `created_at` is
+    # failed outright by the watchdog, no matter where it is in the pipeline -- so a
+    # job can never outlive the frontend's progress bar. The terminal-failure sweep
+    # then refunds (only if it was charged) and pushes `job-failed`. Set GENEROUSLY
+    # above real generation time (MusicGPT eta ~60s but real completion can run a few
+    # minutes); the frontend's own timeout must stay >= this + one
+    # `watchdog_poll_interval_seconds` so the backend has actually failed+refunded the
+    # job before the UI gives up, keeping the "if charged, refunded" copy accurate.
+    job_max_lifetime_seconds: float = 300.0
     # Design D5: a WAITING_FOR_WEBHOOK job is only polled once `updated_at + eta +
     # this buffer <= now` -- never during its own expected generation window.
     watchdog_waiting_overdue_buffer_seconds: float = 45.0

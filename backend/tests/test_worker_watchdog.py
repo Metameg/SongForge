@@ -46,7 +46,7 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from songforge.config import Settings
@@ -69,6 +69,7 @@ from songforge.models import (
 )
 from songforge.web.rate_limit import Identity
 from songforge.worker.watchdog import (
+    _drain_expired_jobs,
     _drain_ingest_overdue,
     _drain_submitting_stuck,
     _drain_waiting_overdue,
@@ -219,6 +220,17 @@ async def test_run_sweeps_drains_each_pair_and_fires_side_effects_after_commit(
         "songforge.worker.watchdog.sweep_terminal_failures", _fake_sweep_terminal
     )
 
+    # The absolute-deadline drain (A6) is exercised on its own in test_watchdog.py; here
+    # it is a no-op so it doesn't perturb the per-pair sequence/commit assertions below.
+    async def _claim_expired_none(
+        session: object, settings: Settings, **_kwargs: object
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_expired_job", _claim_expired_none
+    )
+
     async def _notify(channel: str, payload: str) -> None:
         notified.append((channel, payload))
 
@@ -329,6 +341,13 @@ async def test_run_sweeps_skips_sweep_and_commit_when_nothing_is_claimable(
         "songforge.worker.watchdog.sweep_terminal_failures",
         _unexpected_sweep("sweep_terminal"),
     )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_expired_job", _fake_claim_none_two_args
+    )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.sweep_expired_job",
+        _unexpected_sweep("sweep_expired"),
+    )
 
     async def _notify(channel: str, payload: str) -> None:
         return None
@@ -399,6 +418,9 @@ async def test_run_sweeps_drains_each_sweep_type_to_exhaustion(
     )
     monkeypatch.setattr(
         "songforge.worker.watchdog.claim_terminal_failure_job", _fake_claim_none_one_arg
+    )
+    monkeypatch.setattr(
+        "songforge.worker.watchdog.claim_expired_job", _fake_claim_none_two_args
     )
 
     async def _notify(channel: str, payload: str) -> None:
@@ -1195,3 +1217,64 @@ class TestRunSweepsSemaphoreReconcile:
                 _publish_user_event,
                 _ExplodingSemaphore(),
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# _drain_expired_jobs (A6 -- absolute hard deadline) against a REAL SQLite session
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+
+class _ReleaseSpySemaphore:
+    """Minimal Semaphore stand-in recording `release()` calls -- the only method
+    `_drain_expired_jobs` -> `_safe_release_semaphore` uses."""
+
+    def __init__(self) -> None:
+        self.released: list[str] = []
+
+    async def release(self, user_id: str) -> None:
+        self.released.append(user_id)
+
+
+async def test_drain_expired_jobs_fails_overdue_and_releases_only_active_slots(
+    real_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A6: a still-non-terminal job older than `job_max_lifetime_seconds` is failed
+    regardless of stage; a job within the deadline is untouched; and only a job that
+    held a generation-semaphore slot (an ACTIVE_JOB_STATES state) gets its slot
+    released -- a QUEUED job never did, so it isn't released."""
+    now = datetime.now(timezone.utc)
+    ancient = now - timedelta(seconds=10_000)  # far past the 300s default deadline
+
+    def _row(job_id: str, state: str, user_id: str, created_at: datetime) -> Job:
+        return Job(
+            job_id=job_id,
+            user_id=user_id,
+            prompt="p",
+            lyrics=None,
+            state=state,
+            attempts=0,
+            available_at=now,
+            webhook_url="http://web:8000/api/generation/webhook",
+            updated_at=now,
+            client_ip="203.0.113.5",
+            is_authenticated=False,
+            created_at=created_at,
+        )
+
+    async with real_sessionmaker() as s:
+        s.add(_row("old-waiting", JOB_STATE_WAITING_FOR_WEBHOOK, "u-active", ancient))
+        s.add(_row("old-queued", JOB_STATE_QUEUED, "u-queued", ancient))
+        s.add(_row("fresh", JOB_STATE_QUEUED, "u-fresh", now - timedelta(seconds=5)))
+        await s.commit()
+
+    spy = _ReleaseSpySemaphore()
+    await _drain_expired_jobs(real_sessionmaker, _settings(), spy)
+
+    async with real_sessionmaker() as s:
+        states = {r.job_id: r.state for r in (await s.scalars(select(Job))).all()}
+
+    assert states["old-waiting"] == JOB_STATE_FAILED
+    assert states["old-queued"] == JOB_STATE_FAILED
+    assert states["fresh"] == JOB_STATE_QUEUED  # within the deadline -> untouched
+    # Only the WAITING job held a slot; the QUEUED one never acquired one.
+    assert spy.released == ["u-active"]

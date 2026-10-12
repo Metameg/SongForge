@@ -46,10 +46,12 @@ from songforge.jobs.generation_client import GenerationClient, HttpGenerationCli
 from songforge.jobs.semaphore import RedisSemaphore, RedisSemaphoreBackend, Semaphore
 from songforge.jobs.watchdog import (
     NotifyIntent,
+    claim_expired_job,
     claim_ingest_overdue_job,
     claim_submitting_stuck_job,
     claim_terminal_failure_job,
     claim_waiting_overdue_job,
+    sweep_expired_job,
     sweep_ingest_overdue,
     sweep_submitting_stuck,
     sweep_terminal_failures,
@@ -296,6 +298,34 @@ async def _drain_ingest_overdue(
             await _safe_release_semaphore(semaphore, release_user_id)
 
 
+async def _drain_expired_jobs(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    semaphore: Semaphore | None = None,
+) -> None:
+    """Claim + fail + commit every still-non-terminal job past the absolute deadline
+    (A6, `job_max_lifetime_seconds`), one at a time, until none remain. Each job is
+    forced to FAILED regardless of stage; if it was in an `ACTIVE_JOB_STATES` state it
+    held a generation-semaphore slot, released post-commit, best-effort. No NOTIFY is
+    fired here: the refund + `job-failed` push is `_drain_terminal_failures`'s job,
+    which runs right after this in the same tick (see `_run_sweeps`).
+
+    `semaphore` is optional/backward-compatible, mirroring every other drain here."""
+    while True:
+        async with sessionmaker() as session:
+            job = await claim_expired_job(session, settings)
+            if job is None:
+                return
+            was_active = await sweep_expired_job(job, settings=settings)
+            await session.commit()
+            release_user_id = (
+                job.user_id if semaphore is not None and was_active else None
+            )
+
+        if semaphore is not None and release_user_id is not None:
+            await _safe_release_semaphore(semaphore, release_user_id)
+
+
 async def _drain_terminal_failures(
     sessionmaker: async_sessionmaker[AsyncSession],
     rate_limiter: RateLimiter,
@@ -331,7 +361,7 @@ async def _run_sweeps(
     publish_user_event: PublishUserEventFn,
     semaphore: Semaphore | None = None,
 ) -> None:
-    """One tick: drain each of the four sweeps to exhaustion in turn (F2), each row's
+    """One tick: drain each of the five sweeps to exhaustion in turn (F2), each row's
     commit-then-best-effort-side-effect ordering handled by its own `_drain_*` helper
     (F4); then, if a `semaphore` was supplied, reconcile it from Postgres truth (Part
     B, issue #16 slot-leak fix) -- a backstop for any slot a release site above never
@@ -340,6 +370,9 @@ async def _run_sweeps(
     await _drain_waiting_overdue(sessionmaker, client, settings, notify, semaphore)
     await _drain_submitting_stuck(sessionmaker, settings, notify, semaphore)
     await _drain_ingest_overdue(sessionmaker, settings, semaphore)
+    # A6: fail anything past the absolute deadline BEFORE the terminal-failure drain,
+    # so a deadline-expired job gets its refund + `job-failed` push in this same tick.
+    await _drain_expired_jobs(sessionmaker, settings, semaphore)
     await _drain_terminal_failures(sessionmaker, rate_limiter, publish_user_event)
     if semaphore is not None:
         await _safe_reconcile_semaphore(sessionmaker, semaphore)

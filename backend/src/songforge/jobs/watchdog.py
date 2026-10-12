@@ -19,7 +19,7 @@ refund fired before `failure_handled_at` is committed could double-refund if the
 process crashes between the two (a crash AFTER commit, before the post-commit refund,
 now costs at most one MISSED refund -- never a double one).
 
-Four independent sweeps, one per stranded/terminal case (see
+Five independent sweeps, one per stranded/terminal case (see
 `.orchestrator/CONTEXT.md` "What's MISSING" #4 for the full acceptance mapping):
 
 - `sweep_waiting_overdue` (A2): an overdue `WAITING_FOR_WEBHOOK` job is polled via
@@ -43,6 +43,13 @@ Four independent sweeps, one per stranded/terminal case (see
   construction (a re-claim only ever finds unhandled rows, D2). NEVER auto-regenerates
   -- "allows resubmit" is simply the user POSTing `/create` again with their refunded
   slot.
+- `sweep_expired_job` (A6): an absolute hard deadline -- any still-non-terminal job
+  (QUEUED/SUBMITTING/WAITING_FOR_WEBHOOK/INGEST_PENDING) older than
+  `job_max_lifetime_seconds` is failed outright regardless of stage, so no job can
+  outlive the frontend's progress bar. It only flips the state to FAILED (releasing the
+  slot if the job held one); the `sweep_terminal_failures` pass later in the SAME tick
+  does the refund+notify, so a deadline-failure is refunded (if charged) and surfaced
+  to the user exactly like any other FAILED job.
 
 The four `claim_*` functions are mechanical "SELECT ... FOR UPDATE SKIP LOCKED"
 queries, identical in shape to `jobs.dispatch.claim_next_job` /
@@ -85,12 +92,24 @@ from songforge.jobs.generation_client import (
 from songforge.logging_setup import get_logger
 from songforge.metrics import watchdog_recovered_total
 from songforge.models import (
+    ACTIVE_JOB_STATES,
     JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
     JOB_STATE_QUEUED,
     JOB_STATE_SUBMITTING,
     JOB_STATE_WAITING_FOR_WEBHOOK,
     Job,
+)
+
+# Every state a job can be in before it reaches a terminal one (READY/FAILED): the
+# set the absolute-deadline sweep (`sweep_expired_job`/`claim_expired_job`) can fail
+# from, regardless of pipeline stage. `ACTIVE_JOB_STATES` (the slot-holding states)
+# plus QUEUED (which holds no generation-semaphore slot yet).
+_NON_TERMINAL_STATES = (
+    JOB_STATE_QUEUED,
+    JOB_STATE_SUBMITTING,
+    JOB_STATE_WAITING_FOR_WEBHOOK,
+    JOB_STATE_INGEST_PENDING,
 )
 from songforge.web.rate_limit import Identity
 
@@ -337,6 +356,39 @@ async def sweep_terminal_failures(job: Job) -> TerminalFailureIntent | None:
         )
 
 
+# ── Decision: sweep_expired_job (A6 — absolute hard deadline) ─────────────────────
+
+
+async def sweep_expired_job(job: Job, *, settings: Settings) -> bool:
+    """Force an already-claimed, past-deadline non-terminal job to FAILED, no matter
+    where it is in the pipeline (A6 -- `job_max_lifetime_seconds`). This is the
+    backstop that guarantees a job can never outlive the frontend's progress bar:
+    QUEUED/SUBMITTING/WAITING_FOR_WEBHOOK/INGEST_PENDING all collapse to FAILED here,
+    and the terminal-failure sweep (run later in the same tick) refunds (only if the
+    job was charged -- floored at 0) and pushes `job-failed`.
+
+    Returns `True` if the job was in an `ACTIVE_JOB_STATES` state (i.e. it was holding
+    a generation-semaphore slot), so the caller releases that slot post-commit --
+    mirrors the other sweeps' slot-release handshake. A QUEUED job holds no slot, so
+    this returns `False` for it. Mutates `job` in place; the caller commits.
+
+    Issue #18, criterion #1: the whole body runs with the job's own submit-time
+    `correlation_id` re-bound (reset on exit).
+    """
+    with bind_correlation_id(job.correlation_id):
+        was_active = job.state in ACTIVE_JOB_STATES
+        prior_state = job.state
+        job.state = JOB_STATE_FAILED
+        watchdog_recovered_total.labels(path="expired_failed").inc()
+        log.info(
+            "watchdog_job_expired_failed",
+            job_id=job.job_id,
+            prior_state=prior_state,
+            max_lifetime_seconds=settings.job_max_lifetime_seconds,
+        )
+        return was_active
+
+
 # ── Claims: FOR UPDATE SKIP LOCKED row-claim queries (A1) ─────────────────────────
 #
 # Each mirrors `jobs.dispatch.claim_next_job` / `jobs.ingest.claim_next_ingest_job`'s
@@ -441,6 +493,25 @@ async def claim_terminal_failure_job(session: AsyncSession) -> Job | None:
         select(Job)
         .where(Job.state == JOB_STATE_FAILED, Job.failure_handled_at.is_(None))
         .order_by(Job.seq)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    return (await session.scalars(stmt)).first()
+
+
+async def claim_expired_job(session: AsyncSession, settings: Settings) -> Job | None:
+    """Claim the oldest still-non-terminal job whose `created_at` is older than
+    `settings.job_max_lifetime_seconds` -- the absolute deadline (A6). Keyed off
+    `created_at` (total age since the user submitted), NOT `updated_at`, so a job that
+    keeps getting nudged/polled can't dodge the deadline forever. Oldest-first so the
+    most-overdue job is handled first under contention."""
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=settings.job_max_lifetime_seconds
+    )
+    stmt = (
+        select(Job)
+        .where(Job.state.in_(_NON_TERMINAL_STATES), Job.created_at <= cutoff)
+        .order_by(Job.created_at)
         .limit(1)
         .with_for_update(skip_locked=True)
     )

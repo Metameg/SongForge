@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  INITIAL_PROGRESS,
-  PROGRESS_TIMEOUT_FLOOR_MS,
-  progressTimeoutMs,
-  reduceProgress,
-} from "./progress";
+import { INITIAL_PROGRESS, PROGRESS_TIMEOUT_MS, reduceProgress } from "./progress";
 
 const started = (jobId = "j1") => ({ type: "started" as const, jobId });
 const progress = (eta: number | null, job_id = "j1") =>
@@ -84,18 +79,12 @@ describe("reduceProgress", () => {
   });
 });
 
-describe("progressTimeoutMs", () => {
-  it("uses the floor when the eta is unknown", () => {
-    expect(progressTimeoutMs(null)).toBe(PROGRESS_TIMEOUT_FLOOR_MS);
-  });
-  it("uses the floor when the eta is zero or negative", () => {
-    expect(progressTimeoutMs(0)).toBe(PROGRESS_TIMEOUT_FLOOR_MS);
-    expect(progressTimeoutMs(-5)).toBe(PROGRESS_TIMEOUT_FLOOR_MS);
-  });
-  it("keeps the floor for a small eta", () => {
-    expect(progressTimeoutMs(30)).toBe(PROGRESS_TIMEOUT_FLOOR_MS); // 30*2000+60000 = 120000 < floor
-  });
-  it("scales past the floor for a large eta", () => {
-    expect(progressTimeoutMs(120)).toBe(120 * 2000 + 60_000); // 300000 > floor
+describe("PROGRESS_TIMEOUT_MS", () => {
+  it("stays at or beyond the backend hard deadline + one watchdog tick", () => {
+    // Backend `job_max_lifetime_seconds` (300s) + `watchdog_poll_interval_seconds`
+    // (30s): the bar must give up only AFTER the backend has guaranteed-failed and
+    // refunded the job, so the "if charged, refunded" copy is accurate. Keep these in
+    // sync if the backend deadline changes.
+    expect(PROGRESS_TIMEOUT_MS).toBeGreaterThanOrEqual((300 + 30) * 1000);
   });
 });

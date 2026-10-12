@@ -39,10 +39,12 @@ from songforge.jobs.generation_client import (
     GenerationTransientError,
 )
 from songforge.jobs.watchdog import (
+    claim_expired_job,
     claim_ingest_overdue_job,
     claim_submitting_stuck_job,
     claim_terminal_failure_job,
     claim_waiting_overdue_job,
+    sweep_expired_job,
     sweep_ingest_overdue,
     sweep_submitting_stuck,
     sweep_terminal_failures,
@@ -52,6 +54,7 @@ from songforge.models import (
     JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
     JOB_STATE_QUEUED,
+    JOB_STATE_READY,
     JOB_STATE_SUBMITTING,
     JOB_STATE_WAITING_FOR_WEBHOOK,
     Base,
@@ -1063,3 +1066,132 @@ async def test_late_webhook_after_watchdog_recovery_is_a_noop() -> None:
         # The watchdog's recovered value survives -- the stale late webhook never
         # overwrote it.
         assert row.audio_url == "http://musicgpt.test/audio/recovered-token"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# sweep_expired_job + claim_expired_job (A6 -- absolute hard deadline)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+_NON_TERMINAL = [
+    JOB_STATE_QUEUED,
+    JOB_STATE_SUBMITTING,
+    JOB_STATE_WAITING_FOR_WEBHOOK,
+    JOB_STATE_INGEST_PENDING,
+]
+
+
+class TestClaimExpiredJob:
+    async def test_claims_a_non_terminal_job_past_the_deadline(
+        self, session: AsyncSession
+    ) -> None:
+        settings = Settings(job_max_lifetime_seconds=300)
+        await _add(
+            session,
+            _job(
+                job_id="old",
+                state=JOB_STATE_QUEUED,
+                created_at=_now() - timedelta(seconds=400),  # 400 > 300
+            ),
+        )
+
+        claimed = await claim_expired_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "old"
+
+    async def test_skips_a_job_still_within_the_deadline(
+        self, session: AsyncSession
+    ) -> None:
+        settings = Settings(job_max_lifetime_seconds=300)
+        await _add(
+            session,
+            _job(
+                job_id="fresh",
+                state=JOB_STATE_WAITING_FOR_WEBHOOK,
+                created_at=_now() - timedelta(seconds=100),  # well under 300
+            ),
+        )
+
+        assert await claim_expired_job(session, settings) is None
+
+    @pytest.mark.parametrize("state", _NON_TERMINAL)
+    async def test_claims_from_every_non_terminal_state(
+        self, session: AsyncSession, state: str
+    ) -> None:
+        settings = Settings(job_max_lifetime_seconds=300)
+        await _add(
+            session,
+            _job(job_id="old", state=state, created_at=_now() - timedelta(seconds=400)),
+        )
+
+        claimed = await claim_expired_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "old"
+
+    @pytest.mark.parametrize("state", [JOB_STATE_READY, JOB_STATE_FAILED])
+    async def test_ignores_terminal_jobs_even_when_ancient(
+        self, session: AsyncSession, state: str
+    ) -> None:
+        settings = Settings(job_max_lifetime_seconds=300)
+        await _add(
+            session,
+            _job(job_id="done", state=state, created_at=_now() - timedelta(seconds=9999)),
+        )
+
+        assert await claim_expired_job(session, settings) is None
+
+    async def test_returns_the_oldest_expired_row_first(
+        self, session: AsyncSession
+    ) -> None:
+        settings = Settings(job_max_lifetime_seconds=300)
+        await _add(
+            session,
+            _job(
+                job_id="newer",
+                state=JOB_STATE_QUEUED,
+                created_at=_now() - timedelta(seconds=400),
+            ),
+        )
+        await _add(
+            session,
+            _job(
+                job_id="older",
+                state=JOB_STATE_QUEUED,
+                created_at=_now() - timedelta(seconds=800),
+            ),
+        )
+
+        claimed = await claim_expired_job(session, settings)
+
+        assert claimed is not None
+        assert claimed.job_id == "older"
+
+
+class TestSweepExpiredJob:
+    async def test_forces_the_job_to_failed(self) -> None:
+        job = _job(state=JOB_STATE_WAITING_FOR_WEBHOOK)
+
+        await sweep_expired_job(job, settings=Settings())
+
+        assert job.state == JOB_STATE_FAILED
+
+    @pytest.mark.parametrize(
+        "state",
+        [JOB_STATE_SUBMITTING, JOB_STATE_WAITING_FOR_WEBHOOK, JOB_STATE_INGEST_PENDING],
+    )
+    async def test_reports_slot_release_for_a_slot_holding_state(self, state: str) -> None:
+        job = _job(state=state)
+
+        was_active = await sweep_expired_job(job, settings=Settings())
+
+        assert was_active is True  # was in ACTIVE_JOB_STATES -> caller releases the slot
+        assert job.state == JOB_STATE_FAILED
+
+    async def test_does_not_report_slot_release_for_a_queued_job(self) -> None:
+        job = _job(state=JOB_STATE_QUEUED)
+
+        was_active = await sweep_expired_job(job, settings=Settings())
+
+        assert was_active is False  # QUEUED holds no generation-semaphore slot
+        assert job.state == JOB_STATE_FAILED

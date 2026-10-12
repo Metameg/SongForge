@@ -15,29 +15,25 @@ export type ProgressAction =
   | JobEvent;
 
 /**
- * Client-side safety net for the bar never un-sticking (no hanging "Generating your
- * song"): the per-user event channel is fire-and-forget and bounded (see
- * `backend/.../radio/user_events.py`, `_QUEUE_MAXSIZE` -- its own docstring allows
- * dropping one `job-failed`/`job-ready` push), and a brief SSE disconnect at the
- * wrong moment misses the frame entirely with no replay. Without a timeout the bar
- * would spin forever. `RadioApp` arms a timer for this long after entering
- * `generating` (re-armed whenever a `job-progress` updates the eta); if no terminal
- * frame arrives it dispatches a `timeout` action -> `timedout`. No polling.
+ * Client-side backstop so the bar can never hang on "Generating" forever: the per-user
+ * event channel is fire-and-forget and bounded (see `backend/.../radio/user_events.py`,
+ * `_QUEUE_MAXSIZE` -- its docstring allows dropping one push), and a brief SSE
+ * disconnect misses the frame entirely with no replay. `RadioApp` arms a single timer
+ * this long after entering `generating` (an ABSOLUTE deadline from submit -- NOT reset
+ * by `job-progress`, mirroring the backend's `created_at`-based deadline); if no
+ * terminal frame arrives it dispatches `timeout` -> `timedout`. No polling.
  *
- * Deliberately generous and eta-scaled: a real-MusicGPT generation can legitimately
- * take minutes, and firing early would strand a job that is still genuinely working.
- * `timedout` makes no DEFINITIVE claim about the outcome -- the copy hedges ("if you
- * were charged, your credits have been refunded") because the job may still be
- * genuinely in flight: the song can still surface in the station if it completes, and
- * a reload resets the view. (The watchdog refunds any job that actually ends FAILED,
- * so the conditional is accurate for the failure case.)
+ * This is deliberately COUPLED to the backend's absolute hard deadline
+ * (`Settings.job_max_lifetime_seconds`, 300s): the watchdog fails any still-running
+ * job past that deadline (regardless of stage), refunds it if it was charged, and
+ * pushes `job-failed`. This timeout must stay >= that deadline + one
+ * `watchdog_poll_interval_seconds` (30s) so the backend has ALREADY failed+refunded
+ * the job by the time the bar gives up -- which is what makes the "if you were
+ * charged, your credits have been refunded" copy accurate rather than a guess.
+ * 300s deadline + 30s worst-case watchdog tick + 30s grace = 360s. If you change
+ * `job_max_lifetime_seconds`, change this too.
  */
-export const PROGRESS_TIMEOUT_FLOOR_MS = 180_000;
-
-export function progressTimeoutMs(eta: number | null): number {
-  if (eta == null || eta <= 0) return PROGRESS_TIMEOUT_FLOOR_MS;
-  return Math.max(PROGRESS_TIMEOUT_FLOOR_MS, eta * 2000 + 60_000);
-}
+export const PROGRESS_TIMEOUT_MS = 360_000;
 
 /** Events for any job other than the tracked one leave the state untouched. */
 export function reduceProgress(s: GenerationProgress, a: ProgressAction): GenerationProgress {
