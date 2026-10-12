@@ -1,10 +1,17 @@
 """Pydantic request/response contracts mirroring the real MusicGPT API (issue #11).
 
-Field names match what the old Flask client (``app/home/services.py::MusicAPIClient``) and
-webhook handler (``app/home/api.py::webhook``) key off, so swapping the real API for this
-simulator is purely a base-URL change. Exact ``/byId`` field names aren't documented
-upstream; this shape is a documented, internally-consistent placeholder and will be
-reconciled with the real client when the ingest issue lands (see ``.orchestrator/CONTEXT.md``).
+Reconciled with the real MusicGPT contract (docs.musicgpt.com/api-documentation:
+MusicAI create, byId status check, webhook callback), so swapping the real API for this
+simulator stays purely a base-URL change (``MUSICGPT_BASE_URL``). The shapes the client
+(``jobs/generation_client.py``) and webhook route (``web/routes/webhook.py``) parse are
+the ones modelled here:
+
+- create response: ``task_id`` + ``conversion_id_1`` + ``conversion_id_2`` + ``eta`` +
+  ``credit_estimate`` at the top level;
+- ``/byId``: ``{"success", "conversion": {...}}`` -- the task fields are NESTED under
+  ``conversion`` (``status``/``audio_url``/``title``...), not top-level;
+- webhook: ``success`` is the failure signal (``false`` on error/failed); there is no
+  ``status`` field on the webhook body (status lives only on the ``/byId`` poll).
 """
 
 from __future__ import annotations
@@ -38,7 +45,11 @@ class CreateResponse(BaseModel):
 
 
 class WebhookPayload(BaseModel):
-    """Body POSTed later to the request's ``webhook_url`` on completion (or failure)."""
+    """Body POSTed later to the request's ``webhook_url`` on completion (or failure).
+
+    ``success`` is the real MusicGPT failure signal: ``true`` on a completed generation,
+    ``false`` on error/failed. There is no ``status`` field on the webhook (that lives on
+    the ``/byId`` poll only)."""
 
     subtype: str = "music_ai"
     task_id: str
@@ -47,8 +58,8 @@ class WebhookPayload(BaseModel):
     conversion_duration: float | None = None
     title: str | None = None
     album_cover_path: str | None = None
-    # Present on the error/failed fault paths; absent on the happy path.
-    status: str | None = None
+    # True on the happy path; False on the error/failed fault paths.
+    success: bool = True
 
 
 class ByIdStatus(str, enum.Enum):
@@ -60,14 +71,24 @@ class ByIdStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
-class ByIdResponse(BaseModel):
-    """Body of ``GET /byId``: current status plus a freshly (re)issued audio URL."""
+class ByIdConversion(BaseModel):
+    """The task record nested under ``ByIdResponse.conversion`` -- the real MusicGPT
+    ``/byId`` shape. Only the fields the client reads (``status``/``audio_url``/
+    ``title``) plus the task/conversion handles are modelled; the real response also
+    carries ``status_msg``/``conversion_cost``/``lyrics``/``music_style``/timestamps,
+    which this service ignores. Note the single ``conversion_id`` (not ``_1``/``_2``)
+    and the absence of a duration field here -- duration rides the webhook."""
 
     task_id: str
+    conversion_id: str
     status: ByIdStatus
-    conversion_id_1: str
-    conversion_id_2: str
     audio_url: str | None = None
-    conversion_duration: float | None = None
     title: str | None = None
-    album_cover_path: str | None = None
+
+
+class ByIdResponse(BaseModel):
+    """Body of ``GET /api/public/v1/byId``: a ``success`` flag plus the task fields
+    NESTED under ``conversion`` (the real MusicGPT shape)."""
+
+    success: bool = True
+    conversion: ByIdConversion

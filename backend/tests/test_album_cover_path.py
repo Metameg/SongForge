@@ -377,23 +377,18 @@ async def test_simulator_webhook_carries_non_null_album_cover_path(rig: Simulato
 
 
 async def test_simulator_cover_is_deterministic_per_conversion_id(rig: SimulatorRig) -> None:
-    """Same conversion id -> same cover across the webhook and `/byId` (and repeat calls);
-    different conversions -> different covers."""
-    create = (await rig.client.post(CREATE_PATH, json=DEFAULT_BODY)).json()
+    """Same conversion -> same cover on its webhook; different conversions -> different
+    covers. The cover rides the completion webhook (`album_cover_path`); the real
+    MusicGPT `/byId` status response does not carry it, so the simulator's doesn't either."""
+    await rig.client.post(CREATE_PATH, json=DEFAULT_BODY)
     await wait_for_pending_webhooks(rig.app)
+    cover_a = rig.receiver.received[0]["album_cover_path"]
+    assert cover_a
 
-    webhook_cover = rig.receiver.received[0]["album_cover_path"]
-    by_id_1 = (await rig.client.get("/byId", params={"task_id": create["task_id"]})).json()
-    by_id_2 = (await rig.client.get("/byId", params={"task_id": create["task_id"]})).json()
-
-    assert by_id_1["album_cover_path"]
-    assert by_id_1["album_cover_path"] == by_id_2["album_cover_path"]
-    assert by_id_1["album_cover_path"] == webhook_cover
-
-    create_b = (await rig.client.post(CREATE_PATH, json=DEFAULT_BODY)).json()
+    await rig.client.post(CREATE_PATH, json=DEFAULT_BODY)
     await wait_for_pending_webhooks(rig.app)
-    by_id_b = (await rig.client.get("/byId", params={"task_id": create_b["task_id"]})).json()
-    assert by_id_b["album_cover_path"] != by_id_1["album_cover_path"]
+    cover_b = rig.receiver.received[1]["album_cover_path"]
+    assert cover_b and cover_b != cover_a
 
 
 # ── migration 0008 ───────────────────────────────────────────────────────────────

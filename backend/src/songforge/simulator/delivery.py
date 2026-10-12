@@ -61,10 +61,13 @@ async def _deliver(app: FastAPI, record: TaskRecord, delay: float) -> None:
 
     if fault in (Fault.ERROR, Fault.FAILED):
         record.status = ByIdStatus.ERROR if fault is Fault.ERROR else ByIdStatus.FAILED
+        # Real MusicGPT signals a failed generation with `success: false` on the webhook
+        # (no `status` field on the webhook body); the status itself is only observable
+        # via the `/byId` poll, which `record.status` above drives.
         payload = WebhookPayload(
             task_id=record.task_id,
             conversion_id=record.conversion_id_1,
-            status=record.status.value,
+            success=False,
         )
         await _post(app, record.webhook_url, payload)
         return
@@ -108,4 +111,4 @@ async def _post(app: FastAPI, url: str, payload: WebhookPayload) -> None:
             error=str(exc),
         )
         return
-    log.info("sim_webhook_delivered", url=url, task_id=payload.task_id, status=payload.status)
+    log.info("sim_webhook_delivered", url=url, task_id=payload.task_id, success=payload.success)

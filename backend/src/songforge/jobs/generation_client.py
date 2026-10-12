@@ -57,6 +57,12 @@ class GenerationHandles:
     credit_estimate: float
 
 
+# The `conversionType` the real MusicGPT `/byId` status check requires alongside
+# `task_id` -- the value for a prompt-to-song MusicAI generation (the only kind this
+# service submits). Verified against docs.musicgpt.com/api-documentation (byId +
+# MusicAI). Sent on every status poll; the simulator accepts and ignores it.
+MUSICAI_CONVERSION_TYPE = "MUSIC_AI"
+
 # `/byId` status values (mirrors the simulator's `ByIdStatus`, `simulator/schemas.py`
 # -- kept as plain strings here rather than importing that enum, matching this
 # module's existing convention of not depending on the simulator's own types).
@@ -187,11 +193,17 @@ class HttpGenerationClient:
         return status.audio_url
 
     async def get_status_by_id(self, task_id: str) -> GenerationStatus:
-        url = f"{self._settings.musicgpt_base_url}/byId"
+        # Real MusicGPT path is `/api/public/v1/byId` (NOT a bare `/byId`), and it
+        # REQUIRES both `task_id` and `conversionType` -- see docs.musicgpt.com. The
+        # base URL carries the host only (e.g. `https://api.musicgpt.com`), mirroring
+        # the create call's `/api/public/v1/MusicAI` path above.
+        url = f"{self._settings.musicgpt_base_url}/api/public/v1/byId"
         headers = {"Authorization": self._settings.musicgpt_api_key}
         try:
             response = await self._http_client.get(
-                url, params={"task_id": task_id}, headers=headers
+                url,
+                params={"task_id": task_id, "conversionType": MUSICAI_CONVERSION_TYPE},
+                headers=headers,
             )
         except httpx.TimeoutException as exc:
             raise GenerationTransientError(f"by-id lookup timed out: {exc}") from exc
@@ -221,9 +233,22 @@ class HttpGenerationClient:
                 "by-id lookup returned a malformed 200 body: not a JSON object"
             )
 
+        # Real MusicGPT nests the task fields under a `conversion` object:
+        # `{"success": true, "conversion": {"status": ..., "audio_url": ..., ...}}`.
+        # A missing/malformed `conversion` is retriable from the caller's perspective,
+        # not a crash (same mapping as the other by-id failure paths).
+        conversion = data.get("conversion")
+        if not isinstance(conversion, dict):
+            raise GenerationTransientError(
+                "by-id lookup returned a malformed 200 body: no conversion object"
+            )
+
         return GenerationStatus(
-            status=str(data.get("status") or ""),
-            audio_url=data.get("audio_url"),
-            duration=data.get("conversion_duration"),
-            title=data.get("title"),
+            status=str(conversion.get("status") or ""),
+            audio_url=conversion.get("audio_url"),
+            # Real `/byId` carries no duration (it reports `conversion_cost` instead);
+            # the authoritative duration rides the completion webhook. `None` here is
+            # expected and harmless -- the refresh path only needs `audio_url`.
+            duration=conversion.get("conversion_duration"),
+            title=conversion.get("title"),
         )

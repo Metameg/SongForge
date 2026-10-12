@@ -234,18 +234,20 @@ async def test_create_against_real_simulator_raises_rate_limited_on_real_429() -
 
 async def test_get_audio_url_by_id_returns_fresh_url_on_200() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/byId"
+        assert request.url.path == "/api/public/v1/byId"
         assert request.url.params["task_id"] == "t1"
+        assert request.url.params["conversionType"] == "MUSIC_AI"
         return httpx.Response(
             200,
             json={
-                "task_id": "t1",
-                "status": "COMPLETED",
-                "conversion_id_1": "c1",
-                "conversion_id_2": "c2",
-                "audio_url": "http://musicgpt.test/audio/fresh-token",
-                "conversion_duration": 123.4,
-                "title": "A Song",
+                "success": True,
+                "conversion": {
+                    "task_id": "t1",
+                    "conversion_id": "c1",
+                    "status": "COMPLETED",
+                    "audio_url": "http://musicgpt.test/audio/fresh-token",
+                    "title": "A Song",
+                },
             },
         )
 
@@ -308,10 +310,12 @@ async def test_get_audio_url_by_id_raises_transient_error_on_200_missing_audio_u
         lambda r: httpx.Response(
             200,
             json={
-                "task_id": "t1",
-                "status": "COMPLETED",
-                "conversion_id_1": "c1",
-                "conversion_id_2": "c2",
+                "success": True,
+                "conversion": {
+                    "task_id": "t1",
+                    "conversion_id": "c1",
+                    "status": "COMPLETED",
+                },
             },
         )
     )
@@ -365,20 +369,22 @@ async def test_get_audio_url_by_id_against_real_sim_rejects_unknown_task() -> No
 # (issue #16 phase 3) -- see that method's docstring in `jobs/generation_client.py`.
 
 
-async def test_get_status_by_id_returns_completed_with_audio_url_duration_and_title() -> None:
+async def test_get_status_by_id_returns_completed_with_audio_url_and_title() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/byId"
+        assert request.url.path == "/api/public/v1/byId"
         assert request.url.params["task_id"] == "t1"
+        assert request.url.params["conversionType"] == "MUSIC_AI"
         return httpx.Response(
             200,
             json={
-                "task_id": "t1",
-                "status": "COMPLETED",
-                "conversion_id_1": "c1",
-                "conversion_id_2": "c2",
-                "audio_url": "http://musicgpt.test/audio/fresh-token",
-                "conversion_duration": 123.4,
-                "title": "A Song",
+                "success": True,
+                "conversion": {
+                    "task_id": "t1",
+                    "conversion_id": "c1",
+                    "status": "COMPLETED",
+                    "audio_url": "http://musicgpt.test/audio/fresh-token",
+                    "title": "A Song",
+                },
             },
         )
 
@@ -388,7 +394,8 @@ async def test_get_status_by_id_returns_completed_with_audio_url_duration_and_ti
 
     assert status.status == GENERATION_STATUS_COMPLETED
     assert status.audio_url == "http://musicgpt.test/audio/fresh-token"
-    assert status.duration == 123.4
+    # Real `/byId` carries no duration field -> None (the webhook is the duration source).
+    assert status.duration is None
     assert status.title == "A Song"
 
 
@@ -397,10 +404,12 @@ async def test_get_status_by_id_returns_in_queue_with_no_audio_url() -> None:
         lambda r: httpx.Response(
             200,
             json={
-                "task_id": "t1",
-                "status": "IN_QUEUE",
-                "conversion_id_1": "c1",
-                "conversion_id_2": "c2",
+                "success": True,
+                "conversion": {
+                    "task_id": "t1",
+                    "conversion_id": "c1",
+                    "status": "IN_QUEUE",
+                },
             },
         )
     )
@@ -417,10 +426,12 @@ async def test_get_status_by_id_returns_error_status() -> None:
         lambda r: httpx.Response(
             200,
             json={
-                "task_id": "t1",
-                "status": "ERROR",
-                "conversion_id_1": "c1",
-                "conversion_id_2": "c2",
+                "success": True,
+                "conversion": {
+                    "task_id": "t1",
+                    "conversion_id": "c1",
+                    "status": "ERROR",
+                },
             },
         )
     )
@@ -436,10 +447,12 @@ async def test_get_status_by_id_returns_failed_status() -> None:
         lambda r: httpx.Response(
             200,
             json={
-                "task_id": "t1",
-                "status": "FAILED",
-                "conversion_id_1": "c1",
-                "conversion_id_2": "c2",
+                "success": True,
+                "conversion": {
+                    "task_id": "t1",
+                    "conversion_id": "c1",
+                    "status": "FAILED",
+                },
             },
         )
     )
