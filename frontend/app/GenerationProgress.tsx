@@ -14,7 +14,7 @@ export default function GenerationProgressView({ progress }: { progress: Generat
     : progress.status === "finished"
       ? "Finished — your song is ready"
       : timedout
-        ? "Still generating — it'll appear in the station when it's ready"
+        ? "This is taking longer than expected — try again. If you were charged, your credits have been refunded."
         : "Generation failed — your song credit was refunded";
 
   return (

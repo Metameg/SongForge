@@ -26,9 +26,11 @@ export type ProgressAction =
  *
  * Deliberately generous and eta-scaled: a real-MusicGPT generation can legitimately
  * take minutes, and firing early would strand a job that is still genuinely working.
- * `timedout` makes NO claim about the outcome (unlike `failed`, which asserts a
- * refund) -- the song still surfaces in the station if it completes, and a reload
- * resets the view.
+ * `timedout` makes no DEFINITIVE claim about the outcome -- the copy hedges ("if you
+ * were charged, your credits have been refunded") because the job may still be
+ * genuinely in flight: the song can still surface in the station if it completes, and
+ * a reload resets the view. (The watchdog refunds any job that actually ends FAILED,
+ * so the conditional is accurate for the failure case.)
  */
 export const PROGRESS_TIMEOUT_FLOOR_MS = 180_000;
 
