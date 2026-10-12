@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { INITIAL_PROGRESS, reduceProgress } from "./progress";
+import {
+  INITIAL_PROGRESS,
+  PROGRESS_TIMEOUT_FLOOR_MS,
+  progressTimeoutMs,
+  reduceProgress,
+} from "./progress";
 
 const started = (jobId = "j1") => ({ type: "started" as const, jobId });
 const progress = (eta: number | null, job_id = "j1") =>
@@ -50,5 +55,47 @@ describe("reduceProgress", () => {
     s = reduceProgress(s, ready("j1"));
     s = reduceProgress(s, started("j2"));
     expect(s).toMatchObject({ status: "generating", eta: null });
+  });
+
+  const timeout = (jobId = "j1") => ({ type: "timeout" as const, jobId });
+
+  it("a timeout strands the tracked generating job as timedout", () => {
+    const s = reduceProgress(reduceProgress(INITIAL_PROGRESS, started()), timeout());
+    expect(s).toMatchObject({ status: "timedout", eta: null });
+  });
+  it("a timeout for a different job id is ignored", () => {
+    const g = reduceProgress(INITIAL_PROGRESS, started("j1"));
+    expect(reduceProgress(g, timeout("other"))).toEqual(g);
+  });
+  it("a timeout after the job already finished is ignored", () => {
+    let s = reduceProgress(INITIAL_PROGRESS, started());
+    s = reduceProgress(s, ready());
+    expect(reduceProgress(s, timeout()).status).toBe("finished");
+  });
+  it("a timeout after the job already failed is ignored", () => {
+    let s = reduceProgress(INITIAL_PROGRESS, started());
+    s = reduceProgress(s, failed());
+    expect(reduceProgress(s, timeout()).status).toBe("failed");
+  });
+  it("a terminal frame after a timeout does not revive the tracked job", () => {
+    let s = reduceProgress(INITIAL_PROGRESS, started());
+    s = reduceProgress(s, timeout());
+    expect(reduceProgress(s, ready()).status).toBe("timedout");
+  });
+});
+
+describe("progressTimeoutMs", () => {
+  it("uses the floor when the eta is unknown", () => {
+    expect(progressTimeoutMs(null)).toBe(PROGRESS_TIMEOUT_FLOOR_MS);
+  });
+  it("uses the floor when the eta is zero or negative", () => {
+    expect(progressTimeoutMs(0)).toBe(PROGRESS_TIMEOUT_FLOOR_MS);
+    expect(progressTimeoutMs(-5)).toBe(PROGRESS_TIMEOUT_FLOOR_MS);
+  });
+  it("keeps the floor for a small eta", () => {
+    expect(progressTimeoutMs(30)).toBe(PROGRESS_TIMEOUT_FLOOR_MS); // 30*2000+60000 = 120000 < floor
+  });
+  it("scales past the floor for a large eta", () => {
+    expect(progressTimeoutMs(120)).toBe(120 * 2000 + 60_000); // 300000 > floor
   });
 });

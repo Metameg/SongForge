@@ -8,11 +8,14 @@ export default function GenerationProgressView({ progress }: { progress: Generat
 
   const generating = progress.status === "generating";
   const failed = progress.status === "failed";
+  const timedout = progress.status === "timedout";
   const label = generating
     ? `Generating your song${progress.eta != null ? ` · ~${progress.eta}s` : ""}`
     : progress.status === "finished"
       ? "Finished — your song is ready"
-      : "Generation failed — your song credit was refunded";
+      : timedout
+        ? "Still generating — it'll appear in the station when it's ready"
+        : "Generation failed — your song credit was refunded";
 
   return (
     <div
@@ -32,7 +35,7 @@ export default function GenerationProgressView({ progress }: { progress: Generat
         }}
       >
         <span className="sf-stat-label" style={{ color: failed ? "var(--sf-danger)" : undefined }}>
-          {generating ? "Working" : failed ? "Failed" : "Done"}
+          {generating ? "Working" : failed ? "Failed" : timedout ? "Pending" : "Done"}
         </span>
         {label}
       </span>

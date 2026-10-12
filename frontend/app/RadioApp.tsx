@@ -12,7 +12,7 @@ import { fetchQuota, type QuotaResponse } from "@/lib/quota";
 import { parseJobEvent, type JobEventName } from "@/lib/events";
 import { addMySong, hasMySong, loadMySongs } from "@/lib/mySongs";
 import { emptyHistory, reduceHistory } from "@/lib/download";
-import { INITIAL_PROGRESS, reduceProgress } from "@/lib/progress";
+import { INITIAL_PROGRESS, progressTimeoutMs, reduceProgress } from "@/lib/progress";
 import { INITIAL_FEED, reduceFeed } from "@/lib/radio";
 import type { NowPlayingState } from "@/lib/nowPlaying";
 import Composer from "./Composer";
@@ -124,6 +124,20 @@ export default function RadioApp() {
   useEffect(() => {
     if (progress.status === "failed") void refreshQuota(); // credit was refunded
   }, [progress.status, refreshQuota]);
+  // Safety net so the bar never hangs on "Generating" forever if the terminal
+  // job-ready/job-failed SSE frame is dropped (bounded, no-replay per-user channel)
+  // or missed during a brief reconnect. Armed on entering `generating`, re-armed on
+  // each eta update (an observed job-progress), cleared on any terminal transition.
+  // No polling -- see `lib/progress.ts::progressTimeoutMs`.
+  useEffect(() => {
+    if (progress.status !== "generating" || progress.jobId === null) return;
+    const jobId = progress.jobId;
+    const timer = setTimeout(
+      () => dispatchProgress({ type: "timeout", jobId }),
+      progressTimeoutMs(progress.eta),
+    );
+    return () => clearTimeout(timer);
+  }, [progress.status, progress.jobId, progress.eta]);
   const handleCreated = useCallback(
     (jobId: string) => {
       dispatchProgress({ type: "started", jobId });
