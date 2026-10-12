@@ -1,5 +1,7 @@
-"""`/byId` lookup: status enum (IN_QUEUE -> COMPLETED/ERROR/FAILED) + a fresh audio URL
-(issue #11 acceptance #4 — needed so url-expires-before-ingest is testable).
+"""`/api/public/v1/byId` lookup: status enum (IN_QUEUE -> COMPLETED/ERROR/FAILED) + a
+fresh audio URL (issue #11 acceptance #4 — needed so url-expires-before-ingest is
+testable). Matches the real MusicGPT contract: the task fields are nested under a
+`conversion` object, and both `task_id` and `conversionType` are required query params.
 """
 
 from __future__ import annotations
@@ -10,10 +12,12 @@ import pytest
 
 from songforge.simulator.app import create_app, wait_for_pending_webhooks
 from tests.simulator_helpers import (
+    BYID_PATH,
     CREATE_PATH,
     DEFAULT_BODY,
     SimulatorRig,
     WebhookReceiver,
+    byid_params,
     make_gated_sleep,
     make_rig,
     make_sim_client,
@@ -40,9 +44,9 @@ async def test_by_id_reports_in_queue_before_delivery() -> None:
         assert create_resp.status_code == 200
         task_id = create_resp.json()["task_id"]
 
-        status_resp = await client.get("/byId", params={"task_id": task_id})
+        status_resp = await client.get(BYID_PATH, params=byid_params(task_id))
         assert status_resp.status_code == 200
-        assert status_resp.json()["status"] == "IN_QUEUE"
+        assert status_resp.json()["conversion"]["status"] == "IN_QUEUE"
 
         gate.set()
         await wait_for_pending_webhooks(app)
@@ -57,16 +61,17 @@ async def test_by_id_reports_completed_with_fresh_audio_url_after_delivery(
 
     await wait_for_pending_webhooks(rig.app)
 
-    status_resp = await rig.client.get("/byId", params={"task_id": body["task_id"]})
+    status_resp = await rig.client.get(BYID_PATH, params=byid_params(body["task_id"]))
     assert status_resp.status_code == 200
-    status_body = status_resp.json()
-    assert status_body["status"] == "COMPLETED"
-    assert status_body["audio_url"]
-    assert status_body["conversion_id_1"] == body["conversion_id_1"]
-    assert status_body["conversion_id_2"] == body["conversion_id_2"]
+    conversion = status_resp.json()["conversion"]
+    assert conversion["status"] == "COMPLETED"
+    assert conversion["audio_url"]
+    # Real `/byId` carries a single `conversion_id` (the canonical conversion), not the
+    # `_1`/`_2` pair the create response returns.
+    assert conversion["conversion_id"] == body["conversion_id_1"]
 
 
-async def test_by_id_withholds_album_cover_path_until_completed() -> None:
+async def test_by_id_withholds_audio_url_and_title_until_completed() -> None:
     receiver = WebhookReceiver()
     sleep_fn, gate = make_gated_sleep()
     app = create_app(http_client=make_webhook_client(receiver), sleep_fn=sleep_fn)
@@ -74,18 +79,20 @@ async def test_by_id_withholds_album_cover_path_until_completed() -> None:
     async with make_sim_client(app) as client:
         task_id = (await client.post(CREATE_PATH, json=DEFAULT_BODY)).json()["task_id"]
 
-        before = (await client.get("/byId", params={"task_id": task_id})).json()
-        assert before["status"] == "IN_QUEUE"
-        assert before["album_cover_path"] is None
+        before = (await client.get(BYID_PATH, params=byid_params(task_id))).json()
+        assert before["conversion"]["status"] == "IN_QUEUE"
+        assert before["conversion"]["audio_url"] is None
+        assert before["conversion"]["title"] is None
 
         gate.set()
         await wait_for_pending_webhooks(app)
 
-        after = (await client.get("/byId", params={"task_id": task_id})).json()
-        assert after["status"] == "COMPLETED"
-        assert after["album_cover_path"]
+        after = (await client.get(BYID_PATH, params=byid_params(task_id))).json()
+        assert after["conversion"]["status"] == "COMPLETED"
+        assert after["conversion"]["audio_url"]
+        assert after["conversion"]["title"]
 
 
 async def test_by_id_unknown_task_id_is_404(rig: SimulatorRig) -> None:
-    resp = await rig.client.get("/byId", params={"task_id": "does-not-exist"})
+    resp = await rig.client.get(BYID_PATH, params=byid_params("does-not-exist"))
     assert resp.status_code == 404

@@ -11,7 +11,14 @@ import pytest
 
 from songforge.simulator.app import wait_for_pending_webhooks
 from songforge.simulator.faults import FAULT_HEADER, Fault
-from tests.simulator_helpers import CREATE_PATH, DEFAULT_BODY, SimulatorRig, make_rig
+from tests.simulator_helpers import (
+    BYID_PATH,
+    CREATE_PATH,
+    DEFAULT_BODY,
+    SimulatorRig,
+    byid_params,
+    make_rig,
+)
 
 
 @pytest.fixture()
@@ -53,9 +60,9 @@ async def test_url_expires_before_ingest_serves_expired_until_byid_refresh(
     stale_resp = await rig.client.get(str(stale_payload["conversion_path"]))
     assert stale_resp.status_code in (403, 410)  # expired/forbidden until refreshed
 
-    refreshed = await rig.client.get("/byId", params={"task_id": task_id})
+    refreshed = await rig.client.get(BYID_PATH, params=byid_params(task_id))
     assert refreshed.status_code == 200
-    fresh_url = refreshed.json()["audio_url"]
+    fresh_url = refreshed.json()["conversion"]["audio_url"]
     assert fresh_url and fresh_url != stale_payload["conversion_path"]
 
     fresh_resp = await rig.client.get(fresh_url)

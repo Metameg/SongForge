@@ -95,6 +95,15 @@ def make_rig() -> SimulatorRig:
 
 
 CREATE_PATH = "/api/public/v1/MusicAI"
+BYID_PATH = "/api/public/v1/byId"
+MUSICAI_CONVERSION_TYPE = "MUSIC_AI"
+
+
+def byid_params(task_id: str) -> dict[str, str]:
+    """Query params for a `/byId` status poll — the real API requires BOTH `task_id`
+    and `conversionType` (the latter is `MUSIC_AI` for a prompt-to-song generation)."""
+    return {"task_id": task_id, "conversionType": MUSICAI_CONVERSION_TYPE}
+
 
 DEFAULT_BODY: dict[str, object] = {
     "prompt": "a chill lofi beat",
@@ -105,8 +114,11 @@ DEFAULT_BODY: dict[str, object] = {
 
 # Re-exported for type-hinting convenience in test modules.
 __all__ = [
+    "BYID_PATH",
     "CREATE_PATH",
     "DEFAULT_BODY",
+    "MUSICAI_CONVERSION_TYPE",
+    "byid_params",
     "SimulatorRig",
     "WebhookReceiver",
     "make_gated_sleep",

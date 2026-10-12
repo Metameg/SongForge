@@ -126,7 +126,8 @@ async def _get_job(sessionmaker: async_sessionmaker[AsyncSession], job_id: str) 
 
 
 def _webhook_body(**overrides: object) -> dict[str, object]:
-    """Mirrors `simulator.schemas.WebhookPayload`'s success-path shape."""
+    """Mirrors the real MusicGPT webhook success-path shape (`simulator.schemas.
+    WebhookPayload`): `success=True` on the happy path; a failure sets `success=False`."""
     body: dict[str, object] = dict(
         subtype="music_ai",
         task_id="task-1",
@@ -134,7 +135,7 @@ def _webhook_body(**overrides: object) -> dict[str, object]:
         conversion_path="http://musicgpt.test/audio/hint-token",
         conversion_duration=181.0,
         title="A Generated Song",
-        status=None,
+        success=True,
     )
     body.update(overrides)
     return body
@@ -361,27 +362,49 @@ async def test_webhook_for_an_unknown_task_id_is_a_noop_200() -> None:
     assert notify_spy.calls == []
 
 
-# ── Failure-status webhook -> FAILED (criterion; refund/notify are OUT of scope) ──
+# ── Failure webhook -> FAILED (criterion; refund/notify handled by the watchdog) ──
 
 
-@pytest.mark.parametrize("status_value", ["ERROR", "FAILED"])
-async def test_webhook_failure_status_marks_the_job_failed(
-    sessionmaker: async_sessionmaker[AsyncSession], status_value: str
+async def test_webhook_failure_signal_marks_the_job_failed(
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """The real MusicGPT failure signal is `success: false` on the webhook body (no
+    `status` field). A failure that still carries a `conversion_path` must be caught by
+    THIS signal, not incidentally by the missing-path guard -- so assert it with a
+    present, success-shaped path."""
     await _insert_job(sessionmaker)
     client, notify_spy = _build_client(sessionmaker)
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status=status_value),
+        json=_webhook_body(success=False),  # conversion_path still present
     )
 
     assert resp.status_code == 200
     job = await _get_job(sessionmaker, "job-1")
     assert job.state == JOB_STATE_FAILED
-    # Quota refund + user SSE notification on failure are a later ticket (see
-    # .orchestrator/CONTEXT.md scope) -- not built here, and no NOTIFY is expected:
-    # there is no ingest work to wake a worker for on a failed generation.
+    # Quota refund + user SSE notification on failure are the watchdog's terminal sweep's
+    # job -- not this route, and no NOTIFY is expected: there is no ingest work to wake a
+    # worker for on a failed generation.
+    assert notify_spy.calls == []
+
+
+async def test_webhook_missing_conversion_path_marks_the_job_failed(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Belt-and-braces: even a `success`-shaped payload with no usable `conversion_path`
+    is unrecoverable, so it also fails the job."""
+    await _insert_job(sessionmaker)
+    client, notify_spy = _build_client(sessionmaker)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None),  # success omitted -> defaults True
+    )
+
+    assert resp.status_code == 200
+    job = await _get_job(sessionmaker, "job-1")
+    assert job.state == JOB_STATE_FAILED
     assert notify_spy.calls == []
 
 
@@ -393,7 +416,7 @@ async def test_webhook_failure_status_is_idempotent_too(
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status="ERROR"),
+        json=_webhook_body(conversion_path=None, success=False),
     )
 
     assert resp.status_code == 200
@@ -515,7 +538,7 @@ async def test_webhook_failure_status_increments_failed_counter(
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status="ERROR"),
+        json=_webhook_body(conversion_path=None, success=False),
     )
 
     assert resp.status_code == 200
@@ -524,7 +547,7 @@ async def test_webhook_failure_status_increments_failed_counter(
 
 # ── Generation semaphore release (issue #16 slot-leak fix) ─────────────────────────
 #
-# The webhook's failure branch (`body.status is not None or body.conversion_path is
+# The webhook's failure branch (`body.success is False or body.conversion_path is
 # None` -> FAILED) is a second event-driven release site: the job leaves
 # WAITING_FOR_WEBHOOK (an active state) without ever reaching ingest, so the slot
 # `jobs.dispatch.dispatch_claimed_job` acquired before the generation API call must be
@@ -573,7 +596,7 @@ async def test_webhook_failure_releases_the_semaphore_slot(
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status="ERROR"),
+        json=_webhook_body(conversion_path=None, success=False),
     )
 
     assert resp.status_code == 200
@@ -603,7 +626,7 @@ async def test_webhook_noop_paths_do_not_release_the_semaphore_slot(
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status="ERROR"),
+        json=_webhook_body(conversion_path=None, success=False),
     )
 
     assert resp.status_code == 200
@@ -652,7 +675,7 @@ async def test_webhook_releases_the_semaphore_after_the_persisting_commit(
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status="ERROR"),
+        json=_webhook_body(conversion_path=None, success=False),
     )
 
     assert resp.status_code == 200
@@ -689,7 +712,7 @@ async def test_webhook_returns_200_even_if_semaphore_release_raises(
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None, status="ERROR"),
+        json=_webhook_body(conversion_path=None, success=False),
     )
 
     assert resp.status_code == 200
@@ -807,7 +830,7 @@ async def test_webhook_failure_status_does_not_publish_job_progress(
 
     client.post(
         "/api/generation/webhook",
-        json=_webhook_body(status="FAILED", conversion_path=None),
+        json=_webhook_body(success=False, conversion_path=None),
     )
 
     assert spy.calls == []

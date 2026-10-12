@@ -12,7 +12,13 @@ import httpx
 from fastapi import FastAPI
 
 from songforge.simulator.app import create_app
-from tests.simulator_helpers import CREATE_PATH, DEFAULT_BODY, make_sim_client
+from tests.simulator_helpers import (
+    BYID_PATH,
+    CREATE_PATH,
+    DEFAULT_BODY,
+    byid_params,
+    make_sim_client,
+)
 
 
 async def test_create_app_returns_a_standalone_fastapi_app_with_its_own_routes() -> None:
@@ -26,7 +32,7 @@ async def test_create_app_returns_a_standalone_fastapi_app_with_its_own_routes()
     async with make_sim_client(app) as client:
         create_resp = await client.post(CREATE_PATH, json=DEFAULT_BODY)
         task_id = create_resp.json()["task_id"]
-        by_id_resp = await client.get("/byId", params={"task_id": task_id})
+        by_id_resp = await client.get(BYID_PATH, params=byid_params(task_id))
     assert create_resp.status_code != 404
     assert by_id_resp.status_code != 404
 

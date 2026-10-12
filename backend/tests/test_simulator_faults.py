@@ -12,7 +12,14 @@ import pytest
 
 from songforge.simulator.app import wait_for_pending_webhooks
 from songforge.simulator.faults import FAULT_HEADER, Fault
-from tests.simulator_helpers import CREATE_PATH, DEFAULT_BODY, SimulatorRig, make_rig
+from tests.simulator_helpers import (
+    BYID_PATH,
+    CREATE_PATH,
+    DEFAULT_BODY,
+    SimulatorRig,
+    byid_params,
+    make_rig,
+)
 
 
 @pytest.fixture()
@@ -37,7 +44,7 @@ async def test_webhook_never_arrives_create_still_succeeds_but_no_webhook_delive
     assert rig.receiver.received == []
 
 
-async def test_error_fault_reports_error_status_via_webhook(rig: SimulatorRig) -> None:
+async def test_error_fault_reports_failure_via_webhook(rig: SimulatorRig) -> None:
     resp = await rig.client.post(
         CREATE_PATH, json=DEFAULT_BODY, headers={FAULT_HEADER: Fault.ERROR.value}
     )
@@ -46,7 +53,9 @@ async def test_error_fault_reports_error_status_via_webhook(rig: SimulatorRig) -
     await wait_for_pending_webhooks(rig.app)
 
     assert len(rig.receiver.received) == 1
-    assert rig.receiver.received[0]["status"] == "ERROR"
+    # Real MusicGPT signals a failed generation with `success: false` on the webhook
+    # (there is no `status` field on the webhook body — that lives on the /byId poll).
+    assert rig.receiver.received[0]["success"] is False
 
 
 async def test_failed_fault_reports_failed_status_via_byid(rig: SimulatorRig) -> None:
@@ -58,9 +67,9 @@ async def test_failed_fault_reports_failed_status_via_byid(rig: SimulatorRig) ->
 
     await wait_for_pending_webhooks(rig.app)
 
-    status_resp = await rig.client.get("/byId", params={"task_id": task_id})
+    status_resp = await rig.client.get(BYID_PATH, params=byid_params(task_id))
     assert status_resp.status_code == 200
-    assert status_resp.json()["status"] == "FAILED"
+    assert status_resp.json()["conversion"]["status"] == "FAILED"
 
 
 async def test_delayed_webhook_uses_longer_than_default_delay(rig: SimulatorRig) -> None:

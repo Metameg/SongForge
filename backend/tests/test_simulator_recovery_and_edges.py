@@ -16,9 +16,11 @@ import pytest
 from songforge.simulator.app import create_app, wait_for_pending_webhooks
 from songforge.simulator.faults import FAULT_HEADER, Fault
 from tests.simulator_helpers import (
+    BYID_PATH,
     CREATE_PATH,
     DEFAULT_BODY,
     SimulatorRig,
+    byid_params,
     make_gated_sleep,
     make_rig,
     make_sim_client,
@@ -88,13 +90,13 @@ async def test_webhook_never_arrives_is_still_recoverable_via_byid(
     await wait_for_pending_webhooks(rig.app)
     assert rig.receiver.received == []  # nothing was delivered
 
-    status_resp = await rig.client.get("/byId", params={"task_id": task_id})
+    status_resp = await rig.client.get(BYID_PATH, params=byid_params(task_id))
     assert status_resp.status_code == 200
-    body = status_resp.json()
-    assert body["status"] == "COMPLETED"
-    assert body["audio_url"]
+    conversion = status_resp.json()["conversion"]
+    assert conversion["status"] == "COMPLETED"
+    assert conversion["audio_url"]
 
-    audio_resp = await rig.client.get(body["audio_url"])
+    audio_resp = await rig.client.get(conversion["audio_url"])
     assert audio_resp.status_code == 200
     assert audio_resp.content
 

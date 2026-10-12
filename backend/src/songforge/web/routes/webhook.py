@@ -60,9 +60,14 @@ Notifier = Callable[[str, str], Awaitable[None]]
 
 class WebhookPayload(BaseModel):
     """Body POSTed by the generation API on completion (or failure) -- field names
-    mirror the simulator's contract (``simulator/schemas.py::WebhookPayload``).
-    ``conversion_path`` is the (possibly expiring) audio URL hint; ``status`` is only
-    present on an error/failed delivery."""
+    mirror the real MusicGPT contract (docs.musicgpt.com; the simulator mirrors it in
+    ``simulator/schemas.py::WebhookPayload``). ``conversion_path`` is the (possibly
+    expiring) audio URL hint; ``success`` is the failure signal -- the real API posts
+    ``success: false`` on an error/failed generation (there is NO ``status`` field on
+    the webhook; status is only exposed via the ``/byId`` poll). Defaults to ``None``
+    when absent so a payload that simply omits it is NOT treated as a declared failure.
+    Unlisted real fields (``conversion_path_wav``, ``is_flagged``, ``reason``,
+    ``lyrics``...) are ignored by pydantic's default ``extra``."""
 
     subtype: str = "music_ai"
     task_id: str
@@ -71,7 +76,7 @@ class WebhookPayload(BaseModel):
     conversion_duration: float | None = None
     title: str | None = None
     album_cover_path: str | None = None
-    status: str | None = None
+    success: bool | None = None
 
 
 class WebhookResponse(BaseModel):
@@ -220,16 +225,18 @@ async def receive_webhook(
             )
             return WebhookResponse()
 
-        if body.status is not None or body.conversion_path is None:
-            # A declared failure, or a success-shaped payload missing the one field
-            # ingest needs -- either way unrecoverable without a real audio URL.
-            # Quota refund + user SSE notify on failure is a LATER ticket (see
-            # `.orchestrator/CONTEXT.md` OUT-of-scope); this only flips the state.
+        if body.success is False or body.conversion_path is None:
+            # A declared failure (`success: false`, the real MusicGPT failure signal),
+            # or a success-shaped payload missing the one field ingest needs -- either
+            # way unrecoverable without a real audio URL. `is False` (not falsy): an
+            # absent `success` must NOT fail an otherwise-complete payload. Quota refund
+            # + user SSE notify on failure is the watchdog's terminal sweep; this only
+            # flips the state (and releases the slot below).
             job.state = JOB_STATE_FAILED
             await session.commit()
             webhooks_received_total.labels(outcome="failed").inc()
             log.info(
-                "webhook_marked_failed", task_id=body.task_id, status=body.status
+                "webhook_marked_failed", task_id=body.task_id, success=body.success
             )
             # Issue #16 slot-leak fix: the job leaves WAITING_FOR_WEBHOOK (an active
             # state) here without ever reaching ingest -- release its generation-
