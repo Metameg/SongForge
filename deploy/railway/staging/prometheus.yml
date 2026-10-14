@@ -7,13 +7,13 @@ global:
 scrape_configs:
   - job_name: songforge_web
     dns_sd_configs:
-      - names: [web1.railway.internal]
+      - names: [web.railway.internal]
         type: A
         port: 8000
         refresh_interval: 10s
   - job_name: songforge_worker
     dns_sd_configs:
-      - names: [worker1.railway.internal]
+      - names: [worker.railway.internal]
         type: A
         port: 9100
         refresh_interval: 10s
