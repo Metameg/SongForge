@@ -411,9 +411,34 @@ This staging setup uses the exact same approach, so dashboards/alerting built ag
 staging behave identically once pointed at prod. There is no self-hosted Grafana
 instance and no SSH tunnel for one (step 11).
 
-First, sign up for Grafana Cloud's free tier if you haven't, then from your stack's
-"Connection details" → Prometheus page, note the `remote_write` URL, your Prometheus
-username, and an API key/token with `metrics:write` permission.
+First, get the three credentials this agent needs from Grafana Cloud — a one-time setup:
+
+1. Sign up at [grafana.com/auth/sign-up/create-user](https://grafana.com/auth/sign-up/create-user)
+   if you don't already have an account. This starts a 14-day full-featured trial that
+   automatically drops to the permanent free tier afterward (10,000 metrics series/month,
+   14-day retention) — nothing is deleted or shut off when the trial ends, and this
+   walkthrough's usage (2 scrape targets) stays far under that free-tier cap either way.
+2. Signing up provisions a default **stack** for you automatically. Go to your
+   [Cloud Portal](https://grafana.com/auth/sign-in/) (grafana.com → your account menu →
+   **My Account**, or it's the first thing you land on after signup) and find that stack
+   listed there.
+3. On the stack's card/page, find the **Prometheus** row and click **Details** next to it
+   (sometimes labeled "Send Metrics" or similar depending on the current UI — look for
+   the row literally named "Prometheus").
+4. This opens a page with your **Remote Write Endpoint** URL and a **Username** —
+   note both. The username here is a **numeric instance ID**, not your login email;
+   that's expected.
+5. On the same page, under the password/token field, click **Generate now** (or
+   **Create token**). Give it a name (e.g. `songforge-staging-agent`), leave expiration
+   unset unless you want to track that, click **Create token**, and **copy the token
+   immediately** — Grafana shows it once and never again. This token is what the
+   `remote_write` config calls a password; its scope defaults to `metrics:write` for
+   this panel, which is exactly what's needed here.
+
+You now have three values — the endpoint URL, the numeric username, and the token —
+which map directly onto the three `GRAFANA_CLOUD_*` Railway variables below. Nothing
+else on grafana.com needs touching for this walkthrough; you will view dashboards
+directly in this same Cloud Portal later (step 10), not through any separate tool.
 
 Create `deploy/railway/staging/prometheus.yml` under the repository root (adapted from
 `monitoring/prometheus/prometheus.prod.example.yml`):
@@ -466,10 +491,13 @@ Command empty. One replica, private, no public domain, no persistent volume. Set
 
 ```dotenv
 PORT=9090
-GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL=REPLACE_WITH_YOUR_STACK_REMOTE_WRITE_URL
-GRAFANA_CLOUD_PROMETHEUS_USERNAME=REPLACE_WITH_YOUR_STACK_USERNAME
-GRAFANA_CLOUD_API_KEY=REPLACE_WITH_A_METRICS_WRITE_API_KEY
+GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL=REPLACE_WITH_THE_REMOTE_WRITE_ENDPOINT_FROM_STEP_ABOVE
+GRAFANA_CLOUD_PROMETHEUS_USERNAME=REPLACE_WITH_THE_NUMERIC_USERNAME_FROM_STEP_ABOVE
+GRAFANA_CLOUD_API_KEY=REPLACE_WITH_THE_TOKEN_YOU_JUST_GENERATED
 ```
+
+(The three values from the five numbered steps above go here, in the same order: URL,
+username, token.)
 
 Optional HTTP healthcheck `/-/ready`. **Never** add a public domain to this service or
 expose `/metrics` on an internet-facing domain — scrape it only over the private network,
