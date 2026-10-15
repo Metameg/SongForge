@@ -478,9 +478,21 @@ Create `deploy/railway/staging/Dockerfile.grafana-agent`:
 
 ```dockerfile
 FROM prom/prometheus:v2.55.1
-COPY deploy/railway/staging/prometheus.yml /etc/prometheus/prometheus.yml
+COPY deploy/railway/staging/prometheus.yml /etc/prometheus/prometheus.yml.tmpl
+ENTRYPOINT ["/bin/sh", "-c", "sed -e \"s|\\${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}|$GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL|g\" -e \"s|\\${GRAFANA_CLOUD_PROMETHEUS_USERNAME}|$GRAFANA_CLOUD_PROMETHEUS_USERNAME|g\" -e \"s|\\${GRAFANA_CLOUD_API_KEY}|$GRAFANA_CLOUD_API_KEY|g\" /etc/prometheus/prometheus.yml.tmpl > /etc/prometheus/prometheus.yml && exec /bin/prometheus \"$@\"", "--"]
 CMD ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=1h"]
 ```
+
+The base `prom/prometheus` image does **not** expand `${VAR}` placeholders in its own
+config file — that syntax is only interpolated by a shell or by docker-compose. Loaded
+as-is, `prometheus.yml`'s `remote_write.url` would contain the literal, un-substituted
+text `${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}`, which Prometheus then tries to POST
+to as a URL and fails with `unsupported protocol scheme ""`. This image is the busybox
+variant of the official Prometheus image (confirmed by listing its `/bin`) and has no
+`gettext`/`envsubst` binary, so the entrypoint above uses busybox `sed` instead,
+substituting only the three known variable names explicitly, against the file as a
+`.tmpl`, before handing off to the real `prometheus` binary with the original `CMD` args
+preserved via `"$@"`.
 
 A short local retention is intentional: this instance's own TSDB is just a scrape buffer
 in front of `remote_write`, not a dashboard source — Grafana Cloud is where you look.
