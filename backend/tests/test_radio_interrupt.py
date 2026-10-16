@@ -70,6 +70,11 @@ class _FakeRedis:
     async def publish(self, channel: str, message: str) -> None:
         self.publish_calls.append((channel, message))
 
+    @property
+    def pointer_publishes(self) -> list[tuple[str, str]]:
+        """Publishes on the pointer channel only (advances also publish queue depth)."""
+        return [c for c in self.publish_calls if c[0] == "radio:pointer:changed"]
+
 
 @pytest.fixture()
 async def sessionmaker() -> async_sessionmaker[AsyncSession]:
@@ -269,8 +274,8 @@ async def test_attempt_interrupt_publishes_the_resolved_view_on_an_applied_inter
         assert applied is True
 
     assert redis.set_calls == 1
-    assert len(redis.publish_calls) == 1
-    _channel, payload_raw = redis.publish_calls[0]
+    assert len(redis.pointer_publishes) == 1
+    _channel, payload_raw = redis.pointer_publishes[0]
     payload = json.loads(payload_raw)
     assert payload["song_id"] == "user-song-1"
     assert payload["version"] == 1

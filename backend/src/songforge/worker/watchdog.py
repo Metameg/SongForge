@@ -65,6 +65,12 @@ from songforge.metrics import (
     user_notifications_total,
 )
 from songforge.models import JOB_STATE_FAILED
+from songforge.radio.queue import count_waiting_depth
+from songforge.radio.queue_depth import (
+    PublishQueueDepthFn,
+    redis_queue_depth_publisher,
+    safe_publish_queue_depth,
+)
 from songforge.radio.user_events import (
     PublishUserEventFn,
     failed_message,
@@ -175,6 +181,25 @@ async def _safe_reconcile_semaphore(
             semaphore_reconciled_total.labels(scope="user").inc()
     except Exception:
         log.exception("watchdog_semaphore_reconcile_failed")
+
+
+async def _safe_reconcile_queue_depth(
+    sessionmaker: async_sessionmaker[AsyncSession], publish: PublishQueueDepthFn
+) -> None:
+    """Republish the Postgres waiting-queue count every tick, unconditionally.
+
+    Depth is advisory and push-only, so any path that changes `playback_queue` without
+    publishing (a manual SQL delete, a missed publish) would otherwise leave every web
+    instance's cached depth wrong until the next enqueue/advance."""
+    try:
+        async with sessionmaker() as session:
+            depth = await count_waiting_depth(session)
+    except Exception:
+        log.exception("watchdog_queue_depth_count_failed")
+        return
+    await safe_publish_queue_depth(
+        publish, depth, log_event="watchdog_queue_depth_publish_failed"
+    )
 
 
 async def _drain_waiting_overdue(
@@ -360,6 +385,7 @@ async def _run_sweeps(
     notify: NotifyFn,
     publish_user_event: PublishUserEventFn,
     semaphore: Semaphore | None = None,
+    publish_queue_depth: PublishQueueDepthFn | None = None,
 ) -> None:
     """One tick: drain each of the five sweeps to exhaustion in turn (F2), each row's
     commit-then-best-effort-side-effect ordering handled by its own `_drain_*` helper
@@ -376,6 +402,8 @@ async def _run_sweeps(
     await _drain_terminal_failures(sessionmaker, rate_limiter, publish_user_event)
     if semaphore is not None:
         await _safe_reconcile_semaphore(sessionmaker, semaphore)
+    if publish_queue_depth is not None:
+        await _safe_reconcile_queue_depth(sessionmaker, publish_queue_depth)
 
 
 async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
@@ -393,6 +421,9 @@ async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
     # postgres DSN and doesn't understand that suffix (mirrors
     # `worker/dispatch.py::run_dispatch`).
     dsn = worker_asyncpg_dsn(settings)
+    publish_queue_depth = redis_queue_depth_publisher(
+        redis, settings.radio_queue_depth_channel
+    )
 
     async def _publish_user_event(user_id: str, message: str) -> None:
         await redis.publish(
@@ -420,6 +451,7 @@ async def run_watchdog(settings: Settings, stop: asyncio.Event) -> None:
                             _notify,
                             _publish_user_event,
                             semaphore,
+                            publish_queue_depth,
                         )
                         try:
                             await asyncio.wait_for(

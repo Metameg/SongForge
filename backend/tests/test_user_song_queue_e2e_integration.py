@@ -167,6 +167,11 @@ class _RecordingRedis:
     async def publish(self, channel: str, message: str) -> None:
         self.publish_calls.append((channel, message))
 
+    @property
+    def pointer_publishes(self) -> list[tuple[str, str]]:
+        """Publishes on the pointer channel only (advances also publish queue depth)."""
+        return [c for c in self.publish_calls if c[0] == "radio:pointer:changed"]
+
 
 async def test_submit_ingest_enqueue_advance_song_lands_on_the_pointer_and_publishes(
     _clean_rows: None,
@@ -348,8 +353,8 @@ async def test_submit_ingest_enqueue_advance_song_lands_on_the_pointer_and_publi
                 ).one()
                 assert queue_row.played_at is not None  # consumed by the applied CAS
 
-            assert len(redis.publish_calls) == 1
-            _channel, payload_raw = redis.publish_calls[0]
+            assert len(redis.pointer_publishes) == 1
+            _channel, payload_raw = redis.pointer_publishes[0]
             payload = json.loads(payload_raw)
             assert payload["song_id"] == song_id
         finally:

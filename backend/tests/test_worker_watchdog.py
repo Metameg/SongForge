@@ -66,6 +66,8 @@ from songforge.models import (
     JOB_STATE_WAITING_FOR_WEBHOOK,
     Base,
     Job,
+    PlaybackQueue,
+    Song,
 )
 from songforge.web.rate_limit import Identity
 from songforge.worker.watchdog import (
@@ -74,6 +76,7 @@ from songforge.worker.watchdog import (
     _drain_submitting_stuck,
     _drain_waiting_overdue,
     _run_sweeps,
+    _safe_reconcile_queue_depth,
 )
 
 
@@ -1278,3 +1281,66 @@ async def test_drain_expired_jobs_fails_overdue_and_releases_only_active_slots(
     assert states["fresh"] == JOB_STATE_QUEUED  # within the deadline -> untouched
     # Only the WAITING job held a slot; the QUEUED one never acquired one.
     assert spy.released == ["u-active"]
+
+
+# ── Queue-depth reconcile: republish Postgres truth every tick ───────────────────
+
+
+async def test_reconcile_queue_depth_publishes_the_unplayed_count(
+    real_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with real_sessionmaker() as session:
+        for sid in ("s1", "s2", "s3"):
+            session.add(
+                Song(id=sid, title=sid, source="generated", object_key=f"audio/{sid}.mp3")
+            )
+        session.add(PlaybackQueue(id=1, song_id="s1", job_id=None, played_at=_now()))
+        session.add(PlaybackQueue(id=2, song_id="s2", job_id=None))
+        session.add(PlaybackQueue(id=3, song_id="s3", job_id=None))
+        await session.commit()
+
+    published: list[int] = []
+
+    async def _publish(depth: int) -> None:
+        published.append(depth)
+
+    await _safe_reconcile_queue_depth(real_sessionmaker, _publish)
+
+    assert published == [2]
+
+
+async def test_reconcile_queue_depth_publishes_zero_for_an_empty_queue(
+    real_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The stuck-high case: nothing waiting must still publish 0, not skip."""
+    published: list[int] = []
+
+    async def _publish(depth: int) -> None:
+        published.append(depth)
+
+    await _safe_reconcile_queue_depth(real_sessionmaker, _publish)
+
+    assert published == [0]
+
+
+async def test_reconcile_queue_depth_swallows_publish_errors(
+    real_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async def _publish(depth: int) -> None:
+        raise RuntimeError("redis down")
+
+    await _safe_reconcile_queue_depth(real_sessionmaker, _publish)
+
+
+async def test_reconcile_queue_depth_skips_publish_when_the_count_fails() -> None:
+    published: list[int] = []
+
+    async def _publish(depth: int) -> None:
+        published.append(depth)
+
+    def _broken_sessionmaker() -> AsyncSession:
+        raise RuntimeError("db down")
+
+    await _safe_reconcile_queue_depth(_broken_sessionmaker, _publish)  # type: ignore[arg-type]
+
+    assert published == []

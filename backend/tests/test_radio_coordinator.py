@@ -311,6 +311,19 @@ class _FakeRedis:
             raise self._raise_on_publish
         self.publish_calls.append((channel, message))
 
+    @property
+    def pointer_publishes(self) -> list[tuple[str, str]]:
+        """Publishes on the pointer channel only (advances also publish queue depth)."""
+        return [c for c in self.publish_calls if c[0] == RADIO_POINTER_CHANNEL]
+
+    @property
+    def depth_publishes(self) -> list[int]:
+        return [
+            json.loads(m)["queue_depth"]
+            for ch, m in self.publish_calls
+            if ch == RADIO_QUEUE_DEPTH_CHANNEL
+        ]
+
 
 async def test_initialize_writes_the_resolved_view_to_the_redis_pointer_key(
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -452,6 +465,7 @@ async def test_advance_redis_write_failure_does_not_fail_the_advance(
 # (Postgres has already committed by that point).
 
 RADIO_POINTER_CHANNEL = "radio:pointer:changed"
+RADIO_QUEUE_DEPTH_CHANNEL = "radio:queue:depth"
 
 
 async def test_initialize_publishes_the_resolved_view_on_a_genuine_initialize(
@@ -466,8 +480,8 @@ async def test_initialize_publishes_the_resolved_view_on_a_genuine_initialize(
         state = await session.get(RadioState, 1)
         assert state is not None
 
-    assert len(redis.publish_calls) == 1
-    channel, payload_raw = redis.publish_calls[0]
+    assert len(redis.pointer_publishes) == 1
+    channel, payload_raw = redis.pointer_publishes[0]
     assert channel == RADIO_POINTER_CHANNEL
     payload = json.loads(payload_raw)
     assert payload["song_id"] == state.song_id
@@ -510,8 +524,8 @@ async def test_advance_publishes_the_updated_view_on_a_successful_cas(
         after = await session.get(RadioState, 1)
         assert after is not None
 
-    assert len(redis.publish_calls) == 1
-    channel, payload_raw = redis.publish_calls[0]
+    assert len(redis.pointer_publishes) == 1
+    channel, payload_raw = redis.pointer_publishes[0]
     assert channel == RADIO_POINTER_CHANNEL
     payload = json.loads(payload_raw)
     assert payload["song_id"] == after.song_id
@@ -614,8 +628,8 @@ async def test_initialize_pointer_publish_carries_the_same_album_cover_path(
     async with sessionmaker() as session:
         await initialize_if_absent(session, _StubHistory(), redis=redis)
 
-    assert len(redis.publish_calls) == 1
-    published = json.loads(redis.publish_calls[0][1])
+    assert len(redis.pointer_publishes) == 1
+    published = json.loads(redis.pointer_publishes[0][1])
     assert published["album_cover_path"] == COVER_URL
 
 
@@ -673,8 +687,8 @@ async def test_initialize_publishes_the_waiting_queue_depth(
     async with sessionmaker() as session:
         assert await initialize_if_absent(session, _StubHistory(), redis=redis) is True
 
-    assert len(redis.publish_calls) == 1
-    payload = json.loads(redis.publish_calls[0][1])
+    assert len(redis.pointer_publishes) == 1
+    payload = json.loads(redis.pointer_publishes[0][1])
     assert payload["queue_depth"] == 2
     assert json.loads(redis._store[RADIO_POINTER_REDIS_KEY])["queue_depth"] == 2
 
@@ -697,5 +711,54 @@ async def test_publish_survives_a_depth_count_error(
     async with sessionmaker() as session:
         assert await initialize_if_absent(session, _StubHistory(), redis=redis) is True
 
-    assert len(redis.publish_calls) == 1
-    assert json.loads(redis.publish_calls[0][1])["queue_depth"] is None
+    assert len(redis.pointer_publishes) == 1
+    assert json.loads(redis.pointer_publishes[0][1])["queue_depth"] is None
+    assert redis.depth_publishes == []
+
+
+async def test_advance_off_the_last_queued_song_publishes_depth_zero_on_the_depth_channel(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression: ingest only publishes depth on enqueue, so draining the queue to 0
+    must publish 0 on the depth channel too, or every web instance's
+    `last_known_depth()` stays stuck at the last enqueue-time count."""
+    from songforge.models import PlaybackQueue
+
+    await _add_songs(sessionmaker, "song-1", "song-2", "user-song")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        state = await session.get(RadioState, 1)
+        assert state is not None
+        version = state.version
+        session.add(PlaybackQueue(id=1, song_id="user-song", job_id=None))
+        await session.commit()
+
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        assert (
+            await advance(session, _StubHistory(), expected_version=version, redis=redis)
+            is True
+        )
+
+    assert json.loads(redis.pointer_publishes[0][1])["song_id"] == "user-song"
+    assert redis.depth_publishes == [0]
+
+
+async def test_static_advance_republishes_the_current_depth(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_songs(sessionmaker, "song-1", "song-2")
+    async with sessionmaker() as session:
+        await initialize_if_absent(session, _StubHistory())
+        state = await session.get(RadioState, 1)
+        assert state is not None
+        version = state.version
+
+    redis = _FakeRedis()
+    async with sessionmaker() as session:
+        assert (
+            await advance(session, _StubHistory(), expected_version=version, redis=redis)
+            is True
+        )
+
+    assert redis.depth_publishes == [0]

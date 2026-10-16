@@ -56,6 +56,7 @@ from songforge.models import (
 )
 from songforge.radio.pointer_cache import PointerRecord
 from songforge.radio.queue import count_waiting_depth, pop_next_user_song
+from songforge.radio.queue_depth import redis_queue_depth_publisher, safe_publish_queue_depth
 from songforge.radio.selection import pick_static
 from songforge.radio.state import NowPlayingView
 from songforge.storage import get_storage
@@ -118,6 +119,15 @@ async def _write_pointer_best_effort(
         radio_pointer_events_published_total.inc()
     except Exception:
         log.warning("radio_pointer_write_failed", song_id=song.id, exc_info=True)
+    # Ingest only publishes depth when a song is enqueued; without this, a drain to a
+    # lower count leaves every web instance's `QueueDepthBroadcaster.last_known_depth()`
+    # stuck high, and new connections start from that stale value.
+    if depth is not None:
+        await safe_publish_queue_depth(
+            redis_queue_depth_publisher(redis, settings.radio_queue_depth_channel),
+            depth,
+            log_event="radio_queue_depth_publish_failed",
+        )
 
 
 class RecentHistoryStore(Protocol):
