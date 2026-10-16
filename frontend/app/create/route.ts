@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { backendUrl } from "../../lib/backend";
 
 /**
  * Runtime proxy for POST /create (issue #36). Mirrors `app/quota/route.ts`: forwards the
@@ -15,13 +16,12 @@ export const dynamic = "force-dynamic";
 const BOT_CHECK_HEADER = process.env.BOT_CHECK_HEADER || "x-bot-check";
 
 export async function POST(request: Request) {
-  const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
   const cookie = request.headers.get("cookie");
   const botCheck = request.headers.get(BOT_CHECK_HEADER);
   const contentType = request.headers.get("content-type") ?? "application/json";
   const body = await request.text();
   try {
-    const upstream = await fetch(`${backendUrl}/create`, {
+    const upstream = await fetch(await backendUrl("/create"), {
       method: "POST",
       cache: "no-store",
       headers: {

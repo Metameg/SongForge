@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { backendUrl } from "../../../lib/backend";
 
 /**
  * Same-origin proxy for the download redirect (issue #39). Forwards to backend
@@ -15,10 +16,9 @@ export async function GET(
   { params }: { params: Promise<{ songId: string }> },
 ) {
   const { songId } = await params;
-  const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
   const cookie = request.headers.get("cookie");
   try {
-    const upstream = await fetch(`${backendUrl}/download/${encodeURIComponent(songId)}`, {
+    const upstream = await fetch(await backendUrl(`/download/${encodeURIComponent(songId)}`), {
       cache: "no-store",
       redirect: "manual",
       headers: cookie ? { cookie } : {},

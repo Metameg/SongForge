@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { backendUrl } from "../../lib/backend";
 
 /**
  * Server-side runtime proxy for the radio pointer read (issue #8).
@@ -18,9 +19,8 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
   try {
-    const upstream = await fetch(`${backendUrl}/now-playing`, { cache: "no-store" });
+    const upstream = await fetch(await backendUrl("/now-playing"), { cache: "no-store" });
     const body = await upstream.text();
     return new NextResponse(body, {
       status: upstream.status,

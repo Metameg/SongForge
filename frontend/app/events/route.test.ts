@@ -43,4 +43,21 @@ describe("GET /events proxy", () => {
     expect(res.body).not.toBeNull();
     expect(fetchMock.mock.calls[0][1].signal).toBe(request.signal);
   });
+
+  // EventSource permanently gives up on a non-200, so failures must end as a 200 stream
+  // carrying a retry hint, which the browser treats as a reconnectable drop.
+  it("answers an unreachable backend with a reconnectable SSE stream, not an error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    expect(await res.text()).toMatch(/^retry: \d+\n\n$/);
+  });
+
+  it("answers a non-200 backend (e.g. overload 503) with a reconnectable SSE stream", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("busy", { status: 503 })));
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/^retry: \d+\n\n$/);
+  });
 });

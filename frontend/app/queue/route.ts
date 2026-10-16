@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { backendUrl } from "../../lib/backend";
 
 /**
  * Server-side runtime proxy for the queue read (issue #38). Mirrors `app/quota/route.ts`:
@@ -9,10 +10,9 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  const backendUrl = process.env.BACKEND_URL || "http://localhost:8000";
   const cookie = request.headers.get("cookie");
   try {
-    const upstream = await fetch(`${backendUrl}/queue`, {
+    const upstream = await fetch(await backendUrl("/queue"), {
       cache: "no-store",
       headers: cookie ? { cookie } : {},
     });
