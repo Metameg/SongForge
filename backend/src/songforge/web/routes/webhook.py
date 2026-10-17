@@ -27,7 +27,7 @@ import hmac
 from collections.abc import AsyncGenerator, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +69,9 @@ class WebhookPayload(BaseModel):
     when absent so a payload that simply omits it is NOT treated as a declared failure.
     Unlisted real fields (``conversion_path_wav``, ``is_flagged``, ``reason``,
     ``lyrics``...) are ignored by pydantic's default ``extra``."""
+
+    # Keep unlisted fields so the received shape can be logged (names only).
+    model_config = ConfigDict(extra="allow")
 
     subtype: str = "music_ai"
     task_id: str
@@ -239,13 +242,27 @@ async def receive_webhook(
             )
             return WebhookResponse()
 
-        if body.success is False or body.conversion_path is None:
-            # A declared failure (`success: false`, the real MusicGPT failure signal),
-            # or a success-shaped payload missing the one field ingest needs -- either
-            # way unrecoverable without a real audio URL. `is False` (not falsy): an
-            # absent `success` must NOT fail an otherwise-complete payload. Quota refund
-            # + user SSE notify on failure is the watchdog's terminal sweep; this only
-            # flips the state (and releases the slot below).
+        if body.success is not False and body.conversion_path is None:
+            # Real MusicGPT sends an early `success: true` callback with no audio yet
+            # (seen in prod ~2s before the audio callback for the same task). Not a
+            # failure: answer 200 and keep waiting for the callback that carries
+            # `conversion_path`; the watchdog's /byId poll recovers the job if it
+            # never comes.
+            webhooks_received_total.labels(outcome="no_audio_yet").inc()
+            log.info(
+                "webhook_no_audio_yet",
+                task_id=body.task_id,
+                conversion_type=(body.model_extra or {}).get("conversion_type"),
+                fields=sorted(set(body.model_fields_set) | set(body.model_extra or {})),
+            )
+            return WebhookResponse()
+
+        if body.success is False:
+            # A declared failure (`success: false`, the real MusicGPT failure signal).
+            # `is False` (not falsy): an absent `success` must NOT fail an otherwise-
+            # complete payload. Quota refund + user SSE notify on failure is the
+            # watchdog's terminal sweep; this only flips the state (and releases the
+            # slot below).
             job.state = JOB_STATE_FAILED
             await session.commit()
             webhooks_received_total.labels(outcome="failed").inc()

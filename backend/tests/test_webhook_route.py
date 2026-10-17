@@ -389,23 +389,55 @@ async def test_webhook_failure_signal_marks_the_job_failed(
     assert notify_spy.calls == []
 
 
-async def test_webhook_missing_conversion_path_marks_the_job_failed(
+async def test_webhook_success_without_audio_keeps_waiting(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Belt-and-braces: even a `success`-shaped payload with no usable `conversion_path`
-    is unrecoverable, so it also fails the job."""
+    """Real MusicGPT sends an early `success: true` callback with no audio before the
+    audio callback. That must not fail the job: it stays WAITING, nothing is notified."""
     await _insert_job(sessionmaker)
     client, notify_spy = _build_client(sessionmaker)
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_webhook_body(conversion_path=None),  # success omitted -> defaults True
+        json=_webhook_body(conversion_path=None, conversion_type="LYRICS"),
     )
 
     assert resp.status_code == 200
     job = await _get_job(sessionmaker, "job-1")
-    assert job.state == JOB_STATE_FAILED
+    assert job.state == JOB_STATE_WAITING_FOR_WEBHOOK
     assert notify_spy.calls == []
+
+
+async def test_audio_webhook_after_an_early_no_audio_one_still_ingests(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The prod sequence: early no-audio callback, then the audio one 2s later."""
+    await _insert_job(sessionmaker)
+    client, notify_spy = _build_client(sessionmaker)
+
+    client.post("/api/generation/webhook", json=_webhook_body(conversion_path=None))
+    resp = client.post("/api/generation/webhook", json=_webhook_body())
+
+    assert resp.status_code == 200
+    job = await _get_job(sessionmaker, "job-1")
+    assert job.state == JOB_STATE_INGEST_PENDING
+    assert job.audio_url == "http://musicgpt.test/audio/hint-token"
+    assert len(notify_spy.calls) == 1
+
+
+async def test_declared_failure_without_audio_still_marks_the_job_failed(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _insert_job(sessionmaker)
+    client, _ = _build_client(sessionmaker)
+
+    resp = client.post(
+        "/api/generation/webhook",
+        json=_webhook_body(conversion_path=None, success=False),
+    )
+
+    assert resp.status_code == 200
+    assert (await _get_job(sessionmaker, "job-1")).state == JOB_STATE_FAILED
 
 
 async def test_webhook_failure_status_is_idempotent_too(
