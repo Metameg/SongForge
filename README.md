@@ -18,7 +18,7 @@ maxed out and request latency crossed the test's thresholds.
 
 | `web` replicas | `frontend` replicas | Peak SSE listeners | Peak request rate |
 |:---:|:---:|---:|---:|
-| 1 | 1 | ~1.35k | ~145 req/s |
+| **1** | **1** | **~1.35k** | **~145 req/s** |
 | 2 | 2 | ~2.5k | ~201 req/s |
 | 3 | 2 | ~4.6k | ~480 req/s |
 
