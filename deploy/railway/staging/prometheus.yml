@@ -1,0 +1,29 @@
+global:
+  # Conservative interval -- this agent only scrapes and forwards; it isn't a
+  # load-test-grade local TSDB like the local-dev `prometheus.yml`.
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  # Filled from the ENVIRONMENT variable at container start (Dockerfile.grafana-agent),
+  # so staging and prod series stay separate in the shared Grafana Cloud stack.
+  external_labels:
+    environment: "${ENVIRONMENT}"
+
+scrape_configs:
+  - job_name: songforge_web
+    dns_sd_configs:
+      - names: [web.railway.internal]
+        type: A
+        port: 8000
+        refresh_interval: 10s
+  - job_name: songforge_worker
+    dns_sd_configs:
+      - names: [worker.railway.internal]
+        type: A
+        port: 9100
+        refresh_interval: 10s
+
+remote_write:
+  - url: "${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}"
+    basic_auth:
+      username: "${GRAFANA_CLOUD_PROMETHEUS_USERNAME}"
+      password: "${GRAFANA_CLOUD_API_KEY}"

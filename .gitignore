@@ -2,3 +2,25 @@
 Genesis
 genesis_mp4s
 /app/__pycache__/*
+
+# ── Greenfield scaffold ───────────────────────────────────────────────────────
+# Python
+**/__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+
+# Local data / dumps
+dump.rdb
+
+# Throwaway signed test identities for load testing (regenerate via mint-cookies.py)
+loadtest/cookies.json
+
+# uv-generated lockfile from local test tooling (project uses pip/venv, not uv)
+backend/uv.lock

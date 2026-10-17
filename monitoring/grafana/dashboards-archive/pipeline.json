@@ -1,0 +1,127 @@
+{
+  "id": null,
+  "uid": "songforge-pipeline",
+  "title": "SongForge Pipeline",
+  "description": "Issue #18 AC2: live pipeline view -- jobs by state, generation-semaphore utilization, and failure/refund rates.",
+  "tags": ["songforge", "pipeline", "issue-18"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Jobs by state",
+      "type": "timeseries",
+      "description": "songforge_jobs_in_state{state} -- point-in-time job counts per pipeline state (QUEUED, SUBMITTING, WAITING_FOR_WEBHOOK, INGEST_PENDING, READY, FAILED), scraped from Postgres by metrics_pipeline's scrape-time refresh at every /metrics scrape.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "songforge_jobs_in_state",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "stacking": { "mode": "normal" } } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Generation-slot utilization",
+      "type": "timeseries",
+      "description": "songforge_generation_slots_in_use{scope} against songforge_generation_slots_capacity{scope=\"global\"} -- how full the global generation semaphore is (only scope=\"global\" has a meaningful capacity; scope=\"user\" is a sum across however many users currently hold a slot).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "songforge_generation_slots_in_use",
+          "legendFormat": "in_use {{scope}}",
+          "refId": "A"
+        },
+        {
+          "expr": "songforge_generation_slots_capacity",
+          "legendFormat": "capacity {{scope}}",
+          "refId": "B"
+        },
+        {
+          "expr": "songforge_generation_slots_in_use{scope=\"global\"} / songforge_generation_slots_capacity{scope=\"global\"}",
+          "legendFormat": "global utilization ratio",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Terminal failure rate (by path)",
+      "type": "timeseries",
+      "description": "Terminal job failures broken out by the code path that recorded them, because no single counter captures all of them: dispatch rejections increment songforge_jobs_failed_total, a failure webhook increments songforge_webhooks_received_total{outcome=\"failed\"}, and the watchdog's terminal ingest-escalation increments songforge_watchdog_recovered_total{path=\"ingest_escalated_failed\"}. Charting only jobs_failed_total would read a false zero during webhook- or watchdog-driven incidents. (Ingest failures have their own panel.)",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(songforge_jobs_failed_total[5m])",
+          "legendFormat": "dispatch rejected/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(songforge_webhooks_received_total{outcome=\"failed\"}[5m])",
+          "legendFormat": "webhook failed/s",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(songforge_watchdog_recovered_total{path=\"ingest_escalated_failed\"}[5m])",
+          "legendFormat": "watchdog terminal/s",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Ingest failure rate",
+      "type": "timeseries",
+      "description": "rate(songforge_ingest_failed_total[5m]) -- audio-ingest failures per second (R2/webhook path).",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(songforge_ingest_failed_total[5m])",
+          "legendFormat": "ingest failed/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Quota refund rate",
+      "type": "timeseries",
+      "description": "rate(songforge_quota_refunded_total[5m]) -- quota refunds issued per second when a job fails after consuming a user's daily-quota slot.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "targets": [
+        {
+          "expr": "rate(songforge_quota_refunded_total[5m])",
+          "legendFormat": "quota refunded/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" },
+        "overrides": []
+      }
+    }
+  ]
+}

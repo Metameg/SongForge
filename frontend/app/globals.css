@@ -1,0 +1,335 @@
+/*
+ * SongForge design system (issue #38 UI polish).
+ *
+ * Centralized tokens + the handful of rules that need pseudo-classes/keyframes (focus
+ * glow, hover lift, the indeterminate progress sweep) which inline styles can't express.
+ * Dark-first "signal/radio" aesthetic: near-black base, one cyan/teal accent used only
+ * for key moments, red reserved for the LIVE dot. Components keep their inline layout
+ * styles and reference these tokens via var().
+ */
+
+:root {
+  /* Surfaces */
+  --sf-bg: #0b0b0f;
+  --sf-surface: #15151d;
+  --sf-surface-2: #1b1b25;
+  --sf-border: #262630;
+  --sf-border-strong: #343443;
+
+  /* Text */
+  --sf-text: #f2f3f5;
+  --sf-muted: #a2a8b4;
+  --sf-faint: #727885;
+
+  /* Accent — electric cyan/teal. Gradient only for key moments. */
+  --sf-accent: #22d3ee;
+  --sf-accent-2: #2dd4bf;
+  --sf-accent-grad: linear-gradient(135deg, #22d3ee 0%, #2dd4bf 100%);
+  --sf-accent-ink: #04161b;
+  --sf-accent-glow: rgba(34, 211, 238, 0.30);
+  --sf-accent-soft: rgba(34, 211, 238, 0.12);
+
+  /* Status */
+  --sf-live: #ff2d2d;
+  --sf-danger: #ff7a7a;
+  --sf-danger-soft: rgba(255, 122, 122, 0.12);
+
+  /* Shape + depth */
+  --sf-radius: 14px;
+  --sf-radius-sm: 10px;
+  --sf-pill: 999px;
+  --sf-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+  --sf-shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.4);
+
+  /* Type */
+  --sf-font-body: var(--font-body), system-ui, -apple-system, sans-serif;
+  --sf-font-display: var(--font-display), var(--font-body), system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+}
+
+body {
+  background: var(--sf-bg);
+  color: var(--sf-text);
+  font-family: var(--sf-font-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Atmosphere: a soft accent-tinted glow pooling at the top of the stage, fading to the
+     flat near-black base. Fixed so it doesn't scroll with content. */
+  background-image:
+    radial-gradient(900px 480px at 50% -8%, rgba(34, 211, 238, 0.10), transparent 70%),
+    radial-gradient(700px 420px at 50% -4%, rgba(45, 212, 191, 0.06), transparent 72%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Wordmark */
+.sf-wordmark {
+  font-family: var(--sf-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* Accessible focus ring for every interactive element. */
+.sf-field:focus-visible,
+.sf-btn:focus-visible,
+.sf-toggle:focus-visible {
+  outline: 2px solid var(--sf-accent);
+  outline-offset: 2px;
+}
+
+/* Inputs */
+.sf-field {
+  width: 100%;
+  background: var(--sf-surface);
+  color: var(--sf-text);
+  border: 1px solid var(--sf-border);
+  border-radius: var(--sf-radius);
+  padding: 13px 15px;
+  font-size: 16px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+}
+.sf-field::placeholder {
+  color: var(--sf-faint);
+}
+.sf-field:hover {
+  border-color: var(--sf-border-strong);
+}
+.sf-field:focus {
+  outline: none;
+  border-color: var(--sf-accent);
+  background: var(--sf-surface-2);
+  box-shadow: 0 0 0 3px var(--sf-accent-soft), 0 0 22px -6px var(--sf-accent-glow);
+}
+
+/* Primary action: accent gradient pill with a hover lift + glow. */
+.sf-btn {
+  font-family: var(--sf-font-body);
+  cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease,
+    background 0.16s ease, border-color 0.16s ease;
+}
+.sf-btn-primary {
+  padding: 0.72rem 1.6rem;
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: var(--sf-pill);
+  border: none;
+  color: var(--sf-accent-ink);
+  background: var(--sf-accent-grad);
+  box-shadow: 0 6px 20px -8px var(--sf-accent-glow);
+}
+.sf-btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px -8px var(--sf-accent-glow);
+}
+.sf-btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+.sf-btn-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  background: var(--sf-surface-2);
+  color: var(--sf-muted);
+  box-shadow: none;
+}
+
+/* Ghost toggle (Add lyrics). */
+.sf-toggle {
+  background: none;
+  border: none;
+  color: var(--sf-muted);
+  cursor: pointer;
+  padding: 2px 0;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.16s ease;
+}
+.sf-toggle:hover {
+  color: var(--sf-text);
+}
+
+/* Small bordered pill (songs-left readout). */
+.sf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--sf-muted);
+  background: var(--sf-surface);
+  border: 1px solid var(--sf-border);
+  border-radius: var(--sf-pill);
+}
+.sf-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sf-accent);
+  box-shadow: 0 0 8px 0 var(--sf-accent-glow);
+}
+
+/* Card surface for status zones. */
+.sf-card {
+  background: linear-gradient(180deg, var(--sf-surface) 0%, var(--sf-bg) 140%);
+  border: 1px solid var(--sf-border);
+  border-radius: var(--sf-radius);
+  box-shadow: var(--sf-shadow-sm);
+}
+
+/* Queue stat */
+.sf-stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sf-faint);
+}
+.sf-stat-num {
+  font-family: var(--sf-font-display);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--sf-text);
+}
+
+/* Position badges */
+.sf-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--sf-pill);
+  font-weight: 600;
+  font-size: 13.5px;
+  letter-spacing: 0.01em;
+}
+.sf-badge-pos {
+  padding: 6px 13px;
+  color: var(--sf-text);
+  background: var(--sf-surface-2);
+  border: 1px solid var(--sf-border-strong);
+}
+.sf-badge-next {
+  padding: 7px 15px;
+  color: var(--sf-accent-ink);
+  background: var(--sf-accent-grad);
+  box-shadow: 0 6px 22px -8px var(--sf-accent-glow);
+  position: relative;
+  overflow: hidden;
+}
+/* Sheen that sweeps across the "next up" badge. */
+.sf-badge-next::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    110deg,
+    transparent 25%,
+    rgba(255, 255, 255, 0.45) 50%,
+    transparent 75%
+  );
+  transform: translateX(-100%);
+  animation: sf-sheen 3.4s ease-in-out infinite;
+}
+
+/* Generation progress bar */
+.sf-progress-track {
+  position: relative;
+  height: 6px;
+  width: 100%;
+  border-radius: var(--sf-pill);
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.sf-progress-indeterminate {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 42%;
+  border-radius: var(--sf-pill);
+  background: var(--sf-accent-grad);
+  box-shadow: 0 0 16px 0 var(--sf-accent-glow);
+  animation: sf-indeterminate 1.35s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+.sf-progress-fill {
+  height: 100%;
+  width: 100%;
+  border-radius: var(--sf-pill);
+  background: var(--sf-accent-grad);
+}
+.sf-progress-fill.is-failed {
+  background: linear-gradient(135deg, #ff7a7a, #ff5252);
+}
+
+/* Alert (inline create errors) */
+.sf-alert {
+  margin: 0;
+  padding: 10px 13px;
+  font-size: 14px;
+  border-radius: var(--sf-radius-sm);
+  color: var(--sf-danger);
+  background: var(--sf-danger-soft);
+  border: 1px solid rgba(255, 122, 122, 0.3);
+}
+
+@keyframes sf-indeterminate {
+  0% {
+    left: -42%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+@keyframes sf-sheen {
+  0%,
+  18% {
+    transform: translateX(-100%);
+  }
+  55%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+@keyframes sf-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.sf-rise {
+  animation: sf-rise 0.3s ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sf-progress-indeterminate,
+  .sf-badge-next::after,
+  .sf-rise {
+    animation: none !important;
+  }
+  .sf-btn,
+  .sf-field {
+    transition: none !important;
+  }
+  .sf-badge-next::after {
+    display: none;
+  }
+}

@@ -1,0 +1,506 @@
+# SongForge local stack: FastAPI web, Python worker, Next.js frontend against
+# Postgres, Redis, and MinIO. `docker compose up` brings the whole thing up healthy.
+#
+# Ordering guarantee (acceptance criterion #2): the one-shot `migrate` service runs the
+# boot sequence (migrations + static-library seed) to completion; `web` and `worker` wait
+# for it via `service_completed_successfully` before they start.
+#
+# Multi-instance topology (issue #19, PRD #6 AC#1-#3): an `lb` (nginx) service fronts N
+# stateless `web` replicas, a `pgbouncer` service fans in the web tier's Postgres
+# connections, and `worker` scales to N=2-3 for HA (row-claim parallelism + a single
+# advisory-lock leader -- already built by #12/#13/#16/#17; this slice just runs N of
+# them). See docs/deploy.md and README's "Multi-instance & deploy" section for the
+# bring-up commands (`--scale`) and the local kill-leader / failover smoke check.
+
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # Issue #19 (PRD #6 AC#2): this shared default points at PgBouncer, not Postgres
+  # directly -- it's what `web` (the only service that doesn't override it below)
+  # actually uses. `migrate` and `worker` explicitly OVERRIDE this back to a direct
+  # `postgres:5432` URL in their own `environment:` blocks below, because:
+  #   - `worker`'s advisory-lock + LISTEN/NOTIFY connections MUST bypass a transaction
+  #     pooler (PgBouncer transaction mode does not support session-level features at
+  #     all -- a pooled LISTEN/NOTIFY or advisory lock silently stops working, which is
+  #     worse than an error: it can silently produce two "leaders").
+  #   - `migrate` runs Alembic DDL (and its own locking) at boot; DDL and migration
+  #     tooling are unsafe/undefined under transaction-mode pooling, same reasoning.
+  # `DB_PGBOUNCER_TRANSACTION_MODE=true` (below, on `web` only) tells the app to disable
+  # asyncpg's server-side prepared-statement cache to match -- see config.py/db.py.
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@pgbouncer:6432/${POSTGRES_DB:-songforge}
+  REDIS_URL: redis://redis:6379/0
+  # Web engine SQLAlchemy pool sizing (per web PROCESS). Defaults match SQLAlchemy's own
+  # (5 + 10 = 15); raise via .env under a load test to move the connection bottleneck
+  # downstream to PgBouncer, then Postgres. Visible on the connection-saturation board.
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-songforge}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-songforge-secret}
+  S3_BUCKET: ${S3_BUCKET:-songforge-audio}
+  S3_REGION: ${S3_REGION:-auto}
+  # Browser-reachable audio base URL. Blank/unset here would fall back (in the app) to
+  # the internal S3_ENDPOINT_URL (http://minio:9000), which the SERVER can reach but a
+  # BROWSER cannot (ERR_NAME_NOT_RESOLVED on <audio> playback). So default it to the
+  # MinIO port published on the host, mirroring prod's browser→CDN direct-serve model.
+  # Points at the same MINIO_HOST_PORT/S3_BUCKET the rest of the stack uses, so it stays
+  # correct even when those are overridden (e.g. a second worktree on different ports).
+  S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL:-http://localhost:${MINIO_HOST_PORT:-59000}/${S3_BUCKET:-songforge-audio}}
+  # Browser-reachable endpoint used ONLY to SIGN presigned download URLs (issue #39,
+  # GET /download). Unlike playback (a plain public URL), a presigned GET's SigV4
+  # signature covers the host, so it must be signed against the host the browser
+  # connects to -- not the internal S3_ENDPOINT_URL (minio:9000), which would 302 the
+  # browser to an unreachable host. Host-mapped MinIO, no bucket path (path-style adds
+  # it). Left unset in prod, where S3_ENDPOINT_URL (R2) is already browser-reachable.
+  S3_PRESIGN_ENDPOINT_URL: ${S3_PRESIGN_ENDPOINT_URL:-http://localhost:${MINIO_HOST_PORT:-59000}}
+  STATIC_LIBRARY_DIR: /app/static-library
+  MUSICGPT_BASE_URL: ${MUSICGPT_BASE_URL:-http://simulator:8080}
+  MUSICGPT_API_KEY: ${MUSICGPT_API_KEY:-}
+  ENFORCE_RATE_LIMITS: ${ENFORCE_RATE_LIMITS:-true}
+  # Issue #15: daily-quota caps, window, client-IP resolution, and the bot-check gate --
+  # forwarded here so they are tunable via .env without a rebuild (criterion #4). Caps
+  # default to the code defaults; BOT_CHECK_TOKEN blank leaves the bot check disabled.
+  ANON_DAILY_SONGS_PER_COOKIE: ${ANON_DAILY_SONGS_PER_COOKIE:-2}
+  ANON_DAILY_SONGS_PER_IP: ${ANON_DAILY_SONGS_PER_IP:-6}
+  ACCOUNTS_PER_IP: ${ACCOUNTS_PER_IP:-2}
+  AUTHED_DAILY_SONGS: ${AUTHED_DAILY_SONGS:-10}
+  PER_USER_CONCURRENT_JOBS: ${PER_USER_CONCURRENT_JOBS:-2}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-86400}
+  CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-}
+  BOT_CHECK_HEADER: ${BOT_CHECK_HEADER:-X-Bot-Check}
+  BOT_CHECK_TOKEN: ${BOT_CHECK_TOKEN:-}
+  # Issue #12: signed-cookie identity + job-queue dispatch. SESSION_SECRET MUST be
+  # overridden in prod (see .env.example) -- the dev-insecure default is fine locally.
+  SESSION_SECRET: ${SESSION_SECRET:-dev-insecure-change-me}
+  MUSICGPT_WEBHOOK_URL: ${MUSICGPT_WEBHOOK_URL:-http://web:8000/api/generation/webhook}
+
+x-backend-build: &backend-build
+  build:
+    context: ./backend
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    # Hard cap on total backends (Postgres uses one process per connection, so this is
+    # kept modest and a pooler fans many clients into few backends). The connection
+    # BUDGET that must fit under it:
+    #   pgbouncer DEFAULT_POOL_SIZE                         (web tier, via pgbouncer)
+    #   + Σ workers of (~10 fixed LISTEN/NOTIFY/lock conns + DB_POOL_SIZE session pool)  (DIRECT)
+    #   + exporters (~2)  + superuser_reserved (3)
+    #   <=  max_connections
+    # The WEB app pool does NOT count here (it hits pgbouncer, which is bounded by
+    # DEFAULT_POOL_SIZE). Raise POSTGRES_MAX_CONNECTIONS only when you want more real
+    # write throughput -- not to paper over an oversized pool.
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-100}"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-songforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-songforge}
+      POSTGRES_DB: ${POSTGRES_DB:-songforge}
+    ports:
+      # Host port is overridable to avoid collisions with a local/other Postgres;
+      # the stack itself always talks to postgres:5432 over the compose network.
+      - "${POSTGRES_HOST_PORT:-55432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-songforge} -d ${POSTGRES_DB:-songforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Issue #19 (PRD #6 AC#2): transaction-pooling PgBouncer in front of `postgres`,
+  # fanning in the web tier's connections so N `web` replicas don't each hold a large
+  # idle pool directly against Postgres. `worker` and `migrate` bypass this entirely
+  # (see the `DATABASE_URL` comment on `x-backend-env` above) -- only `web` talks to it.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    environment:
+      # Bootstrap URL edoburu's entrypoint parses to generate pgbouncer.ini +
+      # userlist.txt -- plain `postgresql://` (not `+asyncpg`), and NOT the same env
+      # var name as the app's `DATABASE_URL` (this is pgbouncer's OWN upstream target,
+      # i.e. the real Postgres it pools, not something the app ever reads here).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+      POOL_MODE: transaction
+      LISTEN_PORT: 6432
+      # Matches Postgres 16's default `password_encryption` so the plaintext
+      # password edoburu stores in userlist.txt for AUTH_TYPE=scram-sha-256/plain
+      # round-trips a real SCRAM handshake to the backend.
+      AUTH_TYPE: scram-sha-256
+      # Placeholder sizing -- deliberately NOT tuned here; tune against issue #18's
+      # k6 load-test harness once real concurrency numbers exist (PRD explicitly
+      # scopes exact pool sizing as out-of-scope for this slice).
+      MAX_CLIENT_CONN: ${PGBOUNCER_MAX_CLIENT_CONN:-200}
+      DEFAULT_POOL_SIZE: ${PGBOUNCER_DEFAULT_POOL_SIZE:-20}
+      # Grant the app user read-only access to PgBouncer's own stats console
+      # (SHOW STATS / SHOW POOLS) so `pgbouncer_exporter` (monitoring profile) can
+      # scrape pool utilization. Least privilege: stats_users can read counters, not
+      # run admin ops. edoburu maps this env to pgbouncer.ini's `stats_users`.
+      STATS_USERS: ${POSTGRES_USER:-songforge}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # pg_isready just needs a TCP-level "accepting connections" answer -- it
+      # doesn't need to authenticate, so it works against pgbouncer without a
+      # real client credential. (edoburu's image ships Postgres's own client
+      # tools alongside pgbouncer itself.)
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "6432"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_HOST_PORT:-56379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # Pinned for a reproducible one-command environment (this release ships curl,
+    # which the healthcheck below uses).
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-songforge}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-songforge-secret}
+    ports:
+      - "${MINIO_HOST_PORT:-59000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-59001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot boot: migrate schema + seed static library, then exit 0.
+  migrate:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+      # Issue #19 (PRD #6 AC#2): DIRECT to Postgres, bypassing pgbouncer -- Alembic's
+      # DDL + migration locking is unsafe/undefined under transaction-mode pooling.
+      # See the rationale on the `x-backend-env` anchor's `DATABASE_URL` above.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+    command: ["songforge-boot"]
+    volumes:
+      - ./app/static/audios:/app/static-library:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+      # Issue #19 (PRD #6 AC#2): only the pooled web engine (`db.get_engine()`) needs
+      # asyncpg's server-side prepared-statement cache disabled -- PgBouncer
+      # transaction-mode pooling can silently hand a logical connection a different
+      # backend session between statements, which breaks server-side prepare/execute.
+      DB_PGBOUNCER_TRANSACTION_MODE: "true"
+      # Security Phase-5 fix (HIGH): trust X-Forwarded-For for the per-IP rate cap ONLY
+      # because `lb` (loadbalancer/nginx.conf) OVERWRITES this header with the real TCP
+      # peer (`proxy_set_header X-Forwarded-For $remote_addr;`) rather than appending to
+      # whatever the client sent. `web` is reachable ONLY through `lb` (no host port of
+      # its own, see below), so nginx is genuinely the single hop in front of every
+      # request -- the leftmost-token trust in web/identity.py::client_ip is therefore
+      # unspoofable. Set only here (not the shared x-backend-env default, which stays
+      # blank for `worker`/`migrate`/`simulator`, none of which resolve a client IP).
+      CLIENT_IP_HEADER: "X-Forwarded-For"
+      # Web pool sizing, INDEPENDENT from the worker (overrides the x-backend-env default).
+      # The web tier serves many concurrent independent requests and sits BEHIND pgbouncer,
+      # so a large pool is safe: pgbouncer fans these into its own bounded server pool, so
+      # they never reach Postgres 1:1. Raise WEB_DB_POOL_SIZE under a load test to push
+      # more concurrent transactions at pgbouncer.
+      DB_POOL_SIZE: ${WEB_DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${WEB_DB_MAX_OVERFLOW:-10}
+    command: ["songforge-web"]
+    # No host port published here (issue #19, AC#1): traffic is meant to reach `web`
+    # ONLY through the `lb` service below, which is also what makes `--scale web=N`
+    # possible at all -- N replicas can't all bind the same static host port. Publish
+    # `${LB_HOST_PORT:-8000}` on `lb` instead. For single-instance local debugging of
+    # one specific replica, use `docker compose exec web ...` or a temporary
+    # `docker compose port web 8000`.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health/ready').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    deploy:
+      # Swarm-only field -- plain `docker compose up` (non-Swarm) silently IGNORES
+      # `deploy.replicas`. It's left here as documentation of the intended N, but the
+      # authoritative way to actually run N locally is `docker compose up --scale
+      # web=N` (see README's "Multi-instance & deploy" section / docs/deploy.md).
+      replicas: 2
+
+  # Load balancer in front of `web` (issue #19, PRD #6 AC#1). See loadbalancer/nginx.conf
+  # for the DNS-re-resolution note (nginx must re-resolve `web` as it scales).
+  lb:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./loadbalancer/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "${LB_HOST_PORT:-8000}:80"
+    depends_on:
+      web:
+        condition: service_healthy
+
+  worker:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+      # Issue #19 (PRD #6 AC#2): DIRECT to Postgres, bypassing pgbouncer -- the
+      # worker's advisory-lock connection (radio leader election, #17) and all four
+      # LISTEN/NOTIFY connections (dispatch/watchdog/radio_coordinator/ingest) must
+      # never be handed off mid-lifetime by a transaction pooler. See the rationale
+      # on the `x-backend-env` anchor's `DATABASE_URL` above.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}
+      # Worker pool sizing, INDEPENDENT from web and DELIBERATELY SMALL (overrides the
+      # x-backend-env default). The worker runs a FIXED set of loops (dispatch / ingest /
+      # radio / watchdog), each using at most one session at a time, and connects DIRECTLY
+      # to Postgres (no pgbouncer to fan it in). A big pool here is a footgun: every
+      # connection it opens hits Postgres 1:1 and QueuePool keeps up to pool_size open
+      # indefinitely. ~5 covers the loops with headroom; the ~10 fixed LISTEN/NOTIFY/lock
+      # connections are separate and NOT governed by this. See the max_connections budget.
+      DB_POOL_SIZE: ${WORKER_DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${WORKER_DB_MAX_OVERFLOW:-2}
+    command: ["songforge-worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "songforge.worker.health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      # Same Swarm-only caveat as `web.deploy.replicas` above -- use
+      # `docker compose up --scale worker=N` locally. N=2-3 workers run safely
+      # because dispatch/ingest/watchdog already row-claim with `FOR UPDATE SKIP
+      # LOCKED` (#12/#13/#16) and the radio coordinator elects exactly one leader via
+      # `pg_advisory_lock` (#17) -- this slice's job is running N of them, not
+      # building that coordination (already done).
+      replicas: 2
+
+  # Dev/test-only fault-injectable MusicGPT simulator (issue #11). NEVER deployed to prod —
+  # prod points MUSICGPT_BASE_URL at the real MusicGPT API, so this service is simply absent
+  # there. The rest of the stack reaches it purely via MUSICGPT_BASE_URL=http://simulator:8080
+  # (already the default in x-backend-env), so swapping real<->fake is a base-URL change only.
+  simulator:
+    <<: *backend-build
+    environment:
+      <<: *backend-env
+      # SIM_-prefixed knobs are read by SimulatorSettings; the shared backend env is ignored.
+      SIM_PUBLIC_BASE_URL: http://simulator:8080
+      SIM_AUDIO_POOL_DIR: /app/static-library
+      SIM_WEBHOOK_DELAY_SECONDS: ${SIM_WEBHOOK_DELAY_SECONDS:-5}
+    command: ["songforge-simulator"]
+    ports:
+      - "${SIMULATOR_HOST_PORT:-8080}:8080"
+    volumes:
+      # The same royalty-free pool the boot step seeds from, so served audio is real & playable.
+      - ./app/static/audios:/app/static-library:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import socket,sys; sys.exit(0 if socket.socket().connect_ex(('localhost',8080))==0 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      BACKEND_URL: http://web:8000
+      NODE_ENV: production
+    ports:
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "fetch('http://localhost:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── Observability (issue #18, AC5) ──────────────────────────────────────────────
+  # All four services below are gated behind `profiles: ["monitoring"]`, so a plain
+  # `docker compose up` (the existing default workflow) is completely unaffected.
+  # Bring them up with `docker compose --profile monitoring up`. See
+  # monitoring/README.md for the local/staging/prod env split this profile covers
+  # (local only -- staging/prod use a different, documented topology).
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      # Loopback-only (security H1): a short-form `"host:container"` publish binds
+      # 0.0.0.0 (all interfaces), which would put Prometheus's UI/API on any
+      # reachable network interface, not just this machine. Long-form pins it to
+      # 127.0.0.1 -- reachable from the host, not the LAN or a public interface.
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-59090}:9090"
+    depends_on:
+      web:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # No baked-in default (security H1): an `admin`/`admin` fallback is a trivial
+      # takeover of a Grafana instance that has datasource + provisioning access.
+      # Deliberately empty rather than `:?required` here -- a `:?` fails variable
+      # INTERPOLATION for the whole compose file (Compose interpolates every
+      # service before profile-filtering), which would break a plain, no-profile
+      # `docker compose config`/`up` even though grafana never runs in that case.
+      # The entrypoint guard below enforces "fail closed if unset" at the point
+      # that actually matters: starting this container.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      # Off by default (security H1); a local dev opts in per-session via .env
+      # rather than every environment inheriting anonymous Viewer access.
+      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANON_ENABLED:-false}
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    # Refuse to boot with no admin password rather than let Grafana fall back to
+    # any built-in default (security H1). `docker compose config` never runs this,
+    # so it doesn't affect the config-render checks -- only an actual `up`.
+    entrypoint:
+      - "/bin/sh"
+      - "-c"
+      - |
+        if [ -z "$$GF_SECURITY_ADMIN_PASSWORD" ]; then
+          echo "GRAFANA_ADMIN_PASSWORD must be set to bring up the monitoring profile (see .env.example) -- refusing to start with no admin password." >&2
+          exit 1
+        fi
+        exec /run.sh
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      # Dashboard JSON is mounted OUTSIDE the read-only provisioning tree: nesting
+      # it under the :ro provisioning/dashboards mount makes Docker try to mkdir the
+      # child mountpoint inside a read-only fs and fail to start Grafana. The
+      # provider config (provisioning/dashboards/dashboards.yml) points its `path`
+      # here, under Grafana's own writable data dir.
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards/songforge:ro
+    ports:
+      # Loopback-only -- see the prometheus service's port comment above.
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-59091}:3000"
+    depends_on:
+      - prometheus
+
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    profiles: ["monitoring"]
+    environment:
+      # Reuses the same POSTGRES_* credentials the `postgres` service already uses
+      # (x-backend-env) -- no second set of credentials introduced. Staging/prod
+      # should point this at a dedicated read-only monitoring role with TLS
+      # (sslmode != disable) instead -- see monitoring/README.md.
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@postgres:5432/${POSTGRES_DB:-songforge}?sslmode=disable
+    # No host port published (security H1): this exporter has no auth of its own
+    # and exposes Postgres internals (table sizes, connection/lock stats). Prometheus
+    # scrapes it over the compose network by service name (postgres_exporter:9187);
+    # nothing outside the compose network needs to reach it directly.
+    expose:
+      - "9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    profiles: ["monitoring"]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    # No host port published -- see the postgres_exporter comment above; same
+    # reasoning (unauthenticated, internal-network-only scrape target).
+    expose:
+      - "9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  pgbouncer_exporter:
+    image: prometheuscommunity/pgbouncer-exporter:v0.9.0
+    profiles: ["monitoring"]
+    # Reads PgBouncer's stats console (SHOW STATS/POOLS/LISTS) as the app user, which
+    # `pgbouncer.STATS_USERS` above authorizes. Exposes the MIDDLE layer of the
+    # connection-saturation view: server connections in use (of DEFAULT_POOL_SIZE) and
+    # clients waiting in PgBouncer's own queue.
+    command:
+      - "--pgBouncer.connectionString=postgres://${POSTGRES_USER:-songforge}:${POSTGRES_PASSWORD:-songforge}@pgbouncer:6432/pgbouncer?sslmode=disable"
+    # No host port published -- same reasoning as the other exporters (unauthenticated,
+    # internal-network-only). Prometheus reaches it at pgbouncer_exporter:9127.
+    expose:
+      - "9127"
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+
+  # Per-container CPU/memory for EVERY container (cAdvisor), so a load test can show
+  # which component is compute-bound -- e.g. the web event loops pinning one core each,
+  # which the connection/pool panels can't reveal. Dev-only (monitoring profile):
+  # privileged + host mounts are needed to read cgroup/container stats; a prod setup
+  # would use the platform's own container metrics instead. Prometheus scrapes
+  # cadvisor:8080 over the compose network.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: ["monitoring"]
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    expose:
+      - "8080"
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

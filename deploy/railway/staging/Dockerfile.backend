@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY backend/pyproject.toml ./
+COPY backend/src ./src
+COPY backend/migrations ./migrations
+COPY backend/alembic.ini ./
+RUN pip install -e .
+COPY app/static/audios/ /app/static-library/
+EXPOSE 8000 8080 9100
+CMD ["songforge-web"]

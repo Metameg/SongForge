@@ -1,0 +1,415 @@
+"""Single env-driven configuration module — the one source of truth for all tunables.
+
+Everything the system reads at runtime (datastore URLs, object-storage endpoint, rate
+limits, generation concurrency, the ``ENFORCE_RATE_LIMITS`` kill switch, observability
+knobs) is declared here and read from the environment. No other module should call
+``os.environ`` directly. This satisfies spec user stories #28 (single config source) and
+#29 (one boolean disables rate-limit enforcement; dev matches prod by default).
+"""
+
+from __future__ import annotations
+
+import functools
+import os
+import threading
+from collections.abc import Mapping
+from typing import Any, Literal
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+Environment = Literal["local", "staging", "prod"]
+
+# The documented dev-safe placeholder (see `session_secret` below). Fine for
+# local/staging/tests; must never reach a prod deploy (security report MEDIUM
+# finding: an unenforced default silently lets a client forge any identity's
+# cookie in prod).
+_DEFAULT_SESSION_SECRET = "dev-insecure-change-me"
+
+# Serializes the environment swap in `Settings(_env=...)` so concurrent construction
+# (e.g. parallel test workers) cannot race on the process-wide os.environ.
+_env_swap_lock = threading.Lock()
+
+
+class Settings(BaseSettings):
+    """Typed, validated view of the process environment.
+
+    Construct with no arguments to read the real environment. Pass ``_env=<mapping>``
+    to load from an explicit mapping instead (used by tests for determinism).
+    """
+
+    model_config = SettingsConfigDict(
+        case_sensitive=False,
+        extra="ignore",
+        env_file=None,
+    )
+
+    # ── Runtime identity ────────────────────────────────────────────────────
+    environment: Environment = "local"
+    service_name: str = "songforge"
+    log_level: str = "INFO"
+    # Issue #19 (PRD #6 AC#4): the web tier's bind port. Aliased to the bare `PORT`
+    # env var (not `WEB_PORT`) because that's the variable Railway (and Heroku-style
+    # PaaS in general) injects into the container to tell it which port to listen
+    # on -- config.py stays the single env-read source of truth, so `__main__.py`
+    # reads this setting rather than `os.environ` directly. Defaults to 8000 for
+    # local/compose, where nothing sets `PORT` and the old hard-coded value applies.
+    web_port: int = Field(default=8000, validation_alias="PORT")
+
+    # ── Datastores ──────────────────────────────────────────────────────────
+    # Async driver (asyncpg) is the runtime default; Alembic derives a sync URL.
+    database_url: str
+    redis_url: str
+    # Issue #19 (PRD #6 AC#2): optional direct/unpooled URL for the worker's
+    # advisory-lock + LISTEN/NOTIFY connections, so they can bypass PgBouncer while
+    # `database_url` (web tier) points AT PgBouncer. Left unset (`None`), the worker
+    # falls back to `database_url` -- unchanged behavior for dev/tests/single-node,
+    # where there is no pooler in front of Postgres. See `effective_worker_database_url`.
+    worker_database_url: str | None = None
+    # Issue #19 (PRD #6 AC#2): gates disabling asyncpg's server-side prepared-statement
+    # cache on the pooled web engine (`db.get_engine()`). asyncpg caches prepared
+    # statements per physical connection; under PgBouncer's TRANSACTION pooling mode a
+    # logical "connection" can be handed a different backend session between queries,
+    # so a statement prepared against one backend can silently vanish (or, worse,
+    # collide with an unrelated statement) on the next. Default `False` keeps today's
+    # behavior (no PgBouncer in front, cache stays on) for dev/tests/single-node.
+    db_pgbouncer_transaction_mode: bool = False
+    # Web engine (`db.get_engine()`) SQLAlchemy connection-pool sizing. Defaults match
+    # SQLAlchemy's own (pool_size 5 + max_overflow 10 = 15 connections per web PROCESS)
+    # -- safe for dev/single-node. Raise via env (DB_POOL_SIZE / DB_MAX_OVERFLOW) under a
+    # load test to move the bottleneck downstream (PgBouncer, then Postgres). Surfaced on
+    # the connection-saturation dashboard as songforge_db_pool_connections.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    # When the DB layer is saturated (app pool timed out, or Postgres rejected a new
+    # connection with "too many clients"), the web tier returns 503 Service Unavailable
+    # with this many seconds in the Retry-After header instead of a bare 500 -- a signal
+    # the client can actually act on (back off and retry) rather than "the server broke".
+    overload_retry_after_seconds: int = 5
+
+    # ── Object storage (S3 API: MinIO locally, Cloudflare R2 in prod) ───────
+    s3_endpoint_url: str
+    s3_access_key_id: str
+    s3_secret_access_key: str
+    s3_bucket: str
+    s3_region: str = "auto"
+    # Public/CDN base URL audio is served from; falls back to the endpoint+bucket.
+    s3_public_base_url: str | None = None
+    # Browser-reachable S3 API endpoint used ONLY to SIGN presigned download URLs
+    # (issue #39). In dev the client talks to the internal `s3_endpoint_url`
+    # (`minio:9000`) the browser can't resolve, so a presigned GET signed against it
+    # 302s to an unreachable host; set this to the host-mapped MinIO
+    # (`http://localhost:<MINIO_HOST_PORT>`, no bucket path -- path-style addressing adds
+    # it) so the signature covers the host the browser actually connects to. Left unset
+    # in prod, where `s3_endpoint_url` (the R2 S3 endpoint) is already browser-reachable.
+    s3_presign_endpoint_url: str | None = None
+    # Grant anonymous read on the audio bucket at boot so browsers/CDN can stream it
+    # (PRD: public bucket + CDN, spec #44/#48). Applied best-effort against MinIO's S3
+    # API; on R2 public access is configured out-of-band, so a failure is non-fatal.
+    # Set false to keep the bucket private (e.g. if serving via signed URLs instead).
+    s3_public_bucket: bool = True
+    # botocore socket timeouts for the underlying S3 client (quality report MED
+    # finding): without these, a hung MinIO/R2 connection would block indefinitely --
+    # unbounded, unlike the rest of this module's explicit timeouts.
+    s3_connect_timeout_seconds: float = 10.0
+    s3_read_timeout_seconds: float = 30.0
+    # TTL of presigned download URLs (issue #39).
+    s3_presigned_download_ttl_seconds: int = 300
+
+    # ── Static library (seeded at boot; spec #76) ───────────────────────────
+    # Directory of curated *.mp3 files uploaded + cataloged on boot. Bind-mounted
+    # locally; an object-storage prefix in prod.
+    static_library_dir: str = "/app/static-library"
+
+    # ── Generation API (real MusicGPT, or the fault-injectable simulator) ───
+    musicgpt_base_url: str = "http://simulator:8080"
+    musicgpt_api_key: str = ""
+
+    # ── Rate limits & concurrency (single source; spec #28, #4, #10) ────────
+    enforce_rate_limits: bool = True
+    anon_daily_songs_per_cookie: int = 2
+    anon_daily_songs_per_ip: int = 6
+    accounts_per_ip: int = 2
+    authed_daily_songs: int = 10
+    per_user_concurrent_jobs: int = 2
+    global_generation_concurrency: int = 1
+
+    # ── Rate-limit daily window + counter keys (issue #15, criteria #1/#4) ───
+    # TTL stamped on each daily counter on its FIRST increment (default 24h). The key
+    # also carries a per-day UTC bucket, so "songs left" resets both by TTL expiry and
+    # by the day rolling over.
+    rate_limit_window_seconds: int = 60 * 60 * 24
+    rate_limit_cookie_prefix: str = "rl:cookie:"
+    rate_limit_ip_prefix: str = "rl:ip:"
+    rate_limit_account_prefix: str = "rl:account:"
+
+    # ── Client IP resolution (issue #15, criterion #1) ──────────────────────
+    # Trusted forwarded header carrying the real client IP behind a proxy/LB. Left
+    # unset (``None``), the direct socket peer (``request.client.host``) is used and any
+    # forwarded header is IGNORED -- trusting a client-supplied header with no known
+    # proxy in front lets anyone spoof their IP and dodge the per-IP cap. Set to e.g.
+    # ``X-Forwarded-For`` only when a trusted proxy always overwrites it.
+    client_ip_header: str | None = None
+
+    # ── Bot check (issue #15, criterion #3) ─────────────────────────────────
+    # Shared-secret header gate on ``POST /create``. An empty ``bot_check_token`` (the
+    # default) disables the check -- the documented local-dev seam -- so dev is not
+    # walled off with no way to pass it; a real CAPTCHA/provider can replace
+    # ``HeaderTokenBotCheck`` behind the ``BotCheck`` protocol without touching the
+    # route. The gate is also bypassed entirely when ``enforce_rate_limits`` is false.
+    bot_check_header: str = "X-Bot-Check"
+    bot_check_token: str = ""
+
+    # ── Worker ──────────────────────────────────────────────────────────────
+    worker_heartbeat_path: str = "/tmp/songforge-worker.heartbeat"  # noqa: S108
+    worker_loop_interval_seconds: float = 5.0
+    # Port the worker exposes its Prometheus `/metrics` on (gated by `metrics_enabled`).
+    # The worker runs no FastAPI app, so without this its counters/histograms + process
+    # CPU/memory are invisible to Prometheus; a `songforge_worker` dns_sd scrape job
+    # (monitoring/prometheus/prometheus.yml) discovers every replica on this port.
+    worker_metrics_port: int = 9100
+    # PRD #74 + issue #17: the radio leader's advisory-lock connection sets Postgres's
+    # `tcp_user_timeout` GUC to this many seconds via asyncpg `server_settings`, so a
+    # dead leader's session (and therefore its advisory lock) is detected and released
+    # promptly -- the PRD's target failover-detection window is ~10-15s.
+    worker_lock_tcp_user_timeout_seconds: float = 13.0
+
+    # ── Radio (issue #8: static radio plays) ────────────────────────────────
+    # Redis capped-list anti-repeat window: how many recently-played static song ids
+    # to avoid when picking the next one.
+    radio_recent_history_size: int = 5
+    # Fixed pg_advisory_lock key the single-leader coordinator holds.
+    radio_advisory_lock_key: int = 927_341
+    # Fallback song duration when a Song row has no duration_seconds recorded.
+    radio_default_track_seconds: int = 180
+    # Backoff between coordinator retries when idle (no songs yet) or on a
+    # transient error, so a broken loop doesn't spin hot.
+    radio_coordinator_backoff_seconds: float = 5.0
+
+    # ── Radio pointer cache (issue #9: Redis pointer cache + cold-start warming) ────
+    # Redis string key the coordinator writes the resolved `/now-playing` view to
+    # after every successful init/advance, and the web tier reads to serve requests
+    # without touching Postgres (design D1/D2).
+    radio_pointer_redis_key: str = "radio:pointer"
+    # TTL of each web instance's process-local pointer cache entry (design D3):
+    # short enough that a song boundary is reflected promptly, long enough that a
+    # request storm within the window costs 0 datastore reads.
+    radio_pointer_cache_ttl_seconds: float = 1.0
+
+    # ── Identity (issue #12: signed-cookie anon identity, criterion #1) ─────
+    # HMAC key signing the identity cookie (stdlib hmac; see web/identity.py). MUST be
+    # overridden in prod -- a default/leaked secret lets a client forge another
+    # identity's cookie and, e.g., exhaust its rate-limit quota or read its jobs.
+    session_secret: str = _DEFAULT_SESSION_SECRET
+    identity_cookie_name: str = "sf_uid"
+    identity_cookie_max_age_seconds: int = 60 * 60 * 24 * 365  # ~1 year
+
+    # ── Prompt validation (issue #12, criterion #1) ──────────────────────────
+    prompt_max_length: int = 2000
+    # `lyrics` is the same attacker-controlled, unauthenticated-request field as
+    # `prompt` (security report MEDIUM finding) -- capped the same way so it can't
+    # be left as an unbounded resource-abuse vector (oversized DB rows / oversized
+    # outbound generation-API bodies) just because `prompt`'s cap doesn't cover it.
+    lyrics_max_length: int = 5000
+
+    # ── Generation job pipeline (issue #12) ───────────────────────────────────
+    # Callback base URL sent as `webhook_url` on the generation API's create call; the
+    # receiving handler is a later issue (see .orchestrator/CONTEXT.md scope) -- #12
+    # only sends a plausible, config-driven URL.
+    musicgpt_webhook_url: str = "http://web:8000/api/generation/webhook"
+    # Shared secret the generation API must echo back as `?token=` on the webhook.
+    # MusicGPT doesn't sign webhooks, so this is how the public webhook route tells a
+    # real delivery from a forged one. Appended at send time (never stored on the job
+    # row); empty disables the check (local/simulator). Required in prod.
+    webhook_secret: str = ""
+    # Redis semaphore keys (criterion #3: global + per-user in-flight generation caps).
+    semaphore_global_key: str = "sem:gen:global"
+    semaphore_user_key_prefix: str = "sem:gen:user:"
+    # Postgres LISTEN/NOTIFY channel names (criterion #5): new-job wakes dispatch
+    # without polling; semaphore-release wakes a dispatcher waiting on a full cap.
+    jobs_new_channel: str = "new_job"
+    semaphore_release_channel: str = "sem_release"
+    # Slow-poll backstop for the dispatch loop, in case a NOTIFY is missed (e.g. a
+    # dispatcher was down when it fired).
+    dispatch_poll_backstop_seconds: float = 5.0
+    # Backoff applied to a job's `available_at` on a 429/5xx/timeout requeue, so
+    # dispatch doesn't hot-loop re-claiming the same job immediately.
+    dispatch_requeue_backoff_seconds: float = 5.0
+
+    # ── Async ingest (issue #13: webhook -> download -> R2 upload -> READY) ────
+    # Postgres LISTEN/NOTIFY channel the webhook handler NOTIFYs after recording a
+    # successful webhook (state -> INGEST_PENDING), and the ingest worker LISTENs on.
+    ingest_channel: str = "ingest_pending"
+    # Slow-poll backstop for the ingest loop, mirrors dispatch_poll_backstop_seconds.
+    ingest_poll_backstop_seconds: float = 5.0
+    # httpx timeout for downloading the finished audio from its (possibly expiring)
+    # hint URL, or from the by-id-refreshed URL.
+    ingest_download_timeout_seconds: float = 30.0
+    # Backoff applied to a job's `available_at` on a download/by-id-lookup failure
+    # that isn't resolved by the single in-claim refresh-and-retry.
+    ingest_requeue_backoff_seconds: float = 10.0
+    # Bounded ingest retries before giving up -> FAILED (this is NOT the watchdog's
+    # job; see .orchestrator/CONTEXT.md OUT-of-scope).
+    ingest_max_attempts: int = 5
+    # Hard ceiling on a single audio download's size (security report MED finding:
+    # memory-exhaustion / DoS via a hostile or oversized `audio_url`). 100 MiB is
+    # generously above any real song-length MP3; exceeding it fails the download the
+    # same way a network error would (bounded retry -> requeue/FAILED).
+    ingest_max_download_bytes: int = 100 * 1024 * 1024
+
+    # ── User-song queue + interrupt (issue #14) ──────────────────────────────
+    # Postgres LISTEN/NOTIFY channel a freshly-enqueued READY song is announced on
+    # (fired post-commit from the ingest worker's commit path) so the radio
+    # coordinator's loop can wake and interrupt a currently-playing static filler
+    # (criterion #3) instead of waiting for the poll/boundary timer.
+    radio_ready_channel: str = "song_ready"
+
+    # ── SSE + pub/sub (issue #10: push + gapless transitions) ───────────────
+    # Redis pub/sub channel the coordinator publishes the resolved pointer to on
+    # every genuine init/advance, and that each app instance's `PointerBroadcaster`
+    # subscribes to for its `/events` fan-out (criterion #2).
+    radio_pointer_channel: str = "radio:pointer:changed"
+    # How often `/events` re-emits the current pointer to each connected client with
+    # no new pub/sub message — covers a dropped pub/sub message where nobody
+    # disconnected, and gives a reconnecting client a bound on staleness (criterion #4).
+    sse_heartbeat_seconds: float = 30.0
+    # Redis pub/sub channel the worker publishes the waiting-queue depth to on every
+    # post-commit enqueue, and that each app instance's `QueueDepthBroadcaster`
+    # subscribes to for its `queue-depth` SSE fan-out (depth-in-SSE follow-up). Lets a
+    # listener's "N waiting" update between advances without a `/queue` -> Postgres count.
+    radio_queue_depth_channel: str = "radio:queue:depth"
+    # Coalesce window for the `queue-depth` fan-out: at most one push per this many
+    # seconds per app instance, so a burst of enqueues collapses to one latest-wins push.
+    # Each push is one SSE write per connected listener, so under steady creates this
+    # window sets a per-listener CPU cost; 1s measurably capped listeners per replica.
+    queue_depth_coalesce_seconds: float = 5.0
+    # How often the worker refreshes the fleet-wide pipeline gauges (jobs_in_state,
+    # generation slots) it exposes on its /metrics.
+    pipeline_metrics_interval_seconds: float = 30.0
+
+    # ── Watchdog: leaderless recovery sweep (issue #16) ──────────────────────
+    # Backstop poll interval between sweeps (A1: a single periodic watchdog owns all
+    # recovery). Not latency-critical -- recovery, not the happy path.
+    watchdog_poll_interval_seconds: float = 30.0
+    # Absolute hard deadline (A6): a job still non-terminal (QUEUED / SUBMITTING /
+    # WAITING_FOR_WEBHOOK / INGEST_PENDING) this many seconds after `created_at` is
+    # failed outright by the watchdog, no matter where it is in the pipeline -- so a
+    # job can never outlive the frontend's progress bar. The terminal-failure sweep
+    # then refunds (only if it was charged) and pushes `job-failed`. Set GENEROUSLY
+    # above real generation time (MusicGPT eta ~60s but real completion can run a few
+    # minutes); the frontend's own timeout must stay >= this + one
+    # `watchdog_poll_interval_seconds` so the backend has actually failed+refunded the
+    # job before the UI gives up, keeping the "if charged, refunded" copy accurate.
+    job_max_lifetime_seconds: float = 300.0
+    # Design D5: a WAITING_FOR_WEBHOOK job is only polled once `updated_at + eta +
+    # this buffer <= now` -- never during its own expected generation window.
+    watchdog_waiting_overdue_buffer_seconds: float = 45.0
+    # A SUBMITTING job with no `task_id` older than this is presumed crashed
+    # mid-submit and requeued (design D6: the age-gate is what keeps the resulting
+    # delayed re-call/double-charge bounded and rare).
+    watchdog_submitting_lease_seconds: float = 120.0
+    # A GENEROUS threshold (well beyond `ingest_requeue_backoff_seconds`) past which
+    # an INGEST_PENDING job is presumed stalled/crashed and nudged for re-claim --
+    # backstop over (not a replacement for) the inline ingest retry (D1).
+    watchdog_ingest_overdue_seconds: float = 300.0
+    # Bounded batch size for the WAITING-overdue claim query's candidate scan (its
+    # per-row `eta`-based overdue check isn't a single portable SQL predicate across
+    # SQLite/Postgres -- see `jobs/watchdog.py::claim_waiting_overdue_job`).
+    watchdog_claim_batch_size: int = 20
+    # Redis pub/sub channel prefix a per-user notification (issue #16, criterion A4)
+    # is published to: `{prefix}{user_id}:events`, e.g. `user:abc123:events`. The
+    # per-instance `UserEventBroadcaster` PSUBSCRIBEs the matching wildcard pattern.
+    user_events_channel_prefix: str = "user:"
+
+    # ── Observability (always on, every environment; spec #77) ──────────────
+    metrics_enabled: bool = True
+    correlation_id_header: str = "X-Correlation-ID"
+
+    def __init__(self, _env: Mapping[str, str] | None = None, **data: Any) -> None:
+        if _env is None:
+            super().__init__(**data)
+            return
+        # Load *exclusively* from the provided mapping (deterministic for tests):
+        # swap the process environment for the duration of construction so the normal
+        # env source reads only `_env`, then restore it. A truly missing required field
+        # therefore raises, rather than being satisfied by an ambient variable. The lock
+        # keeps this global swap safe under concurrent construction.
+        with _env_swap_lock:
+            saved = dict(os.environ)
+            os.environ.clear()
+            os.environ.update(_env)
+            try:
+                super().__init__(**data)
+            finally:
+                os.environ.clear()
+                os.environ.update(saved)
+
+    @model_validator(mode="after")
+    def _reject_default_session_secret_in_prod(self) -> Settings:
+        """Fail-closed (security report MEDIUM finding): a default/placeholder
+        `session_secret` is fine for local/staging (and every test in this repo,
+        which never sets `ENVIRONMENT=prod`), but must never silently reach a prod
+        deploy -- it's a public constant, so anyone could forge any identity's
+        signed cookie. Raising here turns a forgotten override into a boot-time
+        failure instead of a silent vulnerability."""
+        if self.environment == "prod" and self.session_secret == _DEFAULT_SESSION_SECRET:
+            raise ValueError(
+                "session_secret is still the default placeholder in a prod "
+                "environment -- set a real SESSION_SECRET before deploying to prod"
+            )
+        if self.environment == "prod" and not self.webhook_secret:
+            raise ValueError(
+                "webhook_secret is empty in a prod environment -- set WEBHOOK_SECRET so "
+                "the public webhook route rejects forged deliveries"
+            )
+        return self
+
+    @property
+    def sync_database_url(self) -> str:
+        """Sync SQLAlchemy URL for Alembic (migrations run synchronously).
+
+        Derived from :attr:`database_url` rather than separately configured, so the
+        two can never drift.
+        """
+        return self.database_url.replace("+asyncpg", "+psycopg", 1)
+
+    @property
+    def effective_worker_database_url(self) -> str:
+        """URL the worker's advisory-lock + LISTEN/NOTIFY connections should use.
+
+        Issue #19 (PRD #6 AC#2): returns :attr:`worker_database_url` when set (a direct
+        Postgres URL bypassing PgBouncer), else falls back to :attr:`database_url` so
+        dev/tests/single-node deployments (no separate worker URL configured) are
+        unchanged -- worker and web share the same URL, exactly like today.
+        """
+        return self.worker_database_url or self.database_url
+
+    @property
+    def sync_worker_database_url(self) -> str:
+        """Sync SQLAlchemy URL Alembic should use for migrations (Phase-5 fix, issue #19).
+
+        Derived from :attr:`effective_worker_database_url` rather than :attr:`database_url`
+        (which is what :attr:`sync_database_url` derives from): on Railway, the boot step's
+        ``releaseCommand`` runs inside the ``web`` service and inherits *its* env, which
+        points ``database_url`` at PgBouncer in transaction-pooling mode -- exactly the
+        connection class Alembic DDL (and its own migration locking) must never run
+        through. Setting ``WORKER_DATABASE_URL`` on that service gives the release step a
+        direct URL to migrate through, while `web`'s request-serving connections stay
+        pooled. Falls back to `database_url` when no override is set, so local/single-node
+        (no pooler in front of Postgres at all) is unchanged -- identical to
+        `sync_database_url` in that case.
+        """
+        return self.effective_worker_database_url.replace("+asyncpg", "+psycopg", 1)
+
+    @property
+    def public_audio_base_url(self) -> str:
+        """Base URL that immutable audio objects are served from."""
+        if self.s3_public_base_url:
+            return self.s3_public_base_url.rstrip("/")
+        return f"{self.s3_endpoint_url.rstrip('/')}/{self.s3_bucket}"
+
+
+@functools.lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Process-wide cached settings read from the real environment."""
+    return Settings()

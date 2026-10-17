@@ -1,0 +1,74 @@
+# Local load-test Prometheus config (issue #18, AC5).
+#
+# This is a LOAD-TEST tool's scrape config, not a production one: the interval
+# is aggressive (5s) so a k6 run's shape shows up clearly on the Grafana
+# dashboards in monitoring/grafana/dashboards/. See monitoring/README.md for
+# how staging/prod scrape intervals and topology differ, and
+# monitoring/prometheus/prometheus.prod.example.yml for the prod remote_write
+# template (Grafana Cloud free tier -- no self-hosted Prometheus/Grafana in prod).
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # The SongForge web app's own /metrics endpoint -- the REGISTRY in
+  # backend/src/songforge/metrics.py, including the jobs-by-state / semaphore-
+  # utilization gauges refreshed at scrape time by
+  # backend/src/songforge/metrics_pipeline.py.
+  #
+  # DNS A-record service discovery (NOT a single `web:8000` static target): the
+  # `web` service scales to N replicas, and Docker's embedded DNS returns ALL of
+  # their A records for the service name. A single static target resolves to just
+  # ONE replica per scrape (round-robined), so per-process gauges like
+  # `songforge_sse_connected_listeners` would report one instance's share rather
+  # than the fleet total -- the exact multi-instance undercount the capacity
+  # dashboard exists to avoid. dns_sd makes each replica its own target with a
+  # distinct `instance` label, so dashboards sum() per-process metrics for the
+  # true total while still being able to break out per instance.
+  - job_name: songforge_web
+    dns_sd_configs:
+      - names: ["web"]
+        type: A
+        port: 8000
+        refresh_interval: 10s
+
+  # The SongForge WORKER process's /metrics. The worker runs no FastAPI app, so it
+  # exposes the shared REGISTRY via a small threaded HTTP server
+  # (backend/src/songforge/worker/metrics_server.py) on worker_metrics_port. This makes
+  # the previously-invisible worker counters scrapable -- jobs_dispatched_total,
+  # ingest_completed/requeued/failed_total, semaphore_released_total,
+  # watchdog_recovered_total, quota_refunded_total -- plus the worker's own process_*
+  # CPU/memory. Same dns_sd rationale as `web` (`--scale worker=N` -> N A records, each
+  # its own target/instance, summed across the fleet). The DB-derived
+  # songforge_jobs_in_state gauge stays the web job's (set at scrape time), so the two
+  # jobs never double-count it.
+  - job_name: songforge_worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
+        refresh_interval: 10s
+
+  # Postgres: jobs table row counts, connection/lock stats, etc.
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres_exporter:9187"]
+
+  # Redis: semaphore key stats, pub/sub, memory, etc.
+  - job_name: redis
+    static_configs:
+      - targets: ["redis_exporter:9121"]
+
+  # PgBouncer: server-connection pool utilization (active of DEFAULT_POOL_SIZE) and
+  # clients waiting in its queue -- the MIDDLE layer between the app's own connection
+  # pool and Postgres, for the connection-saturation dashboard.
+  - job_name: pgbouncer
+    static_configs:
+      - targets: ["pgbouncer_exporter:9127"]
+
+  # cAdvisor: per-container CPU/memory for every container, so the compute panels can
+  # show which component is the bottleneck (e.g. the web event loops pinned at one core).
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
