@@ -178,7 +178,7 @@ async def test_failure_webhook_with_cover_but_no_conversion_path_creates_no_song
 
     resp = client.post(
         "/api/generation/webhook",
-        json=_body(conversion_path=None, album_cover_path=COVER),
+        json=_body(conversion_path=None, album_cover_path=COVER, success=False),
     )
 
     assert resp.status_code == 200
