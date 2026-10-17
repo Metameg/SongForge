@@ -10,23 +10,20 @@ storage) behind nginx; the frontend is Next.js.
 <img width="1176" height="736" alt="SongForge Architecture drawio" src="https://github.com/user-attachments/assets/26657efa-ea42-47aa-a98c-650869095004" />
 
 
-## Web-instance count vs p99 latency
+## Capacity vs replica count
 
-`realistic-session.js` load test, varying only the number of `web` replicas, run
-until combined p99 latency (`/create`) first crossed 1 second:
+Load-tested on the Railway staging environment, varying the number of `web` and
+`frontend` replicas. Each row is the peak reached before the `web` replicas' CPUs
+maxed out and request latency crossed the test's thresholds.
 
-| Metric | 3 web instances | 8 web instances |
+| `web` replicas | `frontend` replicas | Peak SSE listeners | Peak request rate |
+|:---:|:---:|---:|---:|
+| 1 | 1 | ~1.35k | ~145 req/s |
+| 2 | 2 | ~2.5k | ~201 req/s |
+| 3 | 2 | ~4.6k | ~500 req/s |
 
-|---|---|---|
-| Connected listeners | ~4.05k | ~5.58k |
-| Combined request rate | ~336 req/s | ~500 req/s |
-| `/create` p99 at crossing (POF) | 0.97s → 2.21s | 0.64s → 2.11s |
-| Web CPU | **all 3 pinned at ~1.01 core** | busiest **0.80 → 0.92 core** (not pinned) |
-| Postgres CPU | ~0.73 cores | ~1.6 → 1.7 cores |
-
-More web replicas raise the p99-bounded ceiling; Postgres stays far under its
-14-core budget in both runs, confirming web-tier CPU as the bottleneck, not the
-database.
+Capacity grows with each added `web` replica: the web tier scales horizontally,
+while Postgres and Redis stay well below their limits.
 
 ## Run locally
 
