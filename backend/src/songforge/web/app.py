@@ -106,8 +106,8 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     # depth-in-SSE follow-up: the GLOBAL mirror of `pointer_broadcaster` -- ONE
     # subscription per app instance, fanning the worker's post-commit waiting-queue
     # depth out to every `/events` client as a `queue-depth` frame, coalesced to
-    # <=1/sec so a plain listener's "N waiting" updates between advances without a
-    # `/queue` -> Postgres count.
+    # <=1 per `queue_depth_coalesce_seconds` so a plain listener's "N waiting" updates
+    # between advances without a `/queue` -> Postgres count.
     app.state.queue_depth_broadcaster = QueueDepthBroadcaster(
         redis=effective_redis,
         channel=settings.radio_queue_depth_channel,

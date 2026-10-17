@@ -275,7 +275,9 @@ class Settings(BaseSettings):
     radio_queue_depth_channel: str = "radio:queue:depth"
     # Coalesce window for the `queue-depth` fan-out: at most one push per this many
     # seconds per app instance, so a burst of enqueues collapses to one latest-wins push.
-    queue_depth_coalesce_seconds: float = 1.0
+    # Each push is one SSE write per connected listener, so under steady creates this
+    # window sets a per-listener CPU cost; 1s measurably capped listeners per replica.
+    queue_depth_coalesce_seconds: float = 5.0
 
     # ── Watchdog: leaderless recovery sweep (issue #16) ──────────────────────
     # Backstop poll interval between sweeps (A1: a single periodic watchdog owns all

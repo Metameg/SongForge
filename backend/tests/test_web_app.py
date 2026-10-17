@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from songforge.config import Settings
 from songforge.web.app import create_app
 
 client = TestClient(create_app())
@@ -54,3 +55,13 @@ def test_correlation_id_generated_when_absent() -> None:
     resp = client.get("/health")
     cid = resp.headers["X-Correlation-ID"]
     assert cid and len(cid) == 32  # uuid4().hex
+
+
+def test_queue_depth_fanout_defaults_to_one_push_per_5_seconds() -> None:
+    # Each push is one SSE write per listener, so this window bounds per-listener CPU.
+    assert Settings.model_fields["queue_depth_coalesce_seconds"].default == 5.0
+
+
+def test_queue_depth_broadcaster_uses_the_configured_window() -> None:
+    app = create_app(Settings(queue_depth_coalesce_seconds=2.5))
+    assert app.state.queue_depth_broadcaster._coalesce_seconds == 2.5
