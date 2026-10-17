@@ -28,6 +28,8 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator as AsyncIter
 
+import contextlib
+
 import pytest
 from fastapi.testclient import TestClient
 from prometheus_client import generate_latest
@@ -47,11 +49,11 @@ from songforge.jobs.watchdog import (
 from songforge.metrics import REGISTRY
 from songforge.metrics_pipeline import (
     refresh_job_state_gauges,
+    refresh_pipeline_gauges,
     refresh_semaphore_gauges,
-    render_latest_with_pipeline_gauges,
 )
 from songforge.models import (
-    ALL_JOB_STATES,
+    NON_TERMINAL_JOB_STATES,
     JOB_STATE_FAILED,
     JOB_STATE_INGEST_PENDING,
     JOB_STATE_SUBMITTING,
@@ -524,7 +526,7 @@ async def test_refresh_job_state_gauges_zero_fills_every_state_on_a_completely_e
     await refresh_job_state_gauges(empty_session)
 
     text = _rendered_text()
-    for state in ALL_JOB_STATES:
+    for state in NON_TERMINAL_JOB_STATES:
         assert (
             _sample_value(text, "songforge_jobs_in_state", f'{{state="{state}"}}')
             == "0.0"
@@ -551,47 +553,45 @@ async def test_refresh_semaphore_gauges_second_scrape_reflects_a_decrease() -> N
     )
 
 
-# ── E: `/metrics` resilience when Postgres and/or Redis are unreachable ────────────
+# ── E: worker refresh + `/metrics` resilience when Postgres and/or Redis are down ──
 
 
-async def test_render_latest_with_pipeline_gauges_survives_db_failure() -> None:
+def _sessionmaker_yielding(session: object):  # type: ignore[no-untyped-def]
+    @contextlib.asynccontextmanager
+    async def _make() -> AsyncIterator[object]:
+        yield session
+
+    return _make
+
+
+async def test_refresh_pipeline_gauges_still_refreshes_redis_when_db_fails() -> None:
     settings = Settings(global_generation_concurrency=2)
     redis = _FakeRedis({settings.semaphore_global_key: "1"})
 
-    response = await render_latest_with_pipeline_gauges(
-        _FailingSession(), redis, settings  # type: ignore[arg-type]
+    await refresh_pipeline_gauges(
+        _sessionmaker_yielding(_FailingSession()), redis, settings  # type: ignore[arg-type]
     )
 
-    assert response.status_code == 200
-    body = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
-    # Redis-backed gauges still refresh even though the DB call raised.
-    assert "songforge_generation_slots_in_use" in body
-    assert "songforge_http_requests_total" in body
+    assert (
+        _sample_value(_rendered_text(), "songforge_generation_slots_in_use", '{scope="global"}')
+        == "1.0"
+    )
 
 
-async def test_render_latest_with_pipeline_gauges_survives_redis_failure(
+async def test_refresh_pipeline_gauges_still_refreshes_db_when_redis_fails(
     empty_session: AsyncSession,
 ) -> None:
-    response = await render_latest_with_pipeline_gauges(
-        empty_session, _FailingRedis(), Settings()  # type: ignore[arg-type]
+    await refresh_pipeline_gauges(
+        _sessionmaker_yielding(empty_session), _FailingRedis(), Settings()  # type: ignore[arg-type]
     )
 
-    assert response.status_code == 200
-    body = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
-    # DB-backed gauges still refresh even though the Redis call raised.
-    assert "songforge_jobs_in_state" in body
-    assert "songforge_http_requests_total" in body
+    assert _sample_value(_rendered_text(), "songforge_jobs_in_state", '{state="QUEUED"}') == "0.0"
 
 
-async def test_render_latest_with_pipeline_gauges_survives_both_datastores_down() -> None:
-    response = await render_latest_with_pipeline_gauges(
-        _FailingSession(), _FailingRedis(), Settings()  # type: ignore[arg-type]
+async def test_refresh_pipeline_gauges_survives_both_datastores_down() -> None:
+    await refresh_pipeline_gauges(
+        _sessionmaker_yielding(_FailingSession()), _FailingRedis(), Settings()  # type: ignore[arg-type]
     )
-
-    assert response.status_code == 200
-    body = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
-    # Neither datastore's outage may take down the response OR the static counters.
-    assert "songforge_http_requests_total" in body
 
 
 def test_metrics_http_route_returns_200_when_redis_is_down() -> None:

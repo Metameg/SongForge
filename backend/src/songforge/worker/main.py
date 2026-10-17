@@ -17,6 +17,7 @@ from songforge.worker.dispatch import run_dispatch
 from songforge.worker.health import touch_heartbeat
 from songforge.worker.ingest import run_ingest
 from songforge.worker.metrics_server import start_worker_metrics_server
+from songforge.worker.pipeline_metrics import run_pipeline_metrics
 from songforge.worker.radio_coordinator import run_radio_coordinator
 from songforge.worker.watchdog import run_watchdog
 
@@ -62,6 +63,7 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
         run_dispatch(settings, stop),
         run_ingest(settings, stop),
         run_watchdog(settings, stop),
+        run_pipeline_metrics(settings, stop),
     )
     log.info("worker_stopped")
 

@@ -278,6 +278,9 @@ class Settings(BaseSettings):
     # Each push is one SSE write per connected listener, so under steady creates this
     # window sets a per-listener CPU cost; 1s measurably capped listeners per replica.
     queue_depth_coalesce_seconds: float = 5.0
+    # How often the worker refreshes the fleet-wide pipeline gauges (jobs_in_state,
+    # generation slots) it exposes on its /metrics.
+    pipeline_metrics_interval_seconds: float = 30.0
 
     # ── Watchdog: leaderless recovery sweep (issue #16) ──────────────────────
     # Backstop poll interval between sweeps (A1: a single periodic watchdog owns all

@@ -32,9 +32,9 @@ from starlette.responses import Response
 
 from songforge import __version__
 from songforge.config import Settings, get_settings
-from songforge.db import get_sessionmaker
 from songforge.logging_setup import configure_logging, get_logger
-from songforge.metrics_pipeline import render_latest_with_pipeline_gauges
+from songforge.metrics import render_latest
+from songforge.metrics_pipeline import refresh_db_pool_gauge
 from songforge.radio.pointer_broadcaster import PointerBroadcaster
 from songforge.radio.pointer_cache import PointerCache
 from songforge.radio.queue_depth import QueueDepthBroadcaster
@@ -115,16 +115,15 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     )
 
     async def metrics_route() -> Response:
-        """`GET /metrics` (issue #18, AC1+AC2): render the shared registry after
-        refreshing the pipeline gauges from a fresh DB session + the app's Redis
-        client. `render_latest_with_pipeline_gauges` isolates each datastore's
-        refresh in its own try/except, so an unreachable Postgres/Redis (e.g. this
-        repo's edge-test env, see `tests/conftest.py`) still yields a 200 with
-        whatever static counters are already registered -- never a 500."""
-        async with get_sessionmaker()() as session:
-            return await render_latest_with_pipeline_gauges(
-                session, effective_redis, settings
-            )
+        """`GET /metrics`: render this process's in-memory registry. Never queries
+        Postgres or Redis -- a slow datastore read here stalled one replica's scrape
+        past the agent timeout and dropped it from Grafana. Fleet-wide pipeline gauges
+        are refreshed by the worker instead (`worker/pipeline_metrics.py`)."""
+        try:
+            refresh_db_pool_gauge()
+        except Exception:
+            get_logger(__name__).exception("metrics_db_pool_refresh_failed")
+        return render_latest()
 
     app.include_router(health.router)
     app.include_router(now_playing.router)

@@ -476,7 +476,7 @@
     },
     {
       "id": 14,
-      "title": "Jobs by state",
+      "title": "Jobs in progress by state",
       "type": "timeseries",
       "description": "Point-in-time job counts per state. A climbing QUEUED band means dispatch is falling behind generation capacity.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },

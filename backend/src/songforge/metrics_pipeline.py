@@ -1,65 +1,51 @@
-"""On-scrape pipeline gauges: jobs-by-state (Postgres) + semaphore slot utilization
-(Redis) -- issue #18, acceptance criterion #2.
+"""Point-in-time pipeline gauges: jobs-by-state (Postgres) + generation-slot use (Redis).
 
-The load-driver counters in :mod:`songforge.metrics` (``jobs_created_total``,
-``semaphore_acquire_denied_total``, etc.) only fire on a state TRANSITION. "How many
-jobs are in each state right now" and "how many generation slots are in use right
-now" are point-in-time facts, not accumulating counters -- no ``.inc()`` call ever
-fires just because a job SITS in ``WAITING_FOR_WEBHOOK``. This module reads
-Postgres/Redis fresh at every scrape and sets ordinary :class:`~prometheus_client.Gauge`
-objects registered on the shared :data:`songforge.metrics.REGISTRY` (async refresh
-functions, not a ``Collector`` subclass -- ``Collector.collect()`` is invoked
-synchronously by ``generate_latest``, and the datastores here are async; a plain
-``async def`` refresh called right before rendering sidesteps any
-``asyncio.run()``-inside-a-running-loop hazard).
+These are fleet-wide facts, so the worker refreshes them on a timer
+(:func:`refresh_pipeline_gauges`, see ``worker/pipeline_metrics.py``) rather than every web
+replica recomputing them on every scrape. Both reads are bounded by in-flight work, never by
+history: the job count only covers non-terminal states via a partial index, and the slot read
+is a single Redis GET. Finished/failed throughput comes from the existing counters
+(``songforge_ingest_completed_total``, ``songforge_jobs_failed_total``, ...).
 
-Both refreshes are best-effort (mirrors this repo's ``_safe_release``/``_safe_notify``
-convention, see ``jobs.dispatch``): a Postgres or Redis blip must never take down
-``GET /metrics`` for every OTHER metric in the registry, so each refresh is wrapped in
-its own try/except inside :func:`render_latest_with_pipeline_gauges` -- a failure on
-one datastore still lets the other's gauges refresh, and always still returns a
-renderable (if stale/zero) scrape.
+The web tier's ``/metrics`` only calls :func:`refresh_db_pool_gauge`, which reads in-memory
+pool counters, so a web scrape never touches a datastore.
 """
 
 from __future__ import annotations
 
-from prometheus_client import CONTENT_TYPE_LATEST, Gauge, generate_latest
+from prometheus_client import Gauge
 from redis.asyncio import Redis
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.responses import Response
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from songforge.config import Settings
 from songforge.logging_setup import get_logger
 from songforge.metrics import REGISTRY
-from songforge.models import ALL_JOB_STATES, Job
+from songforge.models import NON_TERMINAL_JOB_STATES, Job
 
 log = get_logger(__name__)
 
 jobs_in_state = Gauge(
     "songforge_jobs_in_state",
-    "Job rows currently in each state (point-in-time Postgres count, zero-filled "
-    "across every state on every scrape -- issue #18, AC2).",
+    "Job rows currently in each NON-TERMINAL state (QUEUED, SUBMITTING, "
+    "WAITING_FOR_WEBHOOK, INGEST_PENDING), zero-filled. Refreshed by the worker. "
+    "Finished/failed jobs are counters, e.g. songforge_ingest_completed_total.",
     labelnames=("state",),
     registry=REGISTRY,
 )
 
 generation_slots_in_use = Gauge(
     "songforge_generation_slots_in_use",
-    "Generation semaphore slots currently held (point-in-time Redis read), labelled "
-    "'global' (the single global counter) or 'user' (the sum across every per-user "
-    "counter currently set -- never per-user-id, which would be unbounded "
-    "cardinality) -- issue #18, AC2.",
+    "Generation semaphore slots currently held (the global Redis counter). Refreshed by "
+    "the worker.",
     labelnames=("scope",),
     registry=REGISTRY,
 )
 
 generation_slots_capacity = Gauge(
     "songforge_generation_slots_capacity",
-    "Configured generation semaphore capacity, labelled by scope, so a dashboard can "
-    "compute utilization (in_use / capacity) without hardcoding the cap -- issue #18, "
-    "AC2. Only 'global' is exposed: 'user' has no single meaningful capacity (it is a "
-    "sum across however many distinct users currently hold a slot, not a per-user cap).",
+    "Configured global generation semaphore capacity, so a dashboard can compute "
+    "utilization without hardcoding the cap.",
     labelnames=("scope",),
     registry=REGISTRY,
 )
@@ -98,29 +84,26 @@ def refresh_db_pool_gauge() -> None:
 
 
 async def refresh_job_state_gauges(session: AsyncSession) -> None:
-    """Set ``songforge_jobs_in_state`` from a fresh ``GROUP BY state`` count.
+    """Set ``songforge_jobs_in_state`` for every non-terminal state, zero-filled.
 
-    Zero-fills every state in :data:`songforge.models.ALL_JOB_STATES` so a state with
-    no rows still renders an explicit ``0`` series -- a scraper graphing "jobs by
-    state" must never see a gap just because nothing currently sits in, say,
-    ``INGEST_PENDING``. Unlike a ``Counter``, a re-scrape reflects the CURRENT count,
-    including a decrease (a job leaving a state), because this is a plain ``.set()``
-    every time, never an accumulation.
+    The ``WHERE state IN (...)`` matches the partial index ``ix_jobs_state_active``, so
+    the count reads only in-flight rows however large ``jobs`` grows.
     """
-    result = await session.execute(select(Job.state, func.count()).group_by(Job.state))
+    result = await session.execute(
+        select(Job.state, func.count())
+        .where(Job.state.in_(NON_TERMINAL_JOB_STATES))
+        .group_by(Job.state)
+    )
     counts = dict(result.all())
-    for state in ALL_JOB_STATES:
+    # Clear first so a state this process reported before (e.g. READY from an older
+    # build) stops being exported; no await between clear and set, so no scrape sees a gap.
+    jobs_in_state.clear()
+    for state in NON_TERMINAL_JOB_STATES:
         jobs_in_state.labels(state=state).set(counts.get(state, 0))
 
 
 async def refresh_semaphore_gauges(redis: Redis, settings: Settings) -> None:
-    """Set ``songforge_generation_slots_in_use``/``_capacity`` from a fresh Redis read.
-
-    ``scope="global"`` is the single global counter; ``scope="user"`` sums every
-    per-user counter currently set (via ``scan_iter`` over the shared key prefix) into
-    one low-cardinality series -- never a series per user id. A missing key (no slots
-    held) reads as ``0``, not a missing series.
-    """
+    """Set the global generation-slot gauges from one Redis GET (no key scan)."""
     global_raw = await redis.get(settings.semaphore_global_key)
     generation_slots_in_use.labels(scope="global").set(
         int(global_raw) if global_raw is not None else 0
@@ -129,28 +112,15 @@ async def refresh_semaphore_gauges(redis: Redis, settings: Settings) -> None:
         settings.global_generation_concurrency
     )
 
-    user_total = 0
-    async for key in redis.scan_iter(match=f"{settings.semaphore_user_key_prefix}*"):
-        value = await redis.get(key)
-        user_total += int(value) if value is not None else 0
-    generation_slots_in_use.labels(scope="user").set(user_total)
 
-
-async def render_latest_with_pipeline_gauges(
-    session: AsyncSession, redis: Redis, settings: Settings
-) -> Response:
-    """Refresh the pipeline gauges (best-effort, per datastore) then render the whole
-    shared registry -- the same one :func:`songforge.metrics.render_latest` serves, so
-    a single ``GET /metrics`` exposes both the load-driver counters (AC1) and these
-    pipeline gauges (AC2) together.
-
-    Each refresh is isolated in its own try/except: an unreachable Postgres must not
-    prevent the Redis gauges from refreshing (or vice versa), and neither may ever
-    prevent this from returning a 200 with whatever static counters are already on the
-    registry -- see the module docstring.
-    """
+async def refresh_pipeline_gauges(
+    sessionmaker: async_sessionmaker[AsyncSession], redis: Redis, settings: Settings
+) -> None:
+    """Refresh both pipeline gauge families, each best-effort: a Postgres or Redis blip
+    must not stop the other from refreshing, and must never raise into the caller."""
     try:
-        await refresh_job_state_gauges(session)
+        async with sessionmaker() as session:
+            await refresh_job_state_gauges(session)
     except Exception:
         log.exception("metrics_pipeline_job_state_refresh_failed")
 
@@ -158,10 +128,3 @@ async def render_latest_with_pipeline_gauges(
         await refresh_semaphore_gauges(redis, settings)
     except Exception:
         log.exception("metrics_pipeline_semaphore_refresh_failed")
-
-    try:
-        refresh_db_pool_gauge()
-    except Exception:
-        log.exception("metrics_pipeline_db_pool_refresh_failed")
-
-    return Response(generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)

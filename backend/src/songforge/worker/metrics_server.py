@@ -13,10 +13,9 @@ not compete with the event loop), serving the SAME shared ``REGISTRY`` the web t
 renders. A ``songforge_worker`` dns_sd scrape job discovers every worker replica on
 ``settings.worker_metrics_port``.
 
-Unlike the web ``/metrics`` route, this does NOT refresh the DB-derived pipeline gauges
-(``songforge_jobs_in_state`` etc.) -- those stay the web process's responsibility (set
-from a scrape-time ``GROUP BY``); the worker only exposes what it increments plus its
-own process stats, so the two jobs don't double-count the global gauges.
+The fleet-wide pipeline gauges (``songforge_jobs_in_state``, generation slots) are
+exposed only here: ``worker/pipeline_metrics.py`` refreshes them on a timer, so a scrape
+of this server (like a web scrape) only renders in-memory values.
 """
 
 from __future__ import annotations

@@ -133,6 +133,13 @@ ACTIVE_JOB_STATES: tuple[JobState, ...] = (
     JOB_STATE_INGEST_PENDING,
 )
 
+# Every state a job can still leave. Covered by the partial index `ix_jobs_state_active`
+# (migration 0009), so counting these stays proportional to in-flight work, not history.
+NON_TERMINAL_JOB_STATES: tuple[JobState, ...] = (
+    JOB_STATE_QUEUED,
+    *ACTIVE_JOB_STATES,
+)
+
 # Every job state, in state-machine order (issue #18, AC2): the pipeline gauge
 # (`songforge.metrics_pipeline.refresh_job_state_gauges`) zero-fills across this
 # canonical tuple so a state with no rows still renders an explicit `0` series
