@@ -20,7 +20,7 @@ maxed out and request latency crossed the test's thresholds.
 |:---:|:---:|---:|---:|
 | 1 | 1 | ~1.35k | ~145 req/s |
 | 2 | 2 | ~2.5k | ~201 req/s |
-| 3 | 2 | ~4.6k | ~500 req/s |
+| 3 | 2 | ~4.6k | ~480 req/s |
 
 Capacity grows with each added `web` replica: the web tier scales horizontally,
 while Postgres and Redis stay well below their limits.
