@@ -217,6 +217,11 @@ class Settings(BaseSettings):
     # receiving handler is a later issue (see .orchestrator/CONTEXT.md scope) -- #12
     # only sends a plausible, config-driven URL.
     musicgpt_webhook_url: str = "http://web:8000/api/generation/webhook"
+    # Shared secret the generation API must echo back as `?token=` on the webhook.
+    # MusicGPT doesn't sign webhooks, so this is how the public webhook route tells a
+    # real delivery from a forged one. Appended at send time (never stored on the job
+    # row); empty disables the check (local/simulator). Required in prod.
+    webhook_secret: str = ""
     # Redis semaphore keys (criterion #3: global + per-user in-flight generation caps).
     semaphore_global_key: str = "sem:gen:global"
     semaphore_user_key_prefix: str = "sem:gen:user:"
@@ -351,6 +356,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "session_secret is still the default placeholder in a prod "
                 "environment -- set a real SESSION_SECRET before deploying to prod"
+            )
+        if self.environment == "prod" and not self.webhook_secret:
+            raise ValueError(
+                "webhook_secret is empty in a prod environment -- set WEBHOOK_SECRET so "
+                "the public webhook route rejects forged deliveries"
             )
         return self
 

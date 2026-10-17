@@ -15,6 +15,7 @@ boundary from regressing.
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -24,6 +25,18 @@ from songforge.config import Settings
 from songforge.logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+def webhook_url_with_token(url: str, secret: str) -> str:
+    """Append ``token=<secret>`` to the webhook URL sent to the generation API, which
+    calls it back verbatim; the webhook route rejects deliveries without it. An empty
+    secret leaves the URL unchanged."""
+    if not secret:
+        return url
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query) if k != "token"]
+    query.append(("token", secret))
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 class GenerationRateLimited(Exception):

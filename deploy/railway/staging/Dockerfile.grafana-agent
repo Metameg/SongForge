@@ -1,4 +1,4 @@
 FROM prom/prometheus:v2.55.1
 COPY deploy/railway/staging/prometheus.yml /etc/prometheus/prometheus.yml.tmpl
-ENTRYPOINT ["/bin/sh", "-c", "sed -e \"s|\\${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}|$GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL|g\" -e \"s|\\${GRAFANA_CLOUD_PROMETHEUS_USERNAME}|$GRAFANA_CLOUD_PROMETHEUS_USERNAME|g\" -e \"s|\\${GRAFANA_CLOUD_API_KEY}|$GRAFANA_CLOUD_API_KEY|g\" /etc/prometheus/prometheus.yml.tmpl > /etc/prometheus/prometheus.yml && exec /bin/prometheus \"$@\"", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "sed -e \"s|\\${GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL}|$GRAFANA_CLOUD_PROMETHEUS_REMOTE_WRITE_URL|g\" -e \"s|\\${GRAFANA_CLOUD_PROMETHEUS_USERNAME}|$GRAFANA_CLOUD_PROMETHEUS_USERNAME|g\" -e \"s|\\${GRAFANA_CLOUD_API_KEY}|$GRAFANA_CLOUD_API_KEY|g\" -e \"s|\\${ENVIRONMENT}|${ENVIRONMENT:-staging}|g\" /etc/prometheus/prometheus.yml.tmpl > /etc/prometheus/prometheus.yml && exec /bin/prometheus \"$@\"", "--"]
 CMD ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=1h"]

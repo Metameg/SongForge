@@ -3,6 +3,10 @@ global:
   # load-test-grade local TSDB like the local-dev `prometheus.yml`.
   scrape_interval: 30s
   evaluation_interval: 30s
+  # Filled from the ENVIRONMENT variable at container start (Dockerfile.grafana-agent),
+  # so staging and prod series stay separate in the shared Grafana Cloud stack.
+  external_labels:
+    environment: "${ENVIRONMENT}"
 
 scrape_configs:
   - job_name: songforge_web

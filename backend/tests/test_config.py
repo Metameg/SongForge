@@ -162,9 +162,32 @@ def test_staging_with_default_session_secret_is_fine() -> None:
 
 def test_prod_with_a_real_session_secret_is_fine() -> None:
     settings = Settings(
-        _env={**_base_env(), "ENVIRONMENT": "prod", "SESSION_SECRET": "a-real-prod-secret"}
+        _env={
+            **_base_env(),
+            "ENVIRONMENT": "prod",
+            "SESSION_SECRET": "a-real-prod-secret",
+            "WEBHOOK_SECRET": "a-real-webhook-secret",
+        }
     )
     assert settings.session_secret == "a-real-prod-secret"
+
+
+def test_prod_without_a_webhook_secret_raises() -> None:
+    """The webhook route is public in prod; without a secret anyone could forge a
+    completion and point a job at arbitrary audio."""
+    with pytest.raises(Exception, match="webhook_secret"):
+        Settings(
+            _env={**_base_env(), "ENVIRONMENT": "prod", "SESSION_SECRET": "a-real-prod-secret"}
+        )
+
+
+def test_webhook_url_with_token_appends_the_secret() -> None:
+    from songforge.jobs.generation_client import webhook_url_with_token
+
+    base = "https://jukeboxradioai.com/api/generation/webhook"
+    assert webhook_url_with_token(base, "") == base
+    assert webhook_url_with_token(base, "a/b+c") == base + "?token=a%2Fb%2Bc"
+    assert webhook_url_with_token(base + "?x=1&token=old", "new") == base + "?x=1&token=new"
 
 
 def test_musicgpt_base_url_is_swappable() -> None:

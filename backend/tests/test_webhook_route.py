@@ -850,3 +850,47 @@ async def test_webhook_returns_200_even_if_the_progress_publisher_raises(
 
     assert resp.status_code == 200
     assert (await _get_job(sessionmaker, "job-1")).state == JOB_STATE_INGEST_PENDING
+
+
+# ── Shared-secret token (the route is public in prod via the frontend proxy) ──────
+
+
+def _with_webhook_secret(monkeypatch: pytest.MonkeyPatch, secret: str) -> None:
+    import os
+
+    from songforge.config import Settings
+    from songforge.web.routes import webhook as webhook_route
+
+    settings = Settings(_env={**os.environ, "WEBHOOK_SECRET": secret})
+    monkeypatch.setattr(webhook_route, "get_settings", lambda: settings)
+
+
+@pytest.mark.parametrize("query", ["", "?token=wrong", "?token="])
+async def test_webhook_without_the_right_token_is_rejected_and_changes_nothing(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+) -> None:
+    _with_webhook_secret(monkeypatch, "s3cret")
+    await _insert_job(sessionmaker)
+    client, notify_spy = _build_client(sessionmaker)
+
+    resp = client.post(f"/api/generation/webhook{query}", json=_webhook_body())
+
+    assert resp.status_code == 401
+    assert (await _get_job(sessionmaker, "job-1")).state == JOB_STATE_WAITING_FOR_WEBHOOK
+    assert notify_spy.calls == []
+
+
+async def test_webhook_with_the_right_token_is_accepted(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_webhook_secret(monkeypatch, "s3cret")
+    await _insert_job(sessionmaker)
+    client, _ = _build_client(sessionmaker)
+
+    resp = client.post("/api/generation/webhook?token=s3cret", json=_webhook_body())
+
+    assert resp.status_code == 200
+    assert (await _get_job(sessionmaker, "job-1")).state == JOB_STATE_INGEST_PENDING

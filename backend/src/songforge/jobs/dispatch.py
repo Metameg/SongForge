@@ -42,6 +42,7 @@ from songforge.jobs.generation_client import (
     GenerationRateLimited,
     GenerationRejected,
     GenerationTransientError,
+    webhook_url_with_token,
 )
 from songforge.jobs.semaphore import Semaphore
 from songforge.logging_setup import get_logger
@@ -145,7 +146,10 @@ async def dispatch_claimed_job(
             handles = await client.create(
                 prompt=job.prompt,
                 lyrics=job.lyrics,
-                webhook_url=job.webhook_url or settings.musicgpt_webhook_url,
+                webhook_url=webhook_url_with_token(
+                    job.webhook_url or settings.musicgpt_webhook_url,
+                    settings.webhook_secret,
+                ),
             )
         except GenerationRateLimited:
             _apply_backoff(job, settings)

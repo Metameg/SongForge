@@ -23,9 +23,10 @@ HTTP-edge tests can substitute an in-memory SQLite session and a NOTIFY spy.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncGenerator, Awaitable, Callable
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,7 +157,24 @@ async def _safe_release_semaphore(semaphore: Semaphore, user_id: str) -> None:
         log.exception("semaphore_release_failed", site="webhook", user_id=user_id)
 
 
-@router.post("/api/generation/webhook", response_model=WebhookResponse)
+def require_webhook_token(token: str | None = Query(default=None)) -> None:
+    """Reject a delivery that doesn't carry ``WEBHOOK_SECRET`` as ``?token=`` (dispatch
+    appends it to the URL handed to the generation API). Runs before the body is
+    trusted or the database is touched. A no-op when no secret is configured."""
+    secret = get_settings().webhook_secret
+    if not secret:
+        return
+    if token is None or not hmac.compare_digest(token.encode(), secret.encode()):
+        webhooks_received_total.labels(outcome="bad_token").inc()
+        log.warning("webhook_bad_token", token_present=token is not None)
+        raise HTTPException(status_code=401, detail="invalid webhook token")
+
+
+@router.post(
+    "/api/generation/webhook",
+    response_model=WebhookResponse,
+    dependencies=[Depends(require_webhook_token)],
+)
 async def receive_webhook(
     body: WebhookPayload,
     session: AsyncSession = Depends(get_session),
@@ -173,14 +191,10 @@ async def receive_webhook(
     never calls the generation client -- the audio download/upload belongs entirely
     to the async ingest worker (``songforge.jobs.ingest``).
 
-    SECURITY (deferred, follow-up ticket -- see security report Finding 1): this
-    route does not verify the caller is genuinely the generation provider (no HMAC
-    signature / shared-secret / source check). Left unbuilt for #13 because the
-    simulator seam has no signing contract to verify against and the topology is
-    currently internal-only + UUID-gated (``task_id`` is a 128-bit random handle) --
-    but a real external provider deployment MUST add provider-signature
-    verification here (``identity.py``'s ``hmac.compare_digest`` pattern is the
-    model) before this endpoint is genuinely public. The audio URL this handler
+    SECURITY: the route is public in prod (proxied by the frontend), so
+    ``require_webhook_token`` checks the shared ``WEBHOOK_SECRET`` echoed back as
+    ``?token=``. MusicGPT doesn't sign webhooks, so a shared secret is the strongest
+    check available; rotate it by changing the env var. The audio URL this handler
     records is trusted downstream at the actual network fetch -- see the matching
     comment at the download site in ``songforge.jobs.ingest.HttpAudioDownloader``.
 

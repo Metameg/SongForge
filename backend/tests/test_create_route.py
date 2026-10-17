@@ -540,7 +540,12 @@ async def test_identity_cookie_has_secure_flag_outside_local(
     # fail-closed guard added for the config MEDIUM finding -- unrelated to what
     # this test is proving.
     non_local_settings = Settings(
-        _env={**os.environ, "ENVIRONMENT": environment, "SESSION_SECRET": "a-real-secret"}
+        _env={
+            **os.environ,
+            "ENVIRONMENT": environment,
+            "SESSION_SECRET": "a-real-secret",
+            "WEBHOOK_SECRET": "a-real-webhook-secret",
+        }
     )
     monkeypatch.setattr(create_route, "get_settings", lambda: non_local_settings)
 

@@ -155,6 +155,8 @@ only calls out what **differs per service** or is **prod-required**.
 | `S3_BUCKET` / `S3_REGION`           | your R2 bucket name / `auto`             | same                                 | |
 | `S3_PUBLIC_BASE_URL`                | your R2 public bucket URL or CDN domain  | same (used for `MUSICGPT_WEBHOOK_URL` construction, not audio serving) | audio served straight from R2/CDN to the browser — nothing proxies through `web` |
 | `MUSICGPT_BASE_URL`                 | real MusicGPT API base                   | not read by worker                  | the fault-injectable simulator (`SIM_*`) is dev/test-only — never set in staging/prod |
+| `MUSICGPT_WEBHOOK_URL`              | `https://<public domain>/api/generation/webhook` | same                         | the frontend proxies this path to `web` (which has no public domain); stored on each job at create, sent to MusicGPT at dispatch |
+| `WEBHOOK_SECRET`                    | **required in prod**, `openssl rand -hex 32` | **same value as web**            | the worker appends it as `?token=` when dispatching; web rejects webhooks without it (401). Prod refuses to boot if it's empty. Leave it empty with the simulator (staging/local), which disables the check |
 | `WORKER_LOCK_TCP_USER_TIMEOUT_SECONDS` | not read by web                       | `13` (default; tune per AC#4)       | Postgres `tcp_user_timeout` GUC on the worker's dedicated advisory-lock connection — see [Failover](#failover--n-workers) |
 
 ## R2 object storage setup
