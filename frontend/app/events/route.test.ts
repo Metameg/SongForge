@@ -35,13 +35,22 @@ describe("GET /events proxy", () => {
       .fn()
       .mockResolvedValue({ body: stream, status: 200 } as unknown as Response);
     vi.stubGlobal("fetch", fetchMock);
-    const request = req({ cookie: "sf=1" });
+    const disconnect = new AbortController();
+    const request = new Request("http://x/events", {
+      method: "GET",
+      headers: { cookie: "sf=1" },
+      signal: disconnect.signal,
+    });
     const res = await GET(request);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("text/event-stream");
     expect(res.headers.get("cache-control")).toBe("no-cache");
     expect(res.body).not.toBeNull();
-    expect(fetchMock.mock.calls[0][1].signal).toBe(request.signal);
+    // A browser disconnect must still abort the upstream fetch (backend cleanup).
+    const upstreamSignal: AbortSignal = fetchMock.mock.calls[0][1].signal;
+    expect(upstreamSignal.aborted).toBe(false);
+    disconnect.abort();
+    expect(upstreamSignal.aborted).toBe(true);
   });
 
   // EventSource permanently gives up on a non-200, so failures must end as a 200 stream

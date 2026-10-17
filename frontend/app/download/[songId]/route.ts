@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { backendUrl } from "../../../lib/backend";
+import { backendFetch } from "../../../lib/backend";
 
 /**
  * Same-origin proxy for the download redirect (issue #39). Forwards to backend
@@ -18,11 +18,11 @@ export async function GET(
   const { songId } = await params;
   const cookie = request.headers.get("cookie");
   try {
-    const upstream = await fetch(await backendUrl(`/download/${encodeURIComponent(songId)}`), {
-      cache: "no-store",
-      redirect: "manual",
-      headers: cookie ? { cookie } : {},
-    });
+    const upstream = await backendFetch(
+      `/download/${encodeURIComponent(songId)}`,
+      { cache: "no-store", redirect: "manual", headers: cookie ? { cookie } : {} },
+      { retries: 1 },
+    );
     const location = upstream.headers.get("location");
     if (upstream.status >= 300 && upstream.status < 400 && location) {
       return new NextResponse(null, { status: 302, headers: { location, "cache-control": "no-store" },

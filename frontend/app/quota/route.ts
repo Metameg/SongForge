@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { backendUrl } from "../../lib/backend";
+import { backendFetch } from "../../lib/backend";
 
 /**
  * Server-side runtime proxy for the songs-left read (issue #15, criterion #5).
@@ -19,10 +19,11 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const cookie = request.headers.get("cookie");
   try {
-    const upstream = await fetch(await backendUrl("/quota"), {
-      cache: "no-store",
-      headers: cookie ? { cookie } : {},
-    });
+    const upstream = await backendFetch(
+      "/quota",
+      { cache: "no-store", headers: cookie ? { cookie } : {} },
+      { retries: 1 },
+    );
     const body = await upstream.text();
     const headers = new Headers({
       "content-type": upstream.headers.get("content-type") ?? "application/json",

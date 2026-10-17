@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { backendUrl } from "../../lib/backend";
+import { backendFetch } from "../../lib/backend";
 
 /**
  * Server-side runtime proxy for the queue read (issue #38). Mirrors `app/quota/route.ts`:
@@ -12,10 +12,11 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const cookie = request.headers.get("cookie");
   try {
-    const upstream = await fetch(await backendUrl("/queue"), {
-      cache: "no-store",
-      headers: cookie ? { cookie } : {},
-    });
+    const upstream = await backendFetch(
+      "/queue",
+      { cache: "no-store", headers: cookie ? { cookie } : {} },
+      { retries: 1 },
+    );
     const body = await upstream.text();
     return new NextResponse(body, {
       status: upstream.status,

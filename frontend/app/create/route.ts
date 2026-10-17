@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { backendUrl } from "../../lib/backend";
+import { backendFetch } from "../../lib/backend";
 
 /**
  * Runtime proxy for POST /create (issue #36). Mirrors `app/quota/route.ts`: forwards the
@@ -21,16 +21,21 @@ export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") ?? "application/json";
   const body = await request.text();
   try {
-    const upstream = await fetch(await backendUrl("/create"), {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        "content-type": contentType,
-        ...(cookie ? { cookie } : {}),
-        ...(botCheck ? { [BOT_CHECK_HEADER]: botCheck } : {}),
+    // No retry: a POST that reached a replica before failing could otherwise create twice.
+    const upstream = await backendFetch(
+      "/create",
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          "content-type": contentType,
+          ...(cookie ? { cookie } : {}),
+          ...(botCheck ? { [BOT_CHECK_HEADER]: botCheck } : {}),
+        },
+        body,
       },
-      body,
-    });
+      { timeoutMs: 15_000 },
+    );
     const text = await upstream.text();
     const headers = new Headers({
       "content-type": upstream.headers.get("content-type") ?? "application/json",

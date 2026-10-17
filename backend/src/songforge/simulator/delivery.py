@@ -101,8 +101,10 @@ async def _post(app: FastAPI, url: str, payload: WebhookPayload) -> None:
     # logged as a warning and swallowed — it must never surface as an unretrieved-task
     # traceback. (A never-delivered webhook is itself a modelled condition here.)
     client = app.state.http_client
+    picker = getattr(app.state, "webhook_url_picker", None)
     try:
-        await client.post(url, json=payload.model_dump())
+        target = await picker.pick(url) if picker is not None else url
+        await client.post(target, json=payload.model_dump())
     except Exception as exc:  # noqa: BLE001 - detached task must not crash on delivery failure
         log.warning(
             "sim_webhook_delivery_failed",

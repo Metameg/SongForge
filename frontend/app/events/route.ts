@@ -17,7 +17,7 @@
  * than the backend connection lingering until the next ~30s heartbeat write fails.
  */
 
-import { backendUrl } from "../../lib/backend";
+import { backendFetch } from "../../lib/backend";
 
 export const dynamic = "force-dynamic";
 
@@ -38,11 +38,11 @@ export async function GET(request: Request) {
   const cookie = request.headers.get("cookie");
   let upstream: Response;
   try {
-    upstream = await fetch(await backendUrl("/events"), {
-      cache: "no-store",
-      headers: cookie ? { cookie } : {},
-      signal: request.signal,
-    });
+    upstream = await backendFetch(
+      "/events",
+      { cache: "no-store", headers: cookie ? { cookie } : {}, signal: request.signal },
+      { retries: 1 },
+    );
   } catch {
     return retryLaterResponse();
   }
