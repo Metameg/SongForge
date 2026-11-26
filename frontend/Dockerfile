@@ -14,6 +14,10 @@ RUN npm run build
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+# The standalone server binds to $HOSTNAME, which Docker sets to the container ID, so it
+# would listen only on the container's network IP and the `localhost` healthcheck would
+# be refused. Bind every interface instead (Next.js's own Docker example does this).
+ENV HOSTNAME=0.0.0.0
 # Next.js "standalone" output bundles a minimal server + only required node_modules.
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
