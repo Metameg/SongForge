@@ -248,3 +248,160 @@ def test_up_respects_profile_override(run: Runner, complete_env: Path) -> None:
     run("server-up.sh", env={"SERVER_PROFILES": "monitoring"})
     up = next(c for c in run.compose_calls() if " up " in c)
     assert "--profile monitoring" in up and "tunnel" not in up
+
+
+# ── server-loadtest.sh ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def cookies(run: Runner) -> Path:
+    # A ready cookie file, so the wrapper never tries to mint identities.
+    run.cookie_file.write_text('["c1", "c2"]')
+    return run.cookie_file
+
+
+def _docker_runs(run: Runner) -> list[str]:
+    return [c for c in run.calls() if c.startswith("run ")]
+
+
+def test_loadtest_runs_k6(run: Runner, complete_env: Path, cookies: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate")
+    assert result.returncode == 0, result.stderr
+    (k6,) = _docker_runs(run)
+    assert "--network host" in k6
+    assert "--ulimit nofile=65536:65536" in k6
+    assert "-e BASE_URL=http://localhost:8000" in k6
+    assert f"-v {REPO}/loadtest:/scripts:ro" in k6
+    assert f"-v {cookies}:/cookies.json:ro" in k6
+    assert "-e COOKIE_FILE=/cookies.json" in k6
+    assert k6.endswith("grafana/k6:1.8.3 run /scripts/create-rate.js")
+
+
+def test_loadtest_frontend_target(run: Runner, complete_env: Path, cookies: Path) -> None:
+    run("server-loadtest.sh", "create-rate", env={"TARGET": "frontend"})
+    (k6,) = _docker_runs(run)
+    assert "-e BASE_URL=http://localhost:3000" in k6
+
+
+def test_loadtest_unknown_target(run: Runner, complete_env: Path, cookies: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate", env={"TARGET": "web"})
+    assert result.returncode == 1
+    assert "TARGET" in result.stderr
+    assert not _docker_runs(run)
+
+
+def test_loadtest_forwards_tunables(run: Runner, complete_env: Path, cookies: Path) -> None:
+    run("server-loadtest.sh", "realistic-session", env={"TARGET_USERS": "50", "DURATION": "30s"})
+    (k6,) = _docker_runs(run)
+    assert "-e TARGET_USERS=50" in k6
+    assert "-e DURATION=30s" in k6
+    assert "STEADY_MINUTES" not in k6
+
+
+@pytest.mark.parametrize("name", ["nope", "create-rate.js", "../loadtest/create-rate", ""])
+def test_loadtest_unknown_script(run: Runner, complete_env: Path, cookies: Path, name: str) -> None:
+    result = run("server-loadtest.sh", name)
+    assert result.returncode == 1
+    assert "create-rate" in result.stderr and "realistic-session" in result.stderr
+    assert not _docker_runs(run)
+
+
+def test_loadtest_needs_env(run: Runner, cookies: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate")
+    assert result.returncode == 1
+    assert not _docker_runs(run)
+
+
+def test_loadtest_low_disk_refuses(run: Runner, complete_env: Path, cookies: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate", env={"MIN_FREE_GB": "999999"})
+    assert result.returncode == 1
+    assert "FORCE=1" in result.stderr
+    assert not _docker_runs(run)
+
+
+def test_loadtest_force_overrides_disk(run: Runner, complete_env: Path, cookies: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate", env={"MIN_FREE_GB": "999999", "FORCE": "1"})
+    assert result.returncode == 0, result.stderr
+    assert len(_docker_runs(run)) == 1
+
+
+@pytest.fixture
+def quota_server():
+    """A stand-in /quota that mints a fresh sf_uid cookie per request."""
+    import itertools
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    counter = itertools.count()
+    paths: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            paths.append(self.path)
+            n = next(counter)
+            self.send_response(200)
+            self.send_header("Set-Cookie", "other=x; Path=/")
+            self.send_header("Set-Cookie", f"sf_uid=uid{n}.sig; HttpOnly; Secure; Path=/")
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", paths
+    server.shutdown()
+
+
+@pytest.mark.parametrize("existing", [None, '["none"]'])
+def test_loadtest_mints_cookies(run: Runner, complete_env: Path, quota_server, existing) -> None:
+    import json
+
+    url, paths = quota_server
+    if existing is not None:
+        run.cookie_file.write_text(existing)
+    result = run("server-loadtest.sh", "create-rate", env={"BASE_URL": url})
+    assert result.returncode == 0, result.stderr
+    minted = json.loads(run.cookie_file.read_text())
+    assert len(minted) == 100 and len(set(minted)) == 100
+    assert minted[0] == "uid0.sig"
+    assert set(paths) == {"/quota"}
+    assert run.cookie_file.stat().st_mode & 0o777 == 0o644
+    (k6,) = _docker_runs(run)
+    assert f"-e BASE_URL={url}" in k6
+
+
+def test_loadtest_mint_failure_stops(run: Runner, complete_env: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate", env={"BASE_URL": "http://127.0.0.1:9"})
+    assert result.returncode != 0
+    assert not run.cookie_file.exists()
+    assert not _docker_runs(run)
+
+
+# ── server-wipe.sh ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("answer", ["y\n", "yes\n", "WIPE\n", " wipe\n", ""])
+def test_wipe_requires_confirmation(run: Runner, complete_env: Path, answer: str) -> None:
+    result = run("server-wipe.sh", stdin=answer)
+    assert result.returncode == 1
+    assert run.calls() == []
+
+
+def test_wipe_needs_env(run: Runner) -> None:
+    result = run("server-wipe.sh", stdin="wipe\n")
+    assert result.returncode == 1
+    assert run.calls() == []
+
+
+def test_wipe_resets_volumes(run: Runner, complete_env: Path) -> None:
+    result = run("server-wipe.sh", stdin="wipe\n")
+    assert result.returncode == 0, result.stderr
+    calls = run.compose_calls()
+    down = next(i for i, c in enumerate(calls) if "down --volumes" in c)
+    up = next(i for i, c in enumerate(calls) if "up -d --build --remove-orphans" in c)
+    assert down < up
+    assert "--profile tunnel" in calls[down] and "--profile monitoring" in calls[down]
