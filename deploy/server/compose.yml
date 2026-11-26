@@ -1,0 +1,118 @@
+# Home dev server overlay -- layered on the UNCHANGED base docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f deploy/server/compose.yml \
+#     --env-file deploy/server/.env --profile tunnel --profile monitoring up -d
+#
+# (scripts/server-up.sh runs exactly that.) What it changes vs. the laptop stack:
+#   - Datastores and the simulator publish NO host ports; lb/frontend bind 127.0.0.1.
+#     The only way in from outside is the `cloudflared` named tunnel (profile `tunnel`).
+#   - Every long-running service restarts unless stopped, so the stack survives a reboot.
+#   - Simulator on, rate limits off, browser-facing audio/presign URLs on the public
+#     hostname (Cloudflare routes /songforge-audio/* to minio:9000).
+#   - Every secret is REQUIRED from deploy/server/.env (made by scripts/server-init.sh);
+#     none of the base file's dev defaults survive.
+#
+# Needs Docker Compose >= 2.24.4 for the `!reset` / `!override` tags.
+# Relative paths resolve against the repo root (the first -f file's directory).
+
+name: songforge-server
+
+x-server-env: &server-env
+  ENVIRONMENT: staging
+  ENFORCE_RATE_LIMITS: "false"
+  MUSICGPT_BASE_URL: http://simulator:8080
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?set in deploy/server/.env}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?set in deploy/server/.env}
+  # Bucket name is pinned: the Cloudflare route matches the literal /songforge-audio/ path.
+  S3_BUCKET: songforge-audio
+  S3_PUBLIC_BASE_URL: https://${PUBLIC_HOSTNAME:?set in deploy/server/.env}/songforge-audio
+  S3_PRESIGN_ENDPOINT_URL: https://${PUBLIC_HOSTNAME:?set in deploy/server/.env}
+  SESSION_SECRET: ${SESSION_SECRET:?set in deploy/server/.env}
+  # Not forwarded by the base file at all, so it must be set here.
+  WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set in deploy/server/.env}
+  GLOBAL_GENERATION_CONCURRENCY: ${GLOBAL_GENERATION_CONCURRENCY:-50}
+
+services:
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in deploy/server/.env}
+    restart: unless-stopped
+
+  pgbouncer:
+    restart: unless-stopped
+
+  redis:
+    ports: !reset []
+    restart: unless-stopped
+
+  minio:
+    ports: !reset []
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:?set in deploy/server/.env}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?set in deploy/server/.env}
+    restart: unless-stopped
+
+  migrate:
+    environment:
+      <<: *server-env
+
+  web:
+    environment:
+      <<: *server-env
+    restart: unless-stopped
+
+  worker:
+    environment:
+      <<: *server-env
+    restart: unless-stopped
+
+  simulator:
+    ports: !reset []
+    restart: unless-stopped
+
+  lb:
+    ports: !override
+      - "127.0.0.1:${LB_HOST_PORT:-8000}:80"
+    restart: unless-stopped
+
+  frontend:
+    ports: !override
+      - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  # Outbound-only named tunnel: no router ports opened. Routes (path ^/songforge-audio/
+  # -> http://minio:9000, everything else -> http://frontend:3000) and the Access policy
+  # live in the Cloudflare dashboard -- see docs/server-deploy.md.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.7
+    profiles: ["tunnel"]
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set in deploy/server/.env}
+    depends_on:
+      frontend:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    restart: unless-stopped
+
+  grafana:
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in deploy/server/.env}
+    restart: unless-stopped
+
+  postgres_exporter:
+    restart: unless-stopped
+
+  redis_exporter:
+    restart: unless-stopped
+
+  pgbouncer_exporter:
+    restart: unless-stopped
+
+  cadvisor:
+    restart: unless-stopped
