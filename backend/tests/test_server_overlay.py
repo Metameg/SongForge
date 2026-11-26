@@ -98,6 +98,14 @@ def test_lb_and_frontend_keep_their_host_ports(cfg: dict) -> None:
     assert [p["published"] for p in s["frontend"]["ports"]] == ["3000"]
 
 
+def test_host_ports_are_fixed(tmp_path: Path) -> None:
+    # Not overridable: the load-test wrapper hardcodes them.
+    env = _write_env(tmp_path / ".env", {**DUMMY, "LB_HOST_PORT": "9999", "FRONTEND_HOST_PORT": "9998"})
+    services = json.loads(_config(env).stdout)["services"]
+    assert [p["published"] for p in services["lb"]["ports"]] == ["8000"]
+    assert [p["published"] for p in services["frontend"]["ports"]] == ["3000"]
+
+
 def test_long_running_services_restart(cfg: dict) -> None:
     for name, svc in cfg["services"].items():
         assert svc.get("restart") == ("no" if name == "migrate" else "unless-stopped"), name

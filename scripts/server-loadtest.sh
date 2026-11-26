@@ -47,7 +47,8 @@ require_env
 
 if [ "${FORCE:-0}" != "1" ]; then
   min_gb="${MIN_FREE_GB:-30}"
-  root="$(docker info -f '{{.DockerRootDir}}')"
+  root="$(docker info -f '{{.DockerRootDir}}')" \
+    || die "cannot reach the Docker daemon (is it running, and are you in the docker group?)"
   avail="$(df --output=avail -BG "$root" | tail -n 1)"
   avail="${avail//[!0-9]/}"
   if [ "${avail:-0}" -lt "$min_gb" ]; then
@@ -55,8 +56,9 @@ if [ "${FORCE:-0}" != "1" ]; then
   fi
 fi
 
-cookie_file="${SERVER_COOKIE_FILE:-$SERVER_REPO/loadtest/cookies.json}"
-cookie_file="$(cd "$(dirname "$cookie_file")" && pwd)/$(basename "$cookie_file")"
+cookie_dir="$(cd "$(dirname "$SERVER_COOKIE_FILE")" && pwd)" \
+  || die "directory for SERVER_COOKIE_FILE ($SERVER_COOKIE_FILE) does not exist"
+cookie_file="$cookie_dir/$(basename "$SERVER_COOKIE_FILE")"
 if [ ! -s "$cookie_file" ] || [ "$(tr -d '[:space:]' <"$cookie_file")" = '["none"]' ]; then
   echo "Minting $COOKIE_COUNT identities from $base_url/quota ..." >&2
   tmp="$(mktemp "$cookie_file.XXXXXX")"

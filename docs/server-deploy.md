@@ -148,8 +148,7 @@ TARGET=frontend TARGET_USERS=200 scripts/server-loadtest.sh realistic-session
   PRE_ALLOCATED_VUS MAX_VUS HOLD_OPEN_SECONDS TARGET_USERS ARRIVALS_PER_SEC
   STEADY_MINUTES ACTIONS_PER_USER HOLD`.
 - Identities: if `loadtest/cookies.json` is missing, or holds `["none"]`, 100 are minted
-  from `/quota` first. Delete the file after a wipe, because the users it names are
-  gone.
+  from `/quota` first. The wipe deletes the file, because the users it names are gone.
 - **Disk:** each simulated song is a full-size MP3. At the 50-job cap and 5 s delay that
   is up to about 24 GB per 10 minutes, so the script refuses to start with less than
   `MIN_FREE_GB` (default 30) free under Docker's root. `FORCE=1` skips the check. Watch
@@ -162,11 +161,10 @@ meant for that traffic, and the tunnel would cap the numbers.
 
 ```bash
 scripts/server-wipe.sh      # type: wipe
-rm -f loadtest/cookies.json
 ```
 
-This removes the Postgres, Redis and MinIO volumes together, then restarts the stack,
-which reseeds the static library. Anything other than the exact word `wipe` aborts
+This removes the Postgres, Redis and MinIO volumes together, plus
+`loadtest/cookies.json`, then restarts the stack, which reseeds the static library. Anything other than the exact word `wipe` aborts
 without removing anything. Secrets in `deploy/server/.env` are kept and reused.
 
 ## Troubleshooting

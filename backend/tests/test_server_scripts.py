@@ -42,6 +42,7 @@ printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 if [ "$1 $2 $3" = "compose version --short" ]; then
   echo "${FAKE_COMPOSE_VERSION:-2.40.0}"
 elif [ "$1" = "info" ]; then
+  [ -n "${FAKE_DOCKER_INFO_FAIL:-}" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
   echo /
 fi
 exit 0
@@ -319,6 +320,13 @@ def test_loadtest_low_disk_refuses(run: Runner, complete_env: Path, cookies: Pat
     assert not _docker_runs(run)
 
 
+def test_loadtest_daemon_down_is_clear(run: Runner, complete_env: Path, cookies: Path) -> None:
+    result = run("server-loadtest.sh", "create-rate", env={"FAKE_DOCKER_INFO_FAIL": "1"})
+    assert result.returncode == 1
+    assert "Docker daemon" in result.stderr and "error:" in result.stderr
+    assert not _docker_runs(run)
+
+
 def test_loadtest_force_overrides_disk(run: Runner, complete_env: Path, cookies: Path) -> None:
     result = run("server-loadtest.sh", "create-rate", env={"MIN_FREE_GB": "999999", "FORCE": "1"})
     assert result.returncode == 0, result.stderr
@@ -405,3 +413,14 @@ def test_wipe_resets_volumes(run: Runner, complete_env: Path) -> None:
     up = next(i for i, c in enumerate(calls) if "up -d --build --remove-orphans" in c)
     assert down < up
     assert "--profile tunnel" in calls[down] and "--profile monitoring" in calls[down]
+
+
+def test_wipe_removes_stale_cookies(run: Runner, complete_env: Path, cookies: Path) -> None:
+    # The minted identities name users the wipe deletes; the next load test re-mints.
+    assert run("server-wipe.sh", stdin="wipe\n").returncode == 0
+    assert not cookies.exists()
+
+
+def test_aborted_wipe_keeps_cookies(run: Runner, complete_env: Path, cookies: Path) -> None:
+    run("server-wipe.sh", stdin="no\n")
+    assert cookies.exists()

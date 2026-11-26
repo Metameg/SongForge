@@ -5,9 +5,11 @@
 # Overrides:
 #   SERVER_ENV_FILE   env file to use (default: deploy/server/.env)
 #   SERVER_PROFILES   space-separated Compose profiles (default: "tunnel monitoring")
+#   SERVER_COOKIE_FILE  k6 identities (default: loadtest/cookies.json)
 
 SERVER_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SERVER_ENV_FILE="${SERVER_ENV_FILE:-$SERVER_REPO/deploy/server/.env}"
+SERVER_COOKIE_FILE="${SERVER_COOKIE_FILE:-$SERVER_REPO/loadtest/cookies.json}"
 SERVER_PROFILES="${SERVER_PROFILES-tunnel monitoring}"
 SERVER_MIN_COMPOSE="2.24.4"
 

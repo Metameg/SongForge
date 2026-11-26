@@ -17,5 +17,7 @@ IFS= read -r answer || true
 
 require_compose
 dc down --volumes --remove-orphans
+# The k6 identities name users that no longer exist; the next load test mints new ones.
+rm -f "$SERVER_COOKIE_FILE"
 dc up -d --build --remove-orphans
 dc ps

@@ -71,14 +71,15 @@ services:
     ports: !reset []
     restart: unless-stopped
 
+  # Host ports are fixed (not ${..._HOST_PORT}): scripts/server-loadtest.sh targets them.
   lb:
     ports: !override
-      - "127.0.0.1:${LB_HOST_PORT:-8000}:80"
+      - "127.0.0.1:8000:80"
     restart: unless-stopped
 
   frontend:
     ports: !override
-      - "127.0.0.1:${FRONTEND_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
   # Outbound-only named tunnel: no router ports opened. Routes (path ^/songforge-audio/
