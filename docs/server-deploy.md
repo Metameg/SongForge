@@ -12,20 +12,23 @@ Design: [`docs/superpowers/specs/2026-11-23-home-server-design.md`](superpowers/
 | Piece | Where |
 |---|---|
 | Base stack | `docker-compose.yml`, unchanged |
-| Server overlay | `deploy/server/compose.yml`: no datastore ports, `lb`/`frontend` on `127.0.0.1`, restarts, simulator, `cloudflared` |
+| Server overlay | `deploy/server/compose.yml`: `lb` as the front door, 2 frontend replicas, no datastore ports, restarts, simulator, `cloudflared` |
+| Front door | `deploy/server/nginx.conf` (mounted over `loadbalancer/nginx.conf` on the server only) |
 | Secrets | `deploy/server/.env` on the server only, mode 600, git-ignored |
 | Scripts | `scripts/server-init.sh`, `server-up.sh`, `server-loadtest.sh`, `server-wipe.sh` |
 
-Ports on the server, all bound to `127.0.0.1`: `8000` (lb → web), `3000` (frontend),
-`59090` (Prometheus), `59091` (Grafana). Postgres, Redis, MinIO and the simulator publish
-nothing.
+Request path, mirroring Railway (whose edge balances the public frontend service, which
+calls `web` over the private network):
 
-Public routes on `dev.<domain>`:
+```
+Cloudflare → cloudflared → lb:80 (nginx)
+                             ├─ /songforge-audio/*  → minio:9000   (playback, seeking, downloads)
+                             └─ everything else     → frontend:3000 × 2 replicas
+                                                        → web:8000 × 2 (frontend picks a replica)
+```
 
-| Path | Goes to |
-|---|---|
-| `^/songforge-audio/` | `http://minio:9000` (audio playback, seeking, downloads) |
-| everything else | `http://frontend:3000` (the app, SSE radio, API proxy) |
+Ports on the server, all bound to `127.0.0.1`: `8080` (lb, the front door), `59090`
+(Prometheus), `59091` (Grafana). Nothing else publishes a port.
 
 ## Prerequisites
 
@@ -80,17 +83,21 @@ Do not copy the laptop's root `.env` here. It holds the real MusicGPT key.
 Do this first. Once a route exists, the hostname is public, so Access needs to be there
 already.
 
-## 5. Add the routes, in this order
+## 5. Add the route
 
 On the tunnel: **Public hostnames (Published application routes) → Add**.
 
-1. Subdomain `dev`, domain `<domain>`, path `^/songforge-audio/`, service
-   **HTTP** `minio:9000`.
-2. Subdomain `dev`, domain `<domain>`, **no path**, service **HTTP** `frontend:3000`.
+- Subdomain `dev`, domain `<domain>`, **no path**, service **HTTP** `lb:80`.
 
-Cloudflare checks routes top to bottom, so the audio route has to come first. Leave
-**HTTP Host Header** blank on both. Presigned download URLs are signed for
-`dev.<domain>`, so MinIO has to see that host.
+That is the only route: nginx splits audio from the app itself. Leave **HTTP Host
+Header** blank. Presigned download URLs are signed for `dev.<domain>`, so MinIO has to
+see that host, and nginx passes it through.
+
+**Upgrading from the two-route setup** (`^/songforge-audio/` → `minio:9000` and
+`frontend:3000`): after `git pull && scripts/server-up.sh`, delete both old routes and
+add the one above. The old routes would still answer (Docker still resolves `frontend`
+and `minio`), but they bypass nginx, so visitors would skip the front door the load
+tests measure.
 
 ## 6. Start it
 
@@ -137,13 +144,18 @@ Then open <http://localhost:59091>. User `admin`, password `GRAFANA_ADMIN_PASSWO
 ```bash
 scripts/server-loadtest.sh create-rate
 TARGET_RATE_PER_SEC=5 DURATION=2m scripts/server-loadtest.sh create-rate
-TARGET=frontend TARGET_USERS=200 scripts/server-loadtest.sh realistic-session
+TARGET_USERS=200 scripts/server-loadtest.sh realistic-session
+MAX_VUS=4000 scripts/server-loadtest.sh connection-ceiling
 ```
 
 - The argument is a file in `loadtest/` without `.js`. Run the script with no argument
   to list them. See `loadtest/README.md` for what each one measures.
-- `TARGET=lb` (default) hits `http://localhost:8000`; `TARGET=frontend` hits
-  `http://localhost:3000`.
+- k6 hits `http://localhost:8080` (`TARGET=edge-origin`, the only target): the same
+  front door cloudflared uses, so every request takes a visitor's path, lb → frontend
+  replicas → web, minus Cloudflare itself.
+- nginx is sized for held-open streams in `deploy/server/nginx.conf`
+  (`worker_processes auto`, `worker_connections`, `worker_rlimit_nofile`). Each live
+  listener holds two nginx connections.
 - When set, these are passed through to k6: `TARGET_RATE_PER_SEC DURATION
   PRE_ALLOCATED_VUS MAX_VUS HOLD_OPEN_SECONDS TARGET_USERS ARRIVALS_PER_SEC
   STEADY_MINUTES ACTIONS_PER_USER HOLD`.
@@ -173,11 +185,12 @@ without removing anything. Secrets in `deploy/server/.env` are kept and reused.
 |---|---|
 | `server-up.sh`: "... is blank or missing" | Run `scripts/server-init.sh dev.<domain>` or fill the named variable in `deploy/server/.env`. |
 | `server-up.sh`: "docker compose ... is too old" | Install Compose ≥ 2.24.4 from Docker's apt repository. |
-| Tunnel not Healthy | `dc logs cloudflared`. A bad token logs an auth error; fix `TUNNEL_TOKEN` and run `server-up.sh` again. `cloudflared` only starts once `frontend` and `minio` are healthy (`dc ps`). |
-| 502 / 1033 at `dev.<domain>` | Route service names must be exactly `frontend:3000` and `minio:9000`, type HTTP. |
-| Page loads, audio doesn't (404 or HTML) | The `^/songforge-audio/` route is missing or sits below the catch-all route. |
-| Download fails with `SignatureDoesNotMatch` | A route sets **HTTP Host Header**; clear it. |
-| Radio stops updating | `dc logs web frontend`. SSE sends a heartbeat every 30 s, well under Cloudflare's 125 s timeout. A browser extension that buffers responses can also do this. |
+| Tunnel not Healthy | `dc logs cloudflared`. A bad token logs an auth error; fix `TUNNEL_TOKEN` and run `server-up.sh` again. `cloudflared` only starts once `lb` is healthy, and `lb` waits for `frontend` and `minio` (`dc ps`). |
+| 502 / 1033 at `dev.<domain>` | The route must be exactly `lb:80`, type HTTP. Then `dc logs lb`. |
+| Page loads, audio doesn't (404 or HTML) | A leftover `^/songforge-audio/` route still points at MinIO directly, or nginx can't reach it: `dc logs lb minio`. |
+| Download fails with `SignatureDoesNotMatch` | The route sets **HTTP Host Header**; clear it. |
+| Load test plateaus or fails fast | `dc logs lb \| grep -E 'worker_connections\|Too many open files'` names an nginx limit; otherwise check `docker stats` for a pinned `frontend` or `web`. |
+| Radio stops updating | `dc logs lb web frontend`. SSE sends a heartbeat every 30 s, well under Cloudflare's 125 s timeout. A browser extension that buffers responses can also do this. |
 | Login loop / no Access prompt | The Access application's domain must be exactly `dev.<domain>` with no path. |
 | Postgres auth errors after editing secrets | The volumes keep the old passwords. Restore the old values, or wipe. |
 | Disk filling up | `scripts/server-wipe.sh`; `docker system prune` for old images. |

@@ -4,11 +4,13 @@
 #     --env-file deploy/server/.env --profile tunnel --profile monitoring up -d
 #
 # (scripts/server-up.sh runs exactly that.) What it changes vs. the laptop stack:
-#   - Datastores and the simulator publish NO host ports; lb/frontend bind 127.0.0.1.
+#   - `lb` becomes the front door (deploy/server/nginx.conf): cloudflared -> lb:80 ->
+#     /songforge-audio/* to minio, everything else to 2 frontend replicas.
+#   - Only lb (127.0.0.1:8080) and the monitoring UIs publish ports, all on loopback.
 #     The only way in from outside is the `cloudflared` named tunnel (profile `tunnel`).
 #   - Every long-running service restarts unless stopped, so the stack survives a reboot.
 #   - Simulator on, rate limits off, browser-facing audio/presign URLs on the public
-#     hostname (Cloudflare routes /songforge-audio/* to minio:9000).
+#     hostname.
 #   - Every secret is REQUIRED from deploy/server/.env (made by scripts/server-init.sh);
 #     none of the base file's dev defaults survive.
 #
@@ -71,20 +73,42 @@ services:
     ports: !reset []
     restart: unless-stopped
 
-  # Host ports are fixed (not ${..._HOST_PORT}): scripts/server-loadtest.sh targets them.
+  # The front door (deploy/server/nginx.conf): /songforge-audio/* -> minio, everything
+  # else -> the frontend replicas. Plays Railway's edge. Its host port is fixed (not
+  # ${LB_HOST_PORT}) because scripts/server-loadtest.sh targets it.
   lb:
+    volumes: !override
+      - type: bind
+        source: ./deploy/server/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
     ports: !override
-      - "127.0.0.1:8000:80"
+      - "127.0.0.1:8080:80"
+    depends_on:
+      frontend:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/lb-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
+  # Two replicas behind lb, like Railway's frontend service. No host port: N replicas
+  # cannot share one, and everything reaches them through lb. BACKEND_URL stays
+  # http://web:8000 -- the frontend spreads API calls over the web replicas itself.
   frontend:
-    ports: !override
-      - "127.0.0.1:3000:3000"
+    ports: !reset []
+    deploy:
+      replicas: 2
     restart: unless-stopped
 
-  # Outbound-only named tunnel: no router ports opened. Routes (path ^/songforge-audio/
-  # -> http://minio:9000, everything else -> http://frontend:3000) and the Access policy
-  # live in the Cloudflare dashboard -- see docs/server-deploy.md.
+  # Outbound-only named tunnel: no router ports opened. Its single route
+  # (dev.<domain> -> http://lb:80) and the Access policy live in the Cloudflare
+  # dashboard -- see docs/server-deploy.md.
   cloudflared:
     image: cloudflare/cloudflared:2026.10.7
     profiles: ["tunnel"]
@@ -92,9 +116,7 @@ services:
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set in deploy/server/.env}
     depends_on:
-      frontend:
-        condition: service_healthy
-      minio:
+      lb:
         condition: service_healthy
     restart: unless-stopped
 

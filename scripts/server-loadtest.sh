@@ -2,10 +2,11 @@
 # Run one of the k6 scripts in loadtest/ on the server itself, against localhost.
 #
 #   scripts/server-loadtest.sh create-rate
-#   TARGET=frontend TARGET_USERS=50 scripts/server-loadtest.sh realistic-session
+#   TARGET_USERS=50 scripts/server-loadtest.sh realistic-session
 #
 # Environment:
-#   TARGET        lb (default, http://localhost:8000) or frontend (http://localhost:3000)
+#   TARGET        edge-origin (default, http://localhost:8080): lb's front door, i.e. the
+#                 visitor path (lb -> frontend replicas -> web) minus Cloudflare
 #   BASE_URL      overrides the URL TARGET picks
 #   MIN_FREE_GB   refuse to start below this much free space for Docker (default 30;
 #                 simulated songs are full-size MP3s). FORCE=1 skips the check.
@@ -36,10 +37,9 @@ if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || [ ! -f "$SERVER_REPO/loadtest/$name.js
   die "usage: $0 <script>   (one of: $(available_scripts))"
 fi
 
-case "${TARGET:-lb}" in
-  lb) default_url="http://localhost:8000" ;;
-  frontend) default_url="http://localhost:3000" ;;
-  *) die "TARGET must be lb or frontend, not '${TARGET}'" ;;
+case "${TARGET:-edge-origin}" in
+  edge-origin) default_url="http://localhost:8080" ;;
+  *) die "TARGET must be edge-origin (lb's front door on :8080), not '${TARGET}'" ;;
 esac
 base_url="${BASE_URL:-$default_url}"
 

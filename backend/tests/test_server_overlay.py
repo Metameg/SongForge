@@ -87,23 +87,44 @@ def cfg(tmp_path_factory: pytest.TempPathFactory) -> dict:
 
 def test_only_loopback_ports(cfg: dict) -> None:
     pub = {n: s["ports"] for n, s in cfg["services"].items() if s.get("ports")}
-    assert set(pub) == {"lb", "frontend", "prometheus", "grafana"}
+    assert set(pub) == {"lb", "prometheus", "grafana"}
     assert all(p["host_ip"] == "127.0.0.1" for ports in pub.values() for p in ports)
 
 
-def test_lb_and_frontend_keep_their_host_ports(cfg: dict) -> None:
-    # The k6 wrapper targets localhost:8000 / localhost:3000.
-    s = cfg["services"]
-    assert [p["published"] for p in s["lb"]["ports"]] == ["8000"]
-    assert [p["published"] for p in s["frontend"]["ports"]] == ["3000"]
+def test_lb_is_the_front_door_on_8080(cfg: dict) -> None:
+    # The k6 wrapper targets localhost:8080 -- the visitor path minus Cloudflare.
+    (port,) = cfg["services"]["lb"]["ports"]
+    assert (port["published"], port["target"]) == ("8080", 80)
 
 
-def test_host_ports_are_fixed(tmp_path: Path) -> None:
-    # Not overridable: the load-test wrapper hardcodes them.
-    env = _write_env(tmp_path / ".env", {**DUMMY, "LB_HOST_PORT": "9999", "FRONTEND_HOST_PORT": "9998"})
+def test_front_door_port_is_fixed(tmp_path: Path) -> None:
+    # Not overridable: the load-test wrapper hardcodes it.
+    env = _write_env(tmp_path / ".env", {**DUMMY, "LB_HOST_PORT": "9999"})
     services = json.loads(_config(env).stdout)["services"]
-    assert [p["published"] for p in services["lb"]["ports"]] == ["8000"]
-    assert [p["published"] for p in services["frontend"]["ports"]] == ["3000"]
+    assert [p["published"] for p in services["lb"]["ports"]] == ["8080"]
+
+
+def test_frontend_runs_two_replicas_behind_lb(cfg: dict) -> None:
+    fe = cfg["services"]["frontend"]
+    assert fe["deploy"]["replicas"] == 2
+    assert not fe.get("ports")
+    # The API hop is unchanged: the frontend spreads calls over the web replicas itself
+    # (frontend/lib/backend.ts), like Railway's private-domain hop.
+    assert fe["environment"]["BACKEND_URL"] == "http://web:8000"
+
+
+def test_lb_uses_the_server_nginx_config(cfg: dict) -> None:
+    mounts = [v for v in cfg["services"]["lb"]["volumes"] if v["target"] == "/etc/nginx/nginx.conf"]
+    assert len(mounts) == 1
+    assert mounts[0]["source"] == str(REPO / "deploy" / "server" / "nginx.conf")
+    assert mounts[0]["read_only"] is True
+
+
+def test_lb_waits_for_its_upstreams_and_has_a_healthcheck(cfg: dict) -> None:
+    lb = cfg["services"]["lb"]
+    for name in ("frontend", "minio"):
+        assert lb["depends_on"][name]["condition"] == "service_healthy"
+    assert "/lb-health" in " ".join(lb["healthcheck"]["test"])
 
 
 def test_long_running_services_restart(cfg: dict) -> None:
@@ -146,8 +167,9 @@ def test_tunnel(cfg: dict) -> None:
     assert cf["environment"]["TUNNEL_TOKEN"] == "dummy-token"
     assert cf["profiles"] == ["tunnel"]
     assert cf["command"] == ["tunnel", "--no-autoupdate", "run"]
-    assert set(cf["depends_on"]) == {"frontend", "minio"}
-    assert all(d["condition"] == "service_healthy" for d in cf["depends_on"].values())
+    # The tunnel's single route is http://lb:80.
+    assert set(cf["depends_on"]) == {"lb"}
+    assert cf["depends_on"]["lb"]["condition"] == "service_healthy"
 
 
 def test_project_name(cfg: dict) -> None:

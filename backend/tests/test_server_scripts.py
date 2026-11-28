@@ -271,23 +271,25 @@ def test_loadtest_runs_k6(run: Runner, complete_env: Path, cookies: Path) -> Non
     (k6,) = _docker_runs(run)
     assert "--network host" in k6
     assert "--ulimit nofile=65536:65536" in k6
-    assert "-e BASE_URL=http://localhost:8000" in k6
+    assert "-e BASE_URL=http://localhost:8080" in k6
     assert f"-v {REPO}/loadtest:/scripts:ro" in k6
     assert f"-v {cookies}:/cookies.json:ro" in k6
     assert "-e COOKIE_FILE=/cookies.json" in k6
     assert k6.endswith("grafana/k6:1.8.3 run /scripts/create-rate.js")
 
 
-def test_loadtest_frontend_target(run: Runner, complete_env: Path, cookies: Path) -> None:
-    run("server-loadtest.sh", "create-rate", env={"TARGET": "frontend"})
+def test_loadtest_edge_origin_target(run: Runner, complete_env: Path, cookies: Path) -> None:
+    run("server-loadtest.sh", "create-rate", env={"TARGET": "edge-origin"})
     (k6,) = _docker_runs(run)
-    assert "-e BASE_URL=http://localhost:3000" in k6
+    assert "-e BASE_URL=http://localhost:8080" in k6
 
 
-def test_loadtest_unknown_target(run: Runner, complete_env: Path, cookies: Path) -> None:
-    result = run("server-loadtest.sh", "create-rate", env={"TARGET": "web"})
+# lb and frontend no longer have host ports of their own on the server.
+@pytest.mark.parametrize("target", ["web", "lb", "frontend"])
+def test_loadtest_unknown_target(run: Runner, complete_env: Path, cookies: Path, target: str) -> None:
+    result = run("server-loadtest.sh", "create-rate", env={"TARGET": target})
     assert result.returncode == 1
-    assert "TARGET" in result.stderr
+    assert "TARGET" in result.stderr and "edge-origin" in result.stderr
     assert not _docker_runs(run)
 
 
