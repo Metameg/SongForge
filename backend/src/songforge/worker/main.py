@@ -12,6 +12,7 @@ import asyncio
 import signal
 
 from songforge.config import Settings, get_settings
+from songforge.fd_limit import raise_open_file_limit
 from songforge.logging_setup import configure_logging, get_logger
 from songforge.worker.dispatch import run_dispatch
 from songforge.worker.health import touch_heartbeat
@@ -70,7 +71,11 @@ async def run(settings: Settings, *, stop: asyncio.Event) -> None:
 
 def main() -> None:
     settings = get_settings()
+    # Lift Docker's common soft open-file limit of 1024 (see songforge/fd_limit.py); the
+    # worker holds many fixed LISTEN/NOTIFY, pool and Redis sockets plus ingest uploads.
+    limit = raise_open_file_limit()
     configure_logging(level=settings.log_level)
+    log.info("open_file_limit", soft_before=limit.before, soft=limit.after, hard=limit.hard)
 
     # Expose the worker's Prometheus REGISTRY before the loops start, so Prometheus
     # can scrape dispatch/ingest/watchdog counters + process CPU/memory (the worker

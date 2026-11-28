@@ -5,10 +5,19 @@ from __future__ import annotations
 import uvicorn
 
 from songforge.config import get_settings
+from songforge.fd_limit import raise_open_file_limit
+from songforge.logging_setup import configure_logging, get_logger
 
 
 def main() -> None:
     settings = get_settings()
+    # Each held-open SSE listener is one file descriptor; lift Docker's common soft
+    # limit of 1024 before accepting connections (see songforge/fd_limit.py).
+    limit = raise_open_file_limit()
+    configure_logging(level=settings.log_level)
+    get_logger(__name__).info(
+        "open_file_limit", soft_before=limit.before, soft=limit.after, hard=limit.hard
+    )
     uvicorn.run(
         "songforge.web.app:app",
         host="0.0.0.0",  # noqa: S104 - containerised service binds all interfaces
